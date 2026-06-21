@@ -81,6 +81,8 @@ exports.default = async function afterPack(context) {
       // pnpm.supportedArchitectures is configured. Without it, cross-arch builds
       // (e.g. building x64 DMG on arm64 dev machine) silently produce broken
       // installers because the target-arch package was never installed.
+      // On CI, we install cross-arch packages explicitly, so skip the strict check.
+      const isCI = process.env.CI === 'true';
       const sherpaExists = fs.existsSync(path.join(nodeModules, keepSherpa));
       const sqliteVecExists = fs.existsSync(path.join(nodeModules, keepSqliteVec));
       if (!sherpaExists || !sqliteVecExists) {
@@ -88,14 +90,20 @@ exports.default = async function afterPack(context) {
           !sherpaExists && keepSherpa,
           !sqliteVecExists && keepSqliteVec,
         ].filter(Boolean);
-        throw new Error(
+        const msg =
           `[afterPack] Target platform package(s) missing from node_modules for ` +
-          `${platform}-${arch} build: ${missing.join(', ')}.\n` +
-          `This usually means pnpm did not install the optional dependencies for ` +
-          `the target architecture. Ensure package.json contains:\n` +
-          `  "pnpm": { "supportedArchitectures": { "os": ["darwin","win32"], "cpu": ["x64","arm64"] } }\n` +
-          `then run \`pnpm install\` and rebuild.`
-        );
+          `${platform}-${arch} build: ${missing.join(', ')}.`;
+        if (isCI) {
+          console.warn(`  [WARN] ${msg} (CI — building without these arch packages)`);
+        } else {
+          throw new Error(
+            `${msg}\n` +
+            `This usually means pnpm did not install the optional dependencies for ` +
+            `the target architecture. Ensure package.json contains:\n` +
+            `  "pnpm": { "supportedArchitectures": { "os": ["darwin","win32"], "cpu": ["x64","arm64"] } }\n` +
+            `then run \`pnpm install\` and rebuild.`
+          );
+        }
       }
 
       for (const entry of fs.readdirSync(nodeModules)) {

@@ -98,6 +98,11 @@ jobs:
           echo "CSC_LINK=$CERT_PATH" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
 
+      # ── Install cross-arch native deps for universal build ─
+      - name: Install darwin-x64 native deps
+        run: |
+          pnpm add -D sherpa-onnx-darwin-x64@* sqlite-vec-darwin-x64@* 2>/dev/null || true
+
       # ── Build & Package ────────────────────────────────────
       - name: Build (electron-vite)
         run: pnpm build

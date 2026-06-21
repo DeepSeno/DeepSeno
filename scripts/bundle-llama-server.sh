@@ -107,7 +107,7 @@ download_windows() {
 
   # Download all three backends: CUDA 13, Vulkan, CPU
   download_windows_asset "$dest_dir" \
-    "cudart-llama-bin-win-cuda-13.3-x64.zip" \
+    "llama-${LLAMA_CPP_TAG}-bin-win-cuda-13.3-x64.zip" \
     "llama-server-cuda.exe"
   download_windows_asset "$dest_dir" \
     "llama-${LLAMA_CPP_TAG}-bin-win-vulkan-x64.zip" \
