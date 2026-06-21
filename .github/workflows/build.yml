@@ -68,12 +68,15 @@ jobs:
       # Without them the build will run unsigned — fine for CI / pre-release.
       - name: Import Apple code-signing certificate
         id: import-cert
-        if: secrets.APPLE_CERTIFICATE_BASE64 != ''
         env:
           CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'temporary-password' }}
         run: |
+          if [ -z "${CERT_BASE64}" ]; then
+            echo "Skipping — no code-signing certificate configured."
+            exit 0
+          fi
           CERT_PATH="$RUNNER_TEMP/apple-signing.p12"
           echo "$CERT_BASE64" | base64 -d > "$CERT_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
