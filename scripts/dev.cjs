@@ -27,6 +27,7 @@ if (process.platform === 'win32') {
 const child = spawn('npx', ['electron-vite', 'dev'], {
   stdio: 'inherit',
   shell: true,
+  env: { ...process.env, NODE_OPTIONS: '--no-deprecation' },
 });
 
 child.on('exit', (code) => process.exit(code ?? 0));

@@ -824,13 +824,15 @@ export class LanServer {
   getLocalIP(): string {
     const interfaces = os.networkInterfaces();
     // Prefer physical adapters (en0/en1 on macOS, eth/wlan on Linux, Ethernet/Wi-Fi on Windows)
-    // over virtual interfaces (utun, tun, vEthernet, vmnet, etc.)
+    // over virtual interfaces (utun, tun, vEthernet, vmnet, etc.).
     const physicalPrefixes = ['en', 'eth', 'wlan', 'Ethernet', 'Wi-Fi'];
     let fallback: string | null = null;
 
     for (const name of Object.keys(interfaces)) {
       for (const iface of interfaces[name] || []) {
         if (iface.family !== 'IPv4' || iface.internal) continue;
+        // Skip link-local addresses (169.254.x.x) — useless for device discovery
+        if (iface.address.startsWith('169.254.')) continue;
         const isPhysical = physicalPrefixes.some((p) => name.startsWith(p));
         if (isPhysical) return iface.address;
         if (!fallback) fallback = iface.address;
