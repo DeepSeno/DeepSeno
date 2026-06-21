@@ -105,10 +105,34 @@ jobs:
           echo "CSC_LINK=$CERT_PATH" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
 
-      # ── Install cross-arch native deps for universal build ─
+      # ── Install cross-arch native deps for x64 + universal build ─
       - name: Install darwin-x64 native deps
         run: |
-          pnpm add -D sherpa-onnx-darwin-x64@* sqlite-vec-darwin-x64@* 2>/dev/null || true
+          set -e
+          SHERPA_VER=$(node -e "console.log(require('sherpa-onnx-node/package.json').version)")
+          SQLITE_VEC_VER=$(node -e "console.log(require('sqlite-vec/package.json').version)")
+          echo "sherpa-onnx-node: ${SHERPA_VER}, sqlite-vec: ${SQLITE_VEC_VER}"
+
+          TMPDIR=$(mktemp -d)
+          trap "rm -rf $TMPDIR" EXIT
+
+          # sherpa-onnx-darwin-x64
+          if [ ! -d node_modules/sherpa-onnx-darwin-x64 ]; then
+            npm pack "sherpa-onnx-darwin-x64@${SHERPA_VER}" --pack-destination "$TMPDIR" 2>/dev/null || \
+              npm pack "sherpa-onnx-darwin-x64@^${SHERPA_VER}" --pack-destination "$TMPDIR"
+            tar -xzf "$TMPDIR"/sherpa-onnx-darwin-x64-*.tgz -C "$TMPDIR/sherpa"
+            mv "$TMPDIR/sherpa/package" node_modules/sherpa-onnx-darwin-x64
+            echo "✅ sherpa-onnx-darwin-x64 installed"
+          fi
+
+          # sqlite-vec-darwin-x64
+          if [ ! -d node_modules/sqlite-vec-darwin-x64 ]; then
+            npm pack "sqlite-vec-darwin-x64@${SQLITE_VEC_VER}" --pack-destination "$TMPDIR" 2>/dev/null || \
+              npm pack "sqlite-vec-darwin-x64@${SQLITE_VEC_VER}" --pack-destination "$TMPDIR"
+            tar -xzf "$TMPDIR"/sqlite-vec-darwin-x64-*.tgz -C "$TMPDIR/sqlite"
+            mv "$TMPDIR/sqlite/package" node_modules/sqlite-vec-darwin-x64
+            echo "✅ sqlite-vec-darwin-x64 installed"
+          fi
 
       # ── Build & Package ────────────────────────────────────
       - name: Build (electron-vite)
