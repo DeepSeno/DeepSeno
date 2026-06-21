@@ -58,12 +58,17 @@ exports.default = async function afterPack(context) {
 
   console.log(`[afterPack] Stripping build artifacts from: ${unpackedDir}`);
   let totalSaved = 0;
+  let bundleModified = false;
 
   // ── 1. Strip non-target sherpa-onnx / sqlite-vec platform packages ──
   // asarUnpack globs `sherpa-onnx-*/**` and `sqlite-vec-*/**` pull in every
   // OS/arch variant. We keep only the current build target's package, and
   // FAIL LOUDLY if it's missing — otherwise we'd ship a DMG with no native
   // binary and the app would crash on first transcription.
+  //
+  // CRITICAL: Modifying the .app bundle invalidates the ad-hoc signature.
+  // On unsigned CI builds (no APPLE_CERTIFICATE_BASE64), we must re-sign
+  // with ad-hoc identity afterwards so macOS doesn't flag the app as "damaged".
   {
     const nodeModules = path.join(unpackedDir, 'node_modules');
     if (fs.existsSync(nodeModules)) {
@@ -115,6 +120,7 @@ exports.default = async function afterPack(context) {
           if (saved > 0) {
             console.log(`  [strip-arch] Removed ${entry} (${formatMB(saved)} MB)`);
             totalSaved += saved;
+            bundleModified = true;
           }
         }
       }
@@ -161,4 +167,19 @@ exports.default = async function afterPack(context) {
   }
 
   console.log(`[afterPack] Total saved: ${formatMB(totalSaved)} MB`);
+
+  // Re-sign with ad-hoc identity on macOS unsigned builds.
+  // Modifying the .app bundle invalidates electron-builder's ad-hoc signature,
+  // causing macOS to show "damaged" error. Re-signing with identity "-" restores
+  // the ad-hoc signature so the app can be opened normally.
+  if (bundleModified && platform === 'darwin' && !process.env.CSC_LINK) {
+    const appPath = path.join(appOutDir, `${productFilename}.app`);
+    const { execSync } = require('child_process');
+    try {
+      execSync(`codesign --force --deep --sign - "${appPath}"`, { stdio: 'pipe' });
+      console.log(`  [re-sign] Restored ad-hoc signature on ${productFilename}.app`);
+    } catch (e) {
+      console.warn(`  [re-sign] Failed to ad-hoc re-sign: ${e.message}`);
+    }
+  }
 };
