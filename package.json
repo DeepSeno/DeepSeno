@@ -140,6 +140,7 @@
     },
     "mac": {
       "icon": "resources/icon.icns",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",

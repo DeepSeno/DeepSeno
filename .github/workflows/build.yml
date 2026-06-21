@@ -136,6 +136,10 @@ jobs:
             echo "✅ sqlite-vec-darwin-x64 installed"
           fi
 
+      # ── Set version from workflow input ──────────────────────
+      - name: Set version
+        run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+
       # ── Build & Package ────────────────────────────────────
       - name: Build (electron-vite)
         run: pnpm build
@@ -250,6 +254,10 @@ jobs:
           if (ok) console.log('All Windows deps present.');
           else process.exit(1);
           "
+
+      # ── Set version from workflow input ──────────────────────
+      - name: Set version
+        run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
 
       # ── Build & Package ────────────────────────────────────
       - name: Build (electron-vite)
