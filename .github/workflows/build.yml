@@ -48,11 +48,17 @@ jobs:
       # Each script is idempotent — already-present files are skipped.
       # --all downloads for both darwin-arm64 and darwin-x64 (needed for
       # the universal macOS build that packages both architectures).
-      - name: Bundle FFmpeg (darwin-arm64 + darwin-x64)
-        run: bash scripts/bundle-ffmpeg.sh --all
+      - name: Bundle FFmpeg (darwin-arm64)
+        run: bash scripts/bundle-ffmpeg.sh --platform darwin-arm64
 
-      - name: Bundle llama-server (darwin-arm64 + darwin-x64)
-        run: bash scripts/bundle-llama-server.sh --all
+      - name: Bundle FFmpeg (darwin-x64)
+        run: bash scripts/bundle-ffmpeg.sh --platform darwin-x64
+
+      - name: Bundle llama-server (darwin-arm64)
+        run: bash scripts/bundle-llama-server.sh --platform darwin-arm64
+
+      - name: Bundle llama-server (darwin-x64)
+        run: bash scripts/bundle-llama-server.sh --platform darwin-x64
 
       - name: Bundle sherpa-models
         run: bash scripts/bundle-sherpa-models.sh
