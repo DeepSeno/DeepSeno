@@ -110,7 +110,7 @@ jobs:
         run: |
           set -e
           SHERPA_VER=$(node -e "console.log(require('sherpa-onnx-node/package.json').version)")
-          SQLITE_VEC_VER=$(node -e "console.log(require('sqlite-vec/package.json').version)")
+          SQLITE_VEC_VER=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/sqlite-vec/package.json','utf8')).version")
           echo "sherpa-onnx-node: ${SHERPA_VER}, sqlite-vec: ${SQLITE_VEC_VER}"
 
           TMPDIR=$(mktemp -d)
