@@ -1,0 +1,7 @@
+allowBuilds:
+  '@larksuite/cli': true
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  protobufjs: true
+onlyBuiltDependencies: electron

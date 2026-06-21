@@ -1,0 +1,12 @@
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    include: [
+      'src/**/__tests__/**/*.test.ts',
+      'tests/**/*.test.ts',
+      'scripts/**/__tests__/**/*.test.mjs',
+    ],
+    globals: false,
+  },
+});

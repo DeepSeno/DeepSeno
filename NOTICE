@@ -1,0 +1,61 @@
+DeepSeno (铸声)
+Copyright (c) 2026 The DeepSeno Contributors
+
+This product includes software developed by the DeepSeno project and its
+contributors. The source code is licensed under the MIT License
+(see the LICENSE file).
+
+------------------------------------------------------------------------------
+TRADEMARKS / 商标声明
+------------------------------------------------------------------------------
+
+EN
+--
+The names "DeepSeno" and "铸声", the DeepSeno logos, and other DeepSeno brand
+features (collectively, the "Marks") are trademarks and brand identifiers of
+the DeepSeno project. The project reserves all rights in the Marks under
+applicable trademark, copyright, and anti-unfair-competition law.
+
+The MIT License granted for the source code does NOT grant any right or
+license to use the Marks. In particular:
+
+  • You MAY use the Marks in a nominative, factual way to state that your work
+    is built on, compatible with, or derived from DeepSeno (for example,
+    "based on DeepSeno" or "a fork of DeepSeno").
+
+  • You MAY NOT use the Marks as the name of your own product or service, in a
+    way that suggests endorsement, sponsorship, or affiliation, or in any way
+    likely to cause confusion as to the origin of your software.
+
+  • If you distribute a modified version, you MUST use a different name and
+    logo for the distributed product, and remove the DeepSeno Marks from the
+    user-facing branding, so users are not misled into thinking it is the
+    official DeepSeno software.
+
+  • The Marks, logos, and brand assets are not covered by the MIT License
+    and are not redistributed under it.
+
+For permission to use the Marks beyond the above, open an issue at:
+https://github.com/deepseno/deepseno/issues
+
+中文
+----
+"DeepSeno"、"铸声"名称、DeepSeno 标识（Logo）及其他 DeepSeno 品牌标志（统称"商标"）
+为 DeepSeno 项目主张的商标与品牌标识。项目方依商标法、著作权法及反不正当竞争法等适用
+法律，保留对上述商标的全部权利。
+
+源代码采用 MIT License 授权，但该授权**不**包含对上述商标的任何使用许可。
+具体而言：
+
+  • 你**可以**以客观、指明来源的方式使用这些商标，用于说明你的作品基于、兼容于
+    或派生自 DeepSeno（例如"基于 DeepSeno""DeepSeno 的一个分支"）。
+
+  • 你**不得**将这些商标用作你自己产品/服务的名称，不得以暗示获得背书、赞助或
+    关联的方式使用，也不得以任何可能造成软件来源混淆的方式使用。
+
+  • 如果你分发修改后的版本，**必须**为分发的产品改用不同的名称和 Logo，并移除
+    用户可见界面中的 DeepSeno 商标，以免用户误认为它是官方 DeepSeno 软件。
+
+  • 商标、Logo 及品牌素材不在 MIT License 的授权范围内，不随之再分发。
+
+如需在上述范围之外使用这些商标，请在 GitHub Issues 中提出。

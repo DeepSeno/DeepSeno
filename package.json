@@ -1,0 +1,224 @@
+{
+  "name": "deepseno",
+  "version": "2.24.2",
+  "description": "DeepSeno build your brain",
+  "main": "./dist/main/index.js",
+  "scripts": {
+    "dev": "node scripts/dev.cjs",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "build:win": "electron-vite build && pnpm exec electron-rebuild -f -w sherpa-onnx-node && electron-builder --win --x64",
+    "build:mac": "electron-vite build && pnpm exec electron-rebuild -f -w sherpa-onnx-node && electron-builder --mac --arm64 --x64",
+    "install:deps": "bash scripts/install-deps.sh",
+    "install:deps:all": "bash scripts/install-deps.sh --all",
+    "bundle:ffmpeg": "bash scripts/bundle-ffmpeg.sh",
+    "bundle:ffmpeg:all": "bash scripts/bundle-ffmpeg.sh --all",
+    "bundle:sherpa-models": "bash scripts/bundle-sherpa-models.sh",
+    "bundle:llama-server": "bash scripts/bundle-llama-server.sh",
+    "bundle:llama-server:all": "bash scripts/bundle-llama-server.sh --all",
+    "bundle:win-tools": "bash scripts/bundle-win-tools.sh",
+    "prebuild:win": "node -e \"const f=require('fs');const checks=[['resources/ffmpeg/win32-x64/ffmpeg.exe','Run: bash scripts/bundle-ffmpeg.sh --platform win32-x64'],['scripts/getfg.exe','Run: bash scripts/bundle-win-tools.sh'],['scripts/setfg.exe','Run: bash scripts/bundle-win-tools.sh']];let ok=true;for(const[path,msg]of checks){if(!f.existsSync(path)){console.error(path+' not found. '+msg);ok=false}}if(ok)console.log('All Windows deps present.')else process.exit(1)\"",
+    "release:mac": "bash scripts/release.sh mac",
+    "release:win": "bash scripts/release.sh win",
+    "release:all": "bash scripts/release.sh all",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@tailwindcss/typography": "^0.5.20",
+    "@tailwindcss/vite": "^4.3.1",
+    "@types/d3-drag": "^3.0.7",
+    "@types/d3-force": "^3.0.10",
+    "@types/d3-selection": "^3.0.11",
+    "@types/d3-zoom": "^3.0.8",
+    "@types/express": "^5.0.6",
+    "@types/fluent-ffmpeg": "^2.1.28",
+    "@types/multer": "^2.1.0",
+    "@types/nodemailer": "^8.0.0",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/tar-stream": "^3.1.4",
+    "@types/unbzip2-stream": "^1.4.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^42.4.1",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^6.0.0",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.9"
+  },
+  "dependencies": {
+    "@larksuite/cli": "^1.0.55",
+    "@larksuiteoapi/node-sdk": "^1.67.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "bonjour-service": "^1.4.1",
+    "chokidar": "^5.0.0",
+    "cron-parser": "^5.5.0",
+    "d3-drag": "^3.0.0",
+    "d3-force": "^3.0.0",
+    "d3-selection": "^3.0.0",
+    "d3-zoom": "^3.0.0",
+    "docx": "^9.7.1",
+    "electron-updater": "^6.8.9",
+    "express": "^5.2.1",
+    "fluent-ffmpeg": "^2.1.3",
+    "lucide-react": "^1.0.0",
+    "mammoth": "^1.12.0",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.0",
+    "npm": "^11.17.0",
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.19.0",
+    "pptxgenjs": "^4.0.1",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.18.0",
+    "remark-gfm": "^4.0.1",
+    "selfsigned": "2.4.1",
+    "sherpa-onnx-node": "^1.13.3",
+    "sqlite-vec": "^0.1.9",
+    "tar-stream": "^3.2.0",
+    "unbzip2-stream": "^1.4.3",
+    "ws": "^8.21.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "sherpa-onnx-node"
+    ],
+    "supportedArchitectures": {
+      "os": [
+        "darwin",
+        "win32"
+      ],
+      "cpu": [
+        "x64",
+        "arm64"
+      ]
+    }
+  },
+  "build": {
+    "appId": "com.deepseno.app",
+    "productName": "DeepSeno",
+    "afterPack": "./scripts/after-pack.js",
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!node_modules/**/README*",
+      "!node_modules/**/CHANGELOG*",
+      "!node_modules/**/test/**",
+      "!node_modules/**/tests/**",
+      "!node_modules/**/*.md",
+      "!node_modules/**/*.ts",
+      "!node_modules/**/*.map"
+    ],
+    "directories": {
+      "output": "out"
+    },
+    "win": {
+      "icon": "resources/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "icon": "resources/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": false
+    },
+    "asarUnpack": [
+      "node_modules/sherpa-onnx-node/**",
+      "node_modules/sherpa-onnx-*/**",
+      "node_modules/sqlite-vec/**",
+      "node_modules/sqlite-vec-*/**",
+      "node_modules/@larksuite/cli/**"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://your-cdn.example.com/releases"
+    },
+    "extraResources": [
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      },
+      {
+        "from": "scripts/setfg.exe",
+        "to": "scripts/setfg.exe",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "scripts/getfg.exe",
+        "to": "scripts/getfg.exe",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/sherpa-models",
+        "to": "sherpa-models",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/llama-server",
+        "to": "llama-server",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  }
+}

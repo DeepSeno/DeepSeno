@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeno 铸声 — 不只是记录，更主动帮你跟进</title>
+  <meta name="description" content="DeepSeno: 100% 本地运行、零 AI 成本的智能语音助手。自动转写、主动催办、越用越懂你。数据永不离开你的电脑。" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+            sans: ['Noto Sans SC', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              100: '#d1fae5',
+              200: '#a7f3d0',
+              300: '#6ee7b7',
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Noto Sans SC', 'JetBrains Mono', system-ui, sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .gradient-text {
+      background: linear-gradient(135deg, #10b981 0%, #34d399 50%, #6ee7b7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .card-glow:hover {
+      box-shadow: 0 0 30px rgba(16, 185, 129, 0.08);
+    }
+    .grid-bg {
+      background-image:
+        linear-gradient(rgba(63, 63, 70, 0.1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(63, 63, 70, 0.1) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    @keyframes pulse-slow {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+    .pulse-dot { animation: pulse-slow 2s ease-in-out infinite; }
+    .comparison-highlight { background: rgba(16, 185, 129, 0.08); }
+    ::selection { background: rgba(16, 185, 129, 0.3); }
+  </style>
+</head>
+<body class="bg-[#09090b] text-zinc-100 antialiased">
+
+  <!-- ============================================================ -->
+  <!-- NAV -->
+  <!-- ============================================================ -->
+  <nav class="fixed top-0 inset-x-0 z-50 border-b border-zinc-800/60 bg-[#09090b]/80 backdrop-blur-xl">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-2.5 group">
+        <div class="w-7 h-7 rounded bg-brand-500/20 border border-brand-500/40 flex items-center justify-center">
+          <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+          </svg>
+        </div>
+        <span class="font-mono text-sm font-semibold text-zinc-200 group-hover:text-white transition-colors">deepseno</span>
+        <span class="font-mono text-xs text-zinc-600">v1.0</span>
+      </a>
+      <div class="hidden md:flex items-center gap-6 font-mono text-xs text-zinc-500">
+        <a href="#agent-demo" class="hover:text-zinc-200 transition-colors">agent_demo</a>
+        <a href="#features" class="hover:text-zinc-200 transition-colors">features</a>
+        <a href="#privacy" class="hover:text-zinc-200 transition-colors">privacy</a>
+        <a href="#pricing" class="hover:text-zinc-200 transition-colors">pricing</a>
+        <a href="#faq" class="hover:text-zinc-200 transition-colors">faq</a>
+      </div>
+      <a href="#pricing" class="font-mono text-xs px-4 py-1.5 bg-brand-500/10 text-brand-400 border border-brand-500/30 rounded hover:bg-brand-500/20 transition-all">
+        free_trial
+      </a>
+    </div>
+  </nav>
+
+  <!-- ============================================================ -->
+  <!-- HERO -->
+  <!-- ============================================================ -->
+  <section class="relative min-h-screen flex items-center justify-center pt-14 overflow-hidden">
+    <!-- Background grid -->
+    <div class="absolute inset-0 grid-bg opacity-40"></div>
+    <!-- Radial glow -->
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-brand-500/5 rounded-full blur-3xl"></div>
+
+    <div class="relative z-10 max-w-4xl mx-auto px-6 text-center">
+      <!-- Status badge -->
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-zinc-800 bg-zinc-900/80 mb-8">
+        <span class="w-1.5 h-1.5 rounded-full bg-brand-400 pulse-dot"></span>
+        <span class="font-mono text-[11px] text-zinc-400">SYSTEM_ONLINE &mdash; 100% LOCAL &middot; ZERO AI COST &middot; ABSOLUTE PRIVACY</span>
+      </div>
+
+      <!-- Main heading -->
+      <h1 class="text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight leading-tight mb-4">
+        不只是记录<br class="sm:hidden" /><span class="gradient-text">更主动帮你跟进</span>
+      </h1>
+      <p class="font-mono text-sm sm:text-base text-zinc-500 max-w-2xl mx-auto mb-3">
+        The AI Secretary That Acts Before You Ask
+      </p>
+      <p class="text-base sm:text-lg text-zinc-400 max-w-xl mx-auto mb-10 leading-relaxed">
+        自动转写、智能提取、主动催办、越用越懂你<br />
+        <span class="font-mono text-sm text-zinc-500">100% 本地运行 &middot; 零 AI 成本 &middot; 数据不出本机</span>
+      </p>
+
+      <!-- CTA buttons -->
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-3">
+        <a href="#pricing" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3 bg-brand-500 text-black font-mono text-sm font-semibold rounded hover:bg-brand-400 transition-all">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+          免费试用 7 天
+        </a>
+        <a href="#agent-demo" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-zinc-800 text-zinc-200 font-mono text-sm font-semibold rounded border border-zinc-700 hover:bg-zinc-700 hover:border-zinc-600 transition-all">
+          看看它怎么工作
+        </a>
+      </div>
+
+      <!-- Terminal preview hint -->
+      <div class="mt-16 max-w-lg mx-auto">
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+          <div class="flex items-center gap-1.5 px-4 py-2.5 border-b border-zinc-800">
+            <span class="w-2.5 h-2.5 rounded-full bg-zinc-700"></span>
+            <span class="w-2.5 h-2.5 rounded-full bg-zinc-700"></span>
+            <span class="w-2.5 h-2.5 rounded-full bg-zinc-700"></span>
+            <span class="font-mono text-[10px] text-zinc-600 ml-2">deepseno &mdash; pipeline</span>
+          </div>
+          <div class="px-4 py-3 font-mono text-xs text-zinc-500 space-y-1.5 text-left">
+            <p><span class="text-zinc-600">$</span> <span class="text-zinc-300">deepseno process</span> meeting-2026-02-25.wav</p>
+            <p class="text-brand-400/80">[ASR] &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;SenseVoice transcription &mdash; 2847 chars</p>
+            <p class="text-brand-400/80">[DIARIZE] &nbsp;3 speakers identified</p>
+            <p class="text-brand-400/80">[LLM] &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Meeting notes &mdash; 5 action items extracted</p>
+            <p class="text-brand-400/80">[MEMORY] &nbsp;&nbsp;2 new facts learned, 1 conflict resolved</p>
+            <p class="text-yellow-400/80">[INSIGHT] &nbsp;你本周提到张总 7 次，上次沟通是 3 周前</p>
+            <p class="text-yellow-400/80">[REMIND] &nbsp;&nbsp;明天是给李总回复方案的截止日</p>
+            <p class="text-zinc-400">Done in 38s &rarr; 飞书 + 微信已推送</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- PRODUCT SHOWCASE — macOS-style UI Mockup -->
+  <!-- ============================================================ -->
+  <section class="py-24 sm:py-32 border-t border-zinc-800/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-12">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// product_preview</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">一目了然的工作台</h2>
+        <p class="text-zinc-500 max-w-lg mx-auto">Your voice data command center. Every conversation, structured and searchable.</p>
+      </div>
+
+      <!-- macOS window frame -->
+      <div class="rounded-xl border border-zinc-700/60 bg-[#111113] overflow-hidden shadow-2xl shadow-black/40">
+        <!-- Title bar -->
+        <div class="flex items-center gap-2 px-4 py-3 bg-zinc-800/80 border-b border-zinc-700/60">
+          <span class="w-3 h-3 rounded-full bg-[#ff5f57]"></span>
+          <span class="w-3 h-3 rounded-full bg-[#febc2e]"></span>
+          <span class="w-3 h-3 rounded-full bg-[#28c840]"></span>
+          <span class="font-mono text-[11px] text-zinc-500 ml-3">DeepSeno v1.0</span>
+        </div>
+
+        <!-- App body -->
+        <div class="flex min-h-[420px] sm:min-h-[480px]">
+          <!-- Sidebar -->
+          <div class="hidden sm:flex flex-col w-48 border-r border-zinc-800/80 bg-[#0c0c0e] py-4 px-3 gap-0.5 shrink-0">
+            <div class="flex items-center gap-2 px-2.5 py-2 rounded bg-brand-500/10 text-brand-400 mb-2">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25a2.25 2.25 0 01-2.25-2.25v-2.25z" /></svg>
+              <span class="font-mono text-xs">Dashboard</span>
+            </div>
+            <div class="flex items-center gap-2 px-2.5 py-2 text-zinc-500 hover:text-zinc-300">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg>
+              <span class="font-mono text-xs">Recordings</span>
+            </div>
+            <div class="flex items-center gap-2 px-2.5 py-2 text-zinc-500 hover:text-zinc-300">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+              <span class="font-mono text-xs">Transcripts</span>
+            </div>
+            <div class="flex items-center gap-2 px-2.5 py-2 text-zinc-500 hover:text-zinc-300">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
+              <span class="font-mono text-xs">AI Assistant</span>
+            </div>
+            <div class="flex items-center gap-2 px-2.5 py-2 text-zinc-500 hover:text-zinc-300">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>
+              <span class="font-mono text-xs">Speakers</span>
+            </div>
+            <div class="flex items-center gap-2 px-2.5 py-2 text-zinc-500 hover:text-zinc-300">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" /></svg>
+              <span class="font-mono text-xs">Items</span>
+            </div>
+            <!-- Spacer -->
+            <div class="flex-1"></div>
+            <!-- Memory stats -->
+            <div class="mt-4 px-2.5 py-2.5 rounded bg-zinc-900/60 border border-zinc-800/60">
+              <p class="font-mono text-[10px] text-zinc-600 mb-1.5">MEMORY</p>
+              <div class="space-y-1 font-mono text-[10px]">
+                <div class="flex justify-between"><span class="text-zinc-500">Core</span><span class="text-brand-400">23</span></div>
+                <div class="flex justify-between"><span class="text-zinc-500">Active</span><span class="text-zinc-400">156</span></div>
+                <div class="flex justify-between"><span class="text-zinc-500">Archive</span><span class="text-zinc-600">892</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Main content area -->
+          <div class="flex-1 p-4 sm:p-6 space-y-4 overflow-hidden">
+            <!-- Stats row -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-px bg-zinc-800/50 rounded-lg overflow-hidden">
+              <div class="bg-zinc-900/60 p-3 sm:p-4">
+                <p class="font-mono text-[10px] text-zinc-600">RECORDINGS</p>
+                <p class="font-mono text-lg sm:text-xl font-bold text-zinc-200">128</p>
+                <p class="font-mono text-[10px] text-brand-400">+3 today</p>
+              </div>
+              <div class="bg-zinc-900/60 p-3 sm:p-4">
+                <p class="font-mono text-[10px] text-zinc-600">TOTAL HOURS</p>
+                <p class="font-mono text-lg sm:text-xl font-bold text-zinc-200">86.4h</p>
+                <p class="font-mono text-[10px] text-zinc-500">2h17min today</p>
+              </div>
+              <div class="bg-zinc-900/60 p-3 sm:p-4">
+                <p class="font-mono text-[10px] text-zinc-600">ACTION ITEMS</p>
+                <p class="font-mono text-lg sm:text-xl font-bold text-yellow-400">7</p>
+                <p class="font-mono text-[10px] text-red-400">2 overdue</p>
+              </div>
+              <div class="bg-zinc-900/60 p-3 sm:p-4">
+                <p class="font-mono text-[10px] text-zinc-600">SPEAKERS</p>
+                <p class="font-mono text-lg sm:text-xl font-bold text-zinc-200">24</p>
+                <p class="font-mono text-[10px] text-zinc-500">4 new this week</p>
+              </div>
+            </div>
+
+            <!-- Two columns -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <!-- Recent meetings -->
+              <div class="space-y-2">
+                <p class="font-mono text-[10px] text-zinc-600 tracking-widest">RECENT MEETINGS</p>
+                <div class="rounded border border-zinc-800/60 bg-zinc-900/40 p-3">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="font-mono text-xs text-zinc-200">供应链调价讨论</span>
+                    <span class="font-mono text-[10px] text-zinc-600">42min</span>
+                  </div>
+                  <p class="text-[11px] text-zinc-500 leading-relaxed mb-2">与张总讨论 Q2 供应商调价方案，确认了 3 家优先供应商的谈判策略...</p>
+                  <div class="flex gap-1.5">
+                    <span class="font-mono text-[9px] px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">3 action items</span>
+                    <span class="font-mono text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">2 speakers</span>
+                  </div>
+                </div>
+                <div class="rounded border border-zinc-800/60 bg-zinc-900/40 p-3">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="font-mono text-xs text-zinc-200">北美渠道周会</span>
+                    <span class="font-mono text-[10px] text-zinc-600">1h08min</span>
+                  </div>
+                  <p class="text-[11px] text-zinc-500 leading-relaxed mb-2">Sarah 汇报 Q1 北美渠道进展，目标调整为 300 万...</p>
+                  <div class="flex gap-1.5">
+                    <span class="font-mono text-[9px] px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">5 action items</span>
+                    <span class="font-mono text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">4 speakers</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- AI Assistant -->
+              <div class="space-y-2">
+                <p class="font-mono text-[10px] text-zinc-600 tracking-widest">AI ASSISTANT</p>
+                <div class="rounded border border-zinc-800/60 bg-zinc-900/40 p-3 space-y-3">
+                  <!-- User question -->
+                  <div class="flex justify-end">
+                    <div class="bg-brand-500/10 border border-brand-500/20 rounded-lg rounded-br-sm px-3 py-2 max-w-[85%]">
+                      <p class="text-[11px] text-zinc-200">上周和张总聊了什么？</p>
+                    </div>
+                  </div>
+                  <!-- AI answer -->
+                  <div class="flex justify-start">
+                    <div class="bg-zinc-800/60 border border-zinc-700/40 rounded-lg rounded-bl-sm px-3 py-2 max-w-[85%]">
+                      <p class="text-[11px] text-zinc-300 leading-relaxed">上周与张总共 2 次通话（周二、周四），主要讨论：</p>
+                      <ul class="text-[11px] text-zinc-400 mt-1 space-y-0.5 list-disc list-inside">
+                        <li>供应商 A 账期调整为 Net 45</li>
+                        <li>新仓库 3/15 验收时间表</li>
+                        <li>Q2 备货计划初稿</li>
+                      </ul>
+                      <p class="font-mono text-[9px] text-zinc-600 mt-2">Based on recordings #125, #127</p>
+                    </div>
+                  </div>
+                  <!-- Input -->
+                  <div class="flex items-center gap-2 px-3 py-2 rounded border border-zinc-700/40 bg-zinc-800/30">
+                    <span class="text-[11px] text-zinc-600">Ask your AI secretary...</span>
+                    <svg class="w-3.5 h-3.5 text-zinc-600 ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- AGENT DEMO — Chat Bubble Showcase -->
+  <!-- ============================================================ -->
+  <section id="agent-demo" class="py-24 sm:py-32 border-t border-zinc-800/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// agent_in_action</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">AI 秘书，主动汇报</h2>
+        <p class="text-zinc-500 max-w-lg mx-auto">Not waiting for you to ask. Delivering insights when they matter.</p>
+      </div>
+
+      <div class="max-w-2xl mx-auto space-y-4">
+        <!-- Daily Digest -->
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+          <div class="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800/60 bg-zinc-900/80">
+            <div class="w-5 h-5 rounded bg-brand-500/20 border border-brand-500/40 flex items-center justify-center">
+              <svg class="w-3 h-3 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg>
+            </div>
+            <span class="font-mono text-xs text-zinc-400">DeepSeno</span>
+            <span class="font-mono text-[10px] text-zinc-600 ml-auto">20:00 &middot; 飞书</span>
+          </div>
+          <div class="px-4 py-4 text-sm text-zinc-300 space-y-2.5">
+            <p class="font-semibold text-zinc-200">今日复盘 &mdash; 3 场会议，2h17min</p>
+            <div class="space-y-1.5 text-zinc-400 text-xs leading-relaxed">
+              <p>&bull; 与<span class="text-brand-400">张总</span>讨论供应链调价方案 &mdash; <span class="text-yellow-400/80">待定，需周五前确认</span></p>
+              <p>&bull; 提到 <span class="text-brand-400">Sarah</span> 3 次 &mdash; 上次沟通是 2 周前，建议跟进</p>
+              <p>&bull; 新增待办：<span class="text-zinc-200">周五前给李总回复方案</span> <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20">紧急</span></p>
+              <p>&bull; 今日新记忆：Q1 目标从 500 万调整为 300 万 <span class="font-mono text-[10px] text-zinc-600">(已更新)</span></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Todo Reminder -->
+        <div class="rounded-lg border border-yellow-500/20 bg-yellow-500/[0.03] overflow-hidden">
+          <div class="flex items-center gap-2 px-4 py-2.5 border-b border-yellow-500/10">
+            <div class="w-5 h-5 rounded bg-yellow-500/20 border border-yellow-500/30 flex items-center justify-center">
+              <svg class="w-3 h-3 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            </div>
+            <span class="font-mono text-xs text-zinc-400">待办提醒</span>
+            <span class="font-mono text-[10px] text-zinc-600 ml-auto">09:00 &middot; 微信</span>
+          </div>
+          <div class="px-4 py-4 text-sm text-zinc-300">
+            <p class="text-zinc-400 text-xs leading-relaxed">你昨天说 <span class="text-zinc-200">"周五前给李总回复方案"</span>，今天就是截止日。</p>
+            <p class="text-zinc-500 text-xs mt-2">相关会议记录：2/24 与张总供应链讨论 <span class="font-mono text-[10px] text-brand-400 cursor-pointer hover:underline">[查看]</span></p>
+          </div>
+        </div>
+
+        <!-- Weekly Insight -->
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+          <div class="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800/60 bg-zinc-900/80">
+            <div class="w-5 h-5 rounded bg-purple-500/20 border border-purple-500/30 flex items-center justify-center">
+              <svg class="w-3 h-3 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5" /></svg>
+            </div>
+            <span class="font-mono text-xs text-zinc-400">周度洞察</span>
+            <span class="font-mono text-[10px] text-zinc-600 ml-auto">周五 17:00 &middot; 飞书</span>
+          </div>
+          <div class="px-4 py-4 text-sm text-zinc-300 space-y-2.5">
+            <p class="font-semibold text-zinc-200">本周摘要 &mdash; 12 场对话，8h42min</p>
+            <div class="space-y-1.5 text-zinc-400 text-xs leading-relaxed">
+              <p>&bull; 高频话题：供应链（提及 23 次） &gt; 北美渠道（15 次） &gt; 新仓库（8 次）</p>
+              <p>&bull; 本周新增 4 位联系人，与张总通话频次比上周 +40%</p>
+              <p>&bull; 3 项待办已完成，2 项逾期，建议优先处理北美渠道对接</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- CATEGORY REDEFINITION — Transcription Tool vs AI Secretary -->
+  <!-- ============================================================ -->
+  <section class="py-24 sm:py-32 border-t border-zinc-800/60">
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// new_category</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">这不是一个更好的转写工具</h2>
+        <p class="text-zinc-500 max-w-lg mx-auto">Transcription is just the beginning. The real value starts after.</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-px bg-zinc-800/50 rounded-lg overflow-hidden">
+        <!-- Left: Transcription tools stop here -->
+        <div class="bg-[#0c0c0e] p-6 sm:p-8">
+          <div class="flex items-center gap-2 mb-6">
+            <span class="w-2 h-2 rounded-full bg-zinc-500"></span>
+            <span class="font-mono text-xs text-zinc-400">转写工具到此为止</span>
+          </div>
+          <div class="space-y-4">
+            <div class="flex items-start gap-3">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              <p class="text-sm text-zinc-500">语音转文字</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              <p class="text-sm text-zinc-500">生成会议摘要</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              <p class="text-sm text-zinc-500">识别说话人</p>
+            </div>
+            <div class="h-px bg-zinc-800 my-2"></div>
+            <div class="flex items-start gap-3">
+              <span class="text-zinc-700 mt-0.5">&#10007;</span>
+              <p class="text-sm text-zinc-600">录完即止，没有后续动作</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-zinc-700 mt-0.5">&#10007;</span>
+              <p class="text-sm text-zinc-600">每段录音独立，无法关联</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-zinc-700 mt-0.5">&#10007;</span>
+              <p class="text-sm text-zinc-600">不记得上次聊了什么</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: DeepSeno starts here -->
+        <div class="bg-[#0c0c0e] p-6 sm:p-8">
+          <div class="flex items-center gap-2 mb-6">
+            <span class="w-2 h-2 rounded-full bg-brand-400"></span>
+            <span class="font-mono text-xs text-brand-400">铸声从这里开始</span>
+          </div>
+          <div class="space-y-4">
+            <div class="flex items-start gap-3">
+              <span class="text-brand-400 mt-0.5">&#10003;</span>
+              <p class="text-sm text-zinc-300">转写、摘要、说话人识别 <span class="text-zinc-600">&mdash; 基础能力，当然也有</span></p>
+            </div>
+            <div class="h-px bg-brand-500/20 my-2"></div>
+            <div class="flex items-start gap-3">
+              <span class="text-brand-400 mt-0.5">+</span>
+              <p class="text-sm text-zinc-200">跨录音长期记忆 &mdash; 记住每一次对话中的关键信息</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-brand-400 mt-0.5">+</span>
+              <p class="text-sm text-zinc-200">主动待办催促 &mdash; 到期自动提醒，不靠你翻笔记</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-brand-400 mt-0.5">+</span>
+              <p class="text-sm text-zinc-200">人物关系图谱 &mdash; 谁和谁聊过什么，一问便知</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-brand-400 mt-0.5">+</span>
+              <p class="text-sm text-zinc-200">洞察推送 &mdash; 每天主动汇报，推到你的飞书/微信</p>
+            </div>
+            <div class="flex items-start gap-3">
+              <span class="text-brand-400 mt-0.5">+</span>
+              <p class="text-sm text-zinc-200">越用越懂你 &mdash; 记忆自动沉淀，理解你的习惯和偏好</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- FEATURES -->
+  <!-- ============================================================ -->
+  <section id="features" class="py-24 sm:py-32">
+    <div class="max-w-6xl mx-auto px-6">
+      <!-- Section header -->
+      <div class="text-center mb-16">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// features</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">你的 AI 秘书，具备这些能力</h2>
+        <p class="text-zinc-500 max-w-lg mx-auto">An AI secretary that remembers, acts, and evolves with you.</p>
+      </div>
+
+      <!-- Feature cards — Row 1: Secretary Capabilities (promoted) -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-px bg-zinc-800/50 rounded-lg overflow-hidden">
+        <!-- Card 1: Persistent Memory -->
+        <div class="bg-[#0c0c0e] p-8 card-glow transition-all hover:bg-zinc-900/80">
+          <div class="w-10 h-10 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+            </svg>
+          </div>
+          <h3 class="font-mono text-sm font-semibold text-zinc-200 mb-2">越用越懂你的记忆力</h3>
+          <p class="font-mono text-xs text-zinc-500 mb-4">Persistent Memory System</p>
+          <p class="text-sm text-zinc-400 leading-relaxed">
+            三层记忆架构自动从对话中沉淀人物关系、业务知识和偏好。矛盾检测、置信度评分、定期整合，AI 秘书的记忆比你更靠谱。
+          </p>
+        </div>
+
+        <!-- Card 2: Proactive Insights -->
+        <div class="bg-[#0c0c0e] p-8 card-glow transition-all hover:bg-zinc-900/80">
+          <div class="w-10 h-10 rounded bg-yellow-500/10 border border-yellow-500/20 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 001.5-.189m-1.5.189a6.01 6.01 0 01-1.5-.189m3.75 7.478a12.06 12.06 0 01-4.5 0m3.75 2.383a14.406 14.406 0 01-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 10-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" />
+            </svg>
+          </div>
+          <h3 class="font-mono text-sm font-semibold text-zinc-200 mb-2">主动洞察推送</h3>
+          <p class="font-mono text-xs text-zinc-500 mb-4">Proactive Insight Engine</p>
+          <p class="text-sm text-zinc-400 leading-relaxed">
+            不等你问，主动发现关键信息。待办催促、人物关系追踪、话题趋势分析、异常检测。每天 20:00 自动推送今日复盘。
+          </p>
+        </div>
+
+        <!-- Card 3: Personalization -->
+        <div class="bg-[#0c0c0e] p-8 card-glow transition-all hover:bg-zinc-900/80">
+          <div class="w-10 h-10 rounded bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </div>
+          <h3 class="font-mono text-sm font-semibold text-zinc-200 mb-2">个性化三件套</h3>
+          <p class="font-mono text-xs text-zinc-500 mb-4">Soul / Memory / Agents</p>
+          <p class="text-sm text-zinc-400 leading-relaxed">
+            定义你的身份和偏好 (Soul)，累积持久记忆 (Memory)，设定处理规则 (Agents)。AI 秘书按你的方式工作，保留行业术语，知道"老张"是谁。
+          </p>
+        </div>
+      </div>
+
+      <!-- Feature cards — Row 2: Platform & Infrastructure -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-px bg-zinc-800/50 rounded-lg overflow-hidden mt-px">
+        <!-- Card 4: Multi-Platform -->
+        <div class="bg-[#0c0c0e] p-8 card-glow transition-all hover:bg-zinc-900/80">
+          <div class="w-10 h-10 rounded bg-blue-500/10 border border-blue-500/20 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
+            </svg>
+          </div>
+          <h3 class="font-mono text-sm font-semibold text-zinc-200 mb-2">多平台消息入口</h3>
+          <p class="font-mono text-xs text-zinc-500 mb-4">Multi-Channel Messaging</p>
+          <p class="text-sm text-zinc-400 leading-relaxed">
+            微信、飞书、Telegram、钉钉 &mdash; 在你最常用的平台收到 AI 助手的推送。语音消息直接处理，工作日报自动投递。
+          </p>
+        </div>
+
+        <!-- Card 5: 100% Local + Zero Cost -->
+        <div class="bg-[#0c0c0e] p-8 card-glow transition-all hover:bg-zinc-900/80">
+          <div class="w-10 h-10 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
+            </svg>
+          </div>
+          <h3 class="font-mono text-sm font-semibold text-zinc-200 mb-2">100% 本地 · 零 AI 成本</h3>
+          <p class="font-mono text-xs text-zinc-500 mb-4">Local-First, Zero API Cost</p>
+          <p class="text-sm text-zinc-400 leading-relaxed">
+            所有 AI 都在你的设备上运行，不调用任何云端 API。没有按量付费，没有月度订阅，跑满也不花一分钱。隐私是底线，不是功能。
+          </p>
+        </div>
+
+        <!-- Card 6: Semantic RAG -->
+        <div class="bg-[#0c0c0e] p-8 card-glow transition-all hover:bg-zinc-900/80">
+          <div class="w-10 h-10 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+          </div>
+          <h3 class="font-mono text-sm font-semibold text-zinc-200 mb-2">跨录音语义搜索</h3>
+          <p class="font-mono text-xs text-zinc-500 mb-4">Semantic RAG Search</p>
+          <p class="text-sm text-zinc-400 leading-relaxed">
+            用自然语言提问，AI 从所有录音中找答案。"上次和张总聊的账期是多少？" &mdash; 秒回，附带原始录音定位。
+          </p>
+        </div>
+      </div>
+
+      <!-- Pipeline capabilities — demoted to compact row -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-zinc-800/50 rounded-lg overflow-hidden mt-px">
+        <div class="bg-[#0c0c0e] p-6">
+          <p class="font-mono text-xs text-zinc-500 mb-1.5">asr_engine</p>
+          <p class="text-sm text-zinc-500">SenseVoice 语音识别，中英混杂 95%+</p>
+        </div>
+        <div class="bg-[#0c0c0e] p-6">
+          <p class="font-mono text-xs text-zinc-500 mb-1.5">speaker_id</p>
+          <p class="text-sm text-zinc-500">pyannote 声纹识别，自动区分说话人</p>
+        </div>
+        <div class="bg-[#0c0c0e] p-6">
+          <p class="font-mono text-xs text-zinc-500 mb-1.5">auto_extract</p>
+          <p class="text-sm text-zinc-500">待办、决议、联系人、会议纪要自动提取</p>
+        </div>
+        <div class="bg-[#0c0c0e] p-6">
+          <p class="font-mono text-xs text-zinc-500 mb-1.5">mobile_sync</p>
+          <p class="text-sm text-zinc-500">手机录音，P2P 同步到桌面处理</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- DATA FLOW COMPARISON -->
+  <!-- ============================================================ -->
+  <section id="privacy" class="py-24 sm:py-32 border-t border-zinc-800/60">
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// your_data_your_rules</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">你的会议录音，去了哪里？</h2>
+        <p class="text-zinc-500 max-w-lg mx-auto">Same recording. Very different journeys.</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-px bg-zinc-800/50 rounded-lg overflow-hidden">
+        <!-- Traditional: Cloud path -->
+        <div class="bg-[#0c0c0e] p-6 sm:p-8">
+          <div class="flex items-center gap-2 mb-6">
+            <span class="w-2 h-2 rounded-full bg-red-400/60"></span>
+            <span class="font-mono text-xs text-zinc-400">传统 AI 录音笔方案</span>
+          </div>
+          <div class="space-y-3">
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-zinc-500">1</span>
+              </div>
+              <p class="text-sm text-zinc-400">录音设备采集音频</p>
+            </div>
+            <div class="border-l border-zinc-800 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-zinc-500">2</span>
+              </div>
+              <p class="text-sm text-zinc-400">蓝牙同步到手机 App</p>
+            </div>
+            <div class="border-l border-zinc-800 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-red-500/10 border border-red-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-red-400">3</span>
+              </div>
+              <p class="text-sm text-zinc-300"><span class="text-red-400">上传至云端服务器</span>（通常在境外）</p>
+            </div>
+            <div class="border-l border-red-500/20 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-red-500/10 border border-red-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-red-400">4</span>
+              </div>
+              <p class="text-sm text-zinc-300"><span class="text-red-400">第三方 LLM 处理</span>（GPT-4o 等）</p>
+            </div>
+            <div class="border-l border-zinc-800 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-zinc-800 border border-zinc-700 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-zinc-500">5</span>
+              </div>
+              <p class="text-sm text-zinc-400">结果返回手机 App</p>
+            </div>
+          </div>
+          <div class="mt-6 px-4 py-3 rounded border border-red-500/10 bg-red-500/[0.03]">
+            <p class="font-mono text-[11px] text-zinc-500">你的会议内容经过了 <span class="text-red-400">至少 3 个第三方</span></p>
+          </div>
+        </div>
+
+        <!-- DeepSeno: Local path -->
+        <div class="bg-[#0c0c0e] p-6 sm:p-8">
+          <div class="flex items-center gap-2 mb-6">
+            <span class="w-2 h-2 rounded-full bg-brand-400"></span>
+            <span class="font-mono text-xs text-brand-400">DeepSeno 方案</span>
+          </div>
+          <div class="space-y-3">
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-brand-400">1</span>
+              </div>
+              <p class="text-sm text-zinc-400">手机录音 / 拖入文件 / 监听目录</p>
+            </div>
+            <div class="border-l border-brand-500/20 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-brand-400">2</span>
+              </div>
+              <p class="text-sm text-zinc-300"><span class="text-brand-400">本地 AI 处理</span>（你自己的设备）</p>
+            </div>
+            <div class="border-l border-brand-500/20 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-brand-400">3</span>
+              </div>
+              <p class="text-sm text-zinc-400">结果存入本地数据库 + Markdown</p>
+            </div>
+            <div class="border-l border-brand-500/20 ml-2.5 h-3"></div>
+            <div class="flex items-start gap-3">
+              <div class="w-5 h-5 rounded bg-brand-500/10 border border-brand-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="font-mono text-[10px] text-brand-400">4</span>
+              </div>
+              <p class="text-sm text-zinc-400">推送到你的消息平台</p>
+            </div>
+          </div>
+          <div class="mt-6 px-4 py-3 rounded border border-brand-500/10 bg-brand-500/[0.03]">
+            <p class="font-mono text-[11px] text-zinc-500">你的数据 <span class="text-brand-400">从未离开你的电脑</span></p>
+          </div>
+          <!-- Extra vertical space to match left column height -->
+          <div class="h-[52px]"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+
+
+
+  <!-- ============================================================ -->
+  <!-- PRICING -->
+  <!-- ============================================================ -->
+  <section id="pricing" class="py-24 sm:py-32 border-t border-zinc-800/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-6">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// pricing</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">一次购买，永久使用</h2>
+        <p class="text-zinc-500 max-w-lg mx-auto">No subscriptions. No recurring fees. Your data, your device, forever.</p>
+      </div>
+
+      <!-- Early Bird Banner -->
+      <div class="max-w-4xl mx-auto mb-8">
+        <div class="rounded-lg border border-yellow-500/30 bg-yellow-500/[0.04] px-6 py-3.5 flex flex-col sm:flex-row items-center justify-center gap-2 sm:gap-4">
+          <span class="font-mono text-xs text-yellow-400 font-semibold tracking-wider uppercase">Early Bird</span>
+          <span class="text-sm text-zinc-300">首发限时 <strong class="text-yellow-400">8 折</strong> &mdash; 前 200 位用户专享</span>
+          <span class="font-mono text-[10px] text-zinc-600 hidden sm:inline">&mdash; 名额有限，售完恢复原价</span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-px bg-zinc-800/50 rounded-lg overflow-hidden max-w-4xl mx-auto">
+        <!-- Trial -->
+        <div class="bg-[#0c0c0e] p-8 flex flex-col">
+          <p class="font-mono text-xs text-zinc-500 tracking-widest uppercase mb-1">trial</p>
+          <h3 class="text-xl font-bold mb-1">免费试用</h3>
+          <p class="text-sm text-zinc-500 mb-6">14 天全功能体验</p>
+          <div class="mb-6">
+            <span class="text-4xl font-bold">$0</span>
+            <span class="text-zinc-500 text-sm ml-1">/ 14 天</span>
+          </div>
+          <ul class="text-sm text-zinc-400 space-y-2.5 mb-8 flex-1">
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              全部功能无限制
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              无限录音处理
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              AI 秘书 + 语义搜索
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-600 mt-0.5">&#10003;</span>
+              无需信用卡
+            </li>
+          </ul>
+          <a href="#" class="block text-center px-4 py-2.5 rounded border border-zinc-700 text-zinc-300 font-mono text-sm hover:bg-zinc-800 transition-all">
+            免费下载
+          </a>
+        </div>
+
+        <!-- Personal (highlighted) -->
+        <div class="bg-[#0c0c0e] p-8 flex flex-col relative ring-1 ring-brand-500/30">
+          <div class="absolute -top-px left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-400 to-transparent"></div>
+          <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-1">personal</p>
+          <h3 class="text-xl font-bold mb-1">个人版</h3>
+          <p class="text-sm text-zinc-500 mb-6">桌面端永久授权</p>
+          <div class="mb-2">
+            <span class="text-sm text-zinc-600 line-through mr-2">$299</span>
+            <span class="text-4xl font-bold text-brand-400">$239</span>
+            <span class="text-zinc-500 text-sm ml-1">一次性</span>
+          </div>
+          <p class="font-mono text-[10px] text-yellow-400/80 mb-6">EARLY BIRD &mdash; 省 $60</p>
+          <ul class="text-sm text-zinc-400 space-y-2.5 mb-8 flex-1">
+            <li class="flex items-start gap-2">
+              <span class="text-brand-400 mt-0.5">&#10003;</span>
+              macOS + Windows 桌面端
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-brand-400 mt-0.5">&#10003;</span>
+              永久授权 + 1 年免费更新
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-brand-400 mt-0.5">&#10003;</span>
+              无限录音 / 无限搜索
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-brand-400 mt-0.5">&#10003;</span>
+              优先邮件支持
+            </li>
+          </ul>
+          <a href="#" class="block text-center px-4 py-2.5 rounded bg-brand-500 text-black font-mono text-sm font-semibold hover:bg-brand-400 transition-all">
+            立即购买
+          </a>
+          <p class="font-mono text-[10px] text-zinc-600 text-center mt-3">≈ $6.6/月（3 年摊）vs 云端订阅 $20/月</p>
+        </div>
+
+        <!-- Professional -->
+        <div class="bg-[#0c0c0e] p-8 flex flex-col">
+          <p class="font-mono text-xs text-zinc-500 tracking-widest uppercase mb-1">professional</p>
+          <h3 class="text-xl font-bold mb-1">专业版</h3>
+          <p class="text-sm text-zinc-500 mb-6">桌面端 + 移动端</p>
+          <div class="mb-2">
+            <span class="text-sm text-zinc-600 line-through mr-2">$499</span>
+            <span class="text-4xl font-bold">$399</span>
+            <span class="text-zinc-500 text-sm ml-1">一次性</span>
+          </div>
+          <p class="font-mono text-[10px] text-yellow-400/80 mb-6">EARLY BIRD &mdash; 省 $100</p>
+          <ul class="text-sm text-zinc-400 space-y-2.5 mb-8 flex-1">
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-400 mt-0.5">&#10003;</span>
+              个人版全部功能
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-400 mt-0.5">&#10003;</span>
+              iOS / Android 录音 App
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-400 mt-0.5">&#10003;</span>
+              P2P 手机-桌面自动同步
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-400 mt-0.5">&#10003;</span>
+              永久授权 + 2 年免费更新
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-zinc-400 mt-0.5">&#10003;</span>
+              1 对 1 技术支持
+            </li>
+          </ul>
+          <a href="#" class="block text-center px-4 py-2.5 rounded border border-zinc-700 text-zinc-300 font-mono text-sm hover:bg-zinc-800 transition-all">
+            立即购买
+          </a>
+          <p class="font-mono text-[10px] text-zinc-600 text-center mt-3">≈ $11.1/月（3 年摊）· 含移动端</p>
+        </div>
+      </div>
+
+      <!-- Trust signals -->
+      <div class="mt-12 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 font-mono text-xs text-zinc-600">
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+          100% 本地处理
+        </span>
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          零 AI 使用成本
+        </span>
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" /></svg>
+          数据不出本机
+        </span>
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z" /></svg>
+          买断制无订阅
+        </span>
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" /></svg>
+          14 天无理由退款
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- FAQ (slimmed) -->
+  <!-- ============================================================ -->
+  <section id="faq" class="py-24 sm:py-32 border-t border-zinc-800/60">
+    <div class="max-w-3xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-3">// faq</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mb-4">常见问题</h2>
+      </div>
+
+      <div class="space-y-px rounded-lg overflow-hidden bg-zinc-800/50">
+        <!-- Q1 -->
+        <details class="group bg-[#0c0c0e]">
+          <summary class="flex items-center justify-between px-6 py-5 cursor-pointer list-none">
+            <span class="text-sm font-semibold text-zinc-200 group-open:text-brand-400 transition-colors">我的电脑能跑吗？需要什么配置？</span>
+            <svg class="w-4 h-4 text-zinc-600 group-open:rotate-45 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+          </summary>
+          <div class="px-6 pb-5 text-sm text-zinc-400 leading-relaxed">
+            <p><strong class="text-zinc-300">最低要求：</strong>macOS 13+ / Windows 10+，16GB 内存。<strong class="text-zinc-300">推荐：</strong>Apple Silicon Mac 32GB（如 Mac Mini M4），1 小时录音约 2 分钟处理完。</p>
+          </div>
+        </details>
+
+        <!-- Q2 -->
+        <details class="group bg-[#0c0c0e]">
+          <summary class="flex items-center justify-between px-6 py-5 cursor-pointer list-none">
+            <span class="text-sm font-semibold text-zinc-200 group-open:text-brand-400 transition-colors">和云端转写工具（讯飞、AI 录音笔等）有什么不同？</span>
+            <svg class="w-4 h-4 text-zinc-600 group-open:rotate-45 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+          </summary>
+          <div class="px-6 pb-5 text-sm text-zinc-400 leading-relaxed">
+            <p><strong class="text-brand-400">隐私</strong> &mdash; 云端方案需要把录音上传到第三方服务器处理，铸声 100% 本地运行。</p>
+            <p class="mt-2"><strong class="text-brand-400">成本</strong> &mdash; 云端方案按用量收费或年费订阅（$200+/年），铸声一次买断 $299（Early Bird $239），之后零成本。</p>
+            <p class="mt-2"><strong class="text-brand-400">智能</strong> &mdash; 云端方案只做转写和摘要。铸声有长期记忆、主动催办、洞察推送、人物关系图谱 &mdash; 是 AI 秘书，不是转写工具。</p>
+          </div>
+        </details>
+
+        <!-- Q3 -->
+        <details class="group bg-[#0c0c0e]">
+          <summary class="flex items-center justify-between px-6 py-5 cursor-pointer list-none">
+            <span class="text-sm font-semibold text-zinc-200 group-open:text-brand-400 transition-colors">完全离线能用吗？</span>
+            <svg class="w-4 h-4 text-zinc-600 group-open:rotate-45 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+          </summary>
+          <div class="px-6 pb-5 text-sm text-zinc-400 leading-relaxed">
+            <p>核心功能完全离线。联网仅用于首次下载 AI 模型（约 10GB，一次性）和消息平台推送。</p>
+          </div>
+        </details>
+
+        <!-- Q4 -->
+        <details class="group bg-[#0c0c0e]">
+          <summary class="flex items-center justify-between px-6 py-5 cursor-pointer list-none">
+            <span class="text-sm font-semibold text-zinc-200 group-open:text-brand-400 transition-colors">买断后还能更新吗？</span>
+            <svg class="w-4 h-4 text-zinc-600 group-open:rotate-45 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+          </summary>
+          <div class="px-6 pb-5 text-sm text-zinc-400 leading-relaxed">
+            <p>个人版（$299）含 1 年更新，专业版（$499）含 2 年。到期后已有功能永久可用，续期按优惠价。首发 Early Bird 享 8 折。</p>
+          </div>
+        </details>
+
+        <!-- Q5 -->
+        <details class="group bg-[#0c0c0e]">
+          <summary class="flex items-center justify-between px-6 py-5 cursor-pointer list-none">
+            <span class="text-sm font-semibold text-zinc-200 group-open:text-brand-400 transition-colors">数据存在哪里？怎么备份？</span>
+            <svg class="w-4 h-4 text-zinc-600 group-open:rotate-45 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+          </summary>
+          <div class="px-6 pb-5 text-sm text-zinc-400 leading-relaxed">
+            <p>所有数据存在你指定的本地目录：SQLite + Markdown + 原始音频。Markdown 兼容 Obsidian，备份只需复制目录。</p>
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- LIGHTWEIGHT CTA — Email capture + Community -->
+  <!-- ============================================================ -->
+  <section class="py-20 border-t border-zinc-800/60">
+    <div class="max-w-3xl mx-auto px-6">
+      <div class="rounded-xl border border-zinc-800 bg-[#0c0c0e] p-8 sm:p-12 text-center">
+        <p class="font-mono text-xs text-brand-400 tracking-widest uppercase mb-4">// stay_updated</p>
+        <h2 class="text-2xl sm:text-3xl font-bold mb-3">还没准备好？先关注我们</h2>
+        <p class="text-sm text-zinc-500 mb-8 max-w-md mx-auto">
+          产品动态、使用技巧、版本更新，第一时间送达。不发垃圾邮件，承诺。
+        </p>
+
+        <!-- Email form -->
+        <form class="flex flex-col sm:flex-row items-center gap-3 max-w-md mx-auto mb-8" onsubmit="event.preventDefault(); this.querySelector('button').textContent='已订阅'; this.querySelector('button').disabled=true;">
+          <input
+            type="email"
+            placeholder="your@email.com"
+            required
+            class="w-full sm:flex-1 px-4 py-2.5 rounded bg-zinc-900 border border-zinc-700 text-sm text-zinc-200 placeholder-zinc-600 font-mono focus:outline-none focus:border-brand-500/50 focus:ring-1 focus:ring-brand-500/20"
+          />
+          <button
+            type="submit"
+            class="w-full sm:w-auto px-6 py-2.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/30 font-mono text-sm font-semibold hover:bg-brand-500/20 transition-all whitespace-nowrap"
+          >
+            订阅更新
+          </button>
+        </form>
+
+        <!-- Divider -->
+        <div class="flex items-center gap-4 mb-8">
+          <div class="flex-1 h-px bg-zinc-800"></div>
+          <span class="font-mono text-[10px] text-zinc-600">OR</span>
+          <div class="flex-1 h-px bg-zinc-800"></div>
+        </div>
+
+        <!-- Community links -->
+        <div class="flex flex-wrap items-center justify-center gap-4">
+          <a href="#" class="inline-flex items-center gap-2 px-4 py-2 rounded border border-zinc-800 bg-zinc-900/60 text-zinc-400 font-mono text-xs hover:border-zinc-700 hover:text-zinc-200 transition-all">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+            GitHub
+          </a>
+          <a href="#" class="inline-flex items-center gap-2 px-4 py-2 rounded border border-zinc-800 bg-zinc-900/60 text-zinc-400 font-mono text-xs hover:border-zinc-700 hover:text-zinc-200 transition-all">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M11.944 0A12 12 0 000 12a12 12 0 0012 12 12 12 0 0012-12A12 12 0 0012 0a12 12 0 00-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 01.171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+            Telegram
+          </a>
+          <a href="#" class="inline-flex items-center gap-2 px-4 py-2 rounded border border-zinc-800 bg-zinc-900/60 text-zinc-400 font-mono text-xs hover:border-zinc-700 hover:text-zinc-200 transition-all">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 01.213.665l-.39 1.48c-.019.07-.048.141-.048.213 0 .163.13.295.29.295a.326.326 0 00.167-.054l1.903-1.114a.864.864 0 01.717-.098 10.16 10.16 0 002.837.403c.276 0 .543-.027.811-.05-.857-2.578.157-4.972 1.932-6.446 1.703-1.415 3.882-1.98 5.853-1.838-.576-3.583-4.196-6.348-8.596-6.348zM5.785 5.991c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 01-1.162 1.178A1.17 1.17 0 014.623 7.17c0-.651.52-1.18 1.162-1.18zm5.813 0c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 01-1.162 1.178 1.17 1.17 0 01-1.162-1.178c0-.651.52-1.18 1.162-1.18zm3.602 4.87c-4.25 0-7.7 2.949-7.7 6.583 0 3.635 3.45 6.584 7.7 6.584.946 0 1.852-.159 2.688-.377a.785.785 0 01.643.089l1.724 1.01a.292.292 0 00.154.05c.145 0 .26-.12.26-.267 0-.065-.027-.13-.043-.192l-.355-1.339a.531.531 0 01.19-.601c1.658-1.22 2.72-3.025 2.72-5.04 0-3.571-3.45-6.5-7.7-6.5h-.281zm-2.478 3.895c.577 0 1.045.476 1.045 1.063a1.054 1.054 0 01-1.045 1.063 1.054 1.054 0 01-1.045-1.063c0-.587.468-1.063 1.045-1.063zm4.956 0c.577 0 1.045.476 1.045 1.063a1.054 1.054 0 01-1.045 1.063 1.054 1.054 0 01-1.045-1.063c0-.587.468-1.063 1.045-1.063z"/></svg>
+            微信群
+          </a>
+          <a href="#" class="inline-flex items-center gap-2 px-4 py-2 rounded border border-zinc-800 bg-zinc-900/60 text-zinc-400 font-mono text-xs hover:border-zinc-700 hover:text-zinc-200 transition-all">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286z"/></svg>
+            Discord
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- SYSTEM REQUIREMENTS -->
+  <!-- ============================================================ -->
+  <section class="py-16 border-t border-zinc-800/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div>
+          <p class="font-mono text-xs text-zinc-500 tracking-widest uppercase mb-4">// system_requirements</p>
+          <h3 class="text-lg font-semibold mb-4">系统要求</h3>
+          <div class="space-y-3 font-mono text-xs text-zinc-500">
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">macOS</span>
+              <span>13.0+ (Apple Silicon / Intel)</span>
+            </div>
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">Windows</span>
+              <span>10/11 (64-bit)</span>
+            </div>
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">RAM</span>
+              <span>16 GB (推荐 32 GB)</span>
+            </div>
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">存储</span>
+              <span>10 GB 可用空间</span>
+            </div>
+            <div class="flex justify-between py-2">
+              <span class="text-zinc-400">推荐</span>
+              <span>Mac Mini M4 32GB</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p class="font-mono text-xs text-zinc-500 tracking-widest uppercase mb-4">// tech_stack</p>
+          <h3 class="text-lg font-semibold mb-4">技术栈</h3>
+          <div class="space-y-3 font-mono text-xs text-zinc-500">
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">语音识别</span>
+              <span>SenseVoice (FunASR)</span>
+            </div>
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">说话人分离</span>
+              <span>pyannote-audio</span>
+            </div>
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">本地 LLM</span>
+              <span>llama.cpp + Qwen2.5</span>
+            </div>
+            <div class="flex justify-between py-2 border-b border-zinc-800/60">
+              <span class="text-zinc-400">向量搜索</span>
+              <span>sqlite-vec + BGE-M3</span>
+            </div>
+            <div class="flex justify-between py-2">
+              <span class="text-zinc-400">应用框架</span>
+              <span>Electron + React + TypeScript</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- FOOTER -->
+  <!-- ============================================================ -->
+  <footer class="py-10 border-t border-zinc-800/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div class="flex items-center gap-2.5">
+          <div class="w-6 h-6 rounded bg-brand-500/20 border border-brand-500/40 flex items-center justify-center">
+            <svg class="w-3.5 h-3.5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+            </svg>
+          </div>
+          <span class="font-mono text-xs text-zinc-500">&copy; 2026 DeepSeno. All rights reserved.</span>
+        </div>
+        <div class="flex items-center gap-5">
+          <a href="https://github.com/deepseno" target="_blank" rel="noopener noreferrer" class="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Smooth scroll for anchor links -->
+  <script>
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function (e) {
+        e.preventDefault();
+        const target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    });
+  </script>
+
+</body>
+</html>

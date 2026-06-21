@@ -1,0 +1,48 @@
+node_modules/
+dist/
+out/
+.vite/
+*.log
+python/venv/
+resources/ffmpeg/
+resources/ollama/
+resources/llama-server/
+resources/llama-models/*.gguf
+resources/python-standalone/
+resources/fonts/
+deepseno.db
+.DS_Store
+.env
+.env.*
+!.env.example
+tsconfig.node.tsbuildinfo
+tsconfig.node.tsbuildinfo
+.claude/
+.claude/worktrees/
+.playwright-mcp/
+python/__pycache__/
+resources/*.p12
+# App Store Connect API keys — never commit
+p8/
+*.p8
+# Superpowers temp files
+.superpowers/
+# Test audio files
+demos/diarization-benchmark/test-audio/*.wav
+demos/diarization-benchmark/test-audio/*.rttm
+# Screenshots and uploads (use Git LFS if needed)
+deepseno-ui/screenshots/
+deepseno-ui/uploads/
+docs/screenshots/
+# Compiled Windows helper tools (built from .cs source by scripts/bundle-win-tools.sh)
+scripts/getfg.exe
+scripts/setfg.exe
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.keystore
+models/
+resources/sherpa-models/pyannote/

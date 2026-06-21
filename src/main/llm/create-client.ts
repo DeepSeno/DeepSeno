@@ -1,0 +1,81 @@
+import { OpenAIClient } from './openai-client';
+import type { LLMClient } from './llm-client';
+import type { AppSettings } from '../settings';
+
+/**
+ * Map Ollama-style model names to GGUF filenames.
+ */
+const MODEL_NAME_MAP: Record<string, string> = {
+  'qwen3.5:4b': 'Qwen3.5-4B-Q4_K_M',
+  'qwen3.5:9b': 'Qwen3.5-9B-Q4_K_M',
+  'qwen3.5:27b': 'Qwen3.5-27B-Q4_K_M',
+  'qwen3.5:35b': 'Qwen3.5-35B-A3B-Q4_K_M',
+  'qwen3.5:122b': 'Qwen3.5-122B-A10B-Q4_K_M',
+  'bge-m3': 'bge-m3-Q8_0',
+};
+
+/**
+ * Create the right LLM client based on current settings.
+ */
+export function createLLMClient(settings: AppSettings): LLMClient {
+  if (
+    settings.llmProvider === 'openai' &&
+    settings.cloudApiUrl &&
+    settings.cloudApiKey
+  ) {
+    return new OpenAIClient(settings.cloudApiUrl, settings.cloudApiKey);
+  }
+  // Local mode (llama-server router) — same port, model name in request body
+  const port = settings.llamaServerPort || 8080;
+  return new OpenAIClient(`http://127.0.0.1:${port}/v1`, '');
+}
+
+/**
+ * Get the LLM model name for the API request.
+ * For local mode: returns GGUF filename without extension (matches router auto-discovery).
+ * For cloud mode: returns the configured cloud model name.
+ */
+export function getLLMModel(settings: AppSettings): string {
+  if (settings.llmProvider === 'openai' && settings.cloudModel) {
+    return settings.cloudModel;
+  }
+  if (settings.llmProvider === 'local') {
+    const model = settings.localLlmModel || '';
+    if (model) return model.replace(/\.gguf$/i, '');
+    const llmModel = settings.llmModel || 'qwen3.5:4b';
+    return MODEL_NAME_MAP[llmModel] || llmModel;
+  }
+  return settings.llmModel || 'qwen3.5:4b';
+}
+
+/**
+ * Get the embedding model name for the API request.
+ * For local mode: returns 'bge-m3-Q8_0' (must exist in models directory).
+ */
+export function getEmbedModel(settings: AppSettings): string {
+  if (settings.llmProvider === 'openai' && settings.cloudEmbedModel) {
+    return settings.cloudEmbedModel;
+  }
+  if (settings.llmProvider === 'local') {
+    const model = settings.localEmbedModel || '';
+    if (model) return model.replace(/\.gguf$/i, '');
+    return MODEL_NAME_MAP['bge-m3'] || 'bge-m3-Q8_0';
+  }
+  return settings.embedModel || 'bge-m3';
+}
+
+/**
+ * Create an embedding client.
+ * In router mode, uses the same port — model name routes to the correct model.
+ */
+export function createEmbedClient(settings: AppSettings): LLMClient {
+  if (
+    settings.llmProvider === 'openai' &&
+    settings.cloudApiUrl &&
+    settings.cloudApiKey
+  ) {
+    return new OpenAIClient(settings.cloudApiUrl, settings.cloudApiKey);
+  }
+  const port = settings.llamaServerPort || 8080;
+  return new OpenAIClient(`http://127.0.0.1:${port}/v1`, '');
+}

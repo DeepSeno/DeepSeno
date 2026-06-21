@@ -1,0 +1,269 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch / PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # macOS (arm64 + x64 universal build, DMG + ZIP)
+  # ────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Toolchain ──────────────────────────────────────────
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      # ── Install dependencies ───────────────────────────────
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Bundle platform resources ──────────────────────────
+      # Each script is idempotent — already-present files are skipped.
+      # --all downloads for both darwin-arm64 and darwin-x64 (needed for
+      # the universal macOS build that packages both architectures).
+      - name: Bundle FFmpeg (darwin-arm64 + darwin-x64)
+        run: bash scripts/bundle-ffmpeg.sh --all
+
+      - name: Bundle llama-server (darwin-arm64 + darwin-x64)
+        run: bash scripts/bundle-llama-server.sh --all
+
+      - name: Bundle sherpa-models
+        run: bash scripts/bundle-sherpa-models.sh
+
+      - name: Bundle fonts
+        run: bash scripts/bundle-fonts.sh
+
+      # ── Code signing (optional, gated by secrets) ──────────
+      # Requires the following GitHub repo secrets:
+      #   APPLE_CERTIFICATE_BASE64      – Developer ID Application .p12 (base64)
+      #   APPLE_CERTIFICATE_PASSWORD    – .p12 passphrase
+      #   APPLE_TEAM_ID                 – 10-char Apple Team ID
+      # Without them the build will run unsigned — fine for CI / pre-release.
+      - name: Import Apple code-signing certificate
+        id: import-cert
+        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
+        env:
+          CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'temporary-password' }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/apple-signing.p12"
+          echo "$CERT_BASE64" | base64 -d > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import "$CERT_PATH" -k build.keychain -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          # Prepend the build keychain so codesign finds it first
+          EXISTING=$(security list-keychains -d user | sed 's/"//g')
+          security list-keychains -d user -s build.keychain $EXISTING
+          echo "CSC_LINK=$CERT_PATH" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
+
+      # ── Build & Package ────────────────────────────────────
+      - name: Build (electron-vite)
+        run: pnpm build
+
+      - name: Rebuild native addons (sherpa-onnx-node)
+        run: pnpm exec electron-rebuild -f -w sherpa-onnx-node
+
+      - name: Package (electron-builder)
+        env:
+          # Notarization via App Store Connect API Key.
+          # Build falls back to unsigned if these are missing.
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "${APPLE_API_KEY:-}" ] && \
+             [ -n "${APPLE_API_KEY_ID:-}" ] && \
+             [ -n "${APPLE_API_ISSUER:-}" ]; then
+            echo "[CI] Notarization enabled (API key present)"
+            pnpm exec electron-builder --mac --arm64 --x64 --config.notarize=true
+          else
+            echo "[CI] Notarization disabled (API key not configured)"
+            pnpm exec electron-builder --mac --arm64 --x64
+          fi
+
+      # ── Upload artifacts ───────────────────────────────────
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseno-macos
+          path: |
+            out/*.dmg
+            out/*.zip
+            out/latest-mac.yml
+          if-no-files-found: error
+
+      # ── Cleanup keychain ───────────────────────────────────
+      - name: Cleanup keychain
+        if: always() && steps.import-cert.outcome == 'success'
+        run: security delete-keychain build.keychain || true
+
+  # ────────────────────────────────────────────────────────────
+  # Windows (x64, NSIS installer)
+  # ────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Toolchain ──────────────────────────────────────────
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      # ── Install dependencies ───────────────────────────────
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Bundle platform resources ──────────────────────────
+      # Each bundle script is idempotent — already-present files are skipped.
+      # Explicit shell: bash is required on Windows runners.
+      - name: Bundle FFmpeg (win32-x64)
+        shell: bash
+        run: bash scripts/bundle-ffmpeg.sh --platform win32-x64
+
+      - name: Bundle llama-server (win32-x64)
+        shell: bash
+        run: bash scripts/bundle-llama-server.sh --platform win32-x64
+
+      - name: Bundle sherpa-models
+        shell: bash
+        run: bash scripts/bundle-sherpa-models.sh
+
+      - name: Bundle fonts
+        shell: bash
+        run: bash scripts/bundle-fonts.sh
+
+      - name: Compile Windows tools (getfg.exe / setfg.exe)
+        shell: bash
+        run: bash scripts/bundle-win-tools.sh
+
+      # ── Pre-build check ────────────────────────────────────
+      # Mirrors the prebuild:win script in package.json.
+      # Fails fast if required assets are missing.
+      - name: Pre-build check
+        run: |
+          node -e "
+          const f = require('fs');
+          const checks = [
+            ['resources/ffmpeg/win32-x64/ffmpeg.exe', 'bundle-ffmpeg.sh --platform win32-x64'],
+            ['scripts/getfg.exe', 'bundle-win-tools.sh'],
+            ['scripts/setfg.exe', 'bundle-win-tools.sh'],
+          ];
+          let ok = true;
+          for (const [p, src] of checks) {
+            if (!f.existsSync(p)) {
+              console.error('MISSING: %s — run %s', p, src);
+              ok = false;
+            }
+          }
+          if (ok) console.log('All Windows deps present.');
+          else process.exit(1);
+          "
+
+      # ── Build & Package ────────────────────────────────────
+      - name: Build (electron-vite)
+        run: pnpm build
+
+      - name: Rebuild native addons (sherpa-onnx-node)
+        run: pnpm exec electron-rebuild -f -w sherpa-onnx-node
+
+      - name: Package (electron-builder)
+        env:
+          # Optional code-signing certificate (PFX base64).
+          # Build runs unsigned if these are missing.
+          CSC_LINK: ${{ secrets.WIN_CERTIFICATE_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
+        run: pnpm exec electron-builder --win --x64
+
+      # ── Upload artifacts ───────────────────────────────────
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseno-windows
+          path: |
+            out/*.exe
+            out/latest.yml
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────
+  # GitHub Release (only on version tags)
+  # ────────────────────────────────────────────────────────────
+  create-release:
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: deepseno-macos
+          path: artifacts/macos
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: deepseno-windows
+          path: artifacts/windows
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            **DeepSeno ${{ github.ref_name }}**
+
+            See [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+          draft: true
+          files: |
+            artifacts/macos/*
+            artifacts/windows/*
+          fail_on_unmatched_files: true
