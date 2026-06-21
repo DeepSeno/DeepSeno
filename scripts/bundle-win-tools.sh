@@ -77,7 +77,12 @@ compile_tool() {
   fi
 
   log_info "Compiling $src -> $out ..."
-  "$csc" -nologo -target:exe -out:"$out_path" "$src_path"
+  # MSYS2 path conversion can mangle paths passed to native Windows programs.
+  # Use cygpath -w to explicitly convert to Windows-style paths for csc.exe.
+  local win_src win_out
+  win_src=$(cygpath -w "$src_path" 2>/dev/null || echo "$src_path")
+  win_out=$(cygpath -w "$out_path" 2>/dev/null || echo "$out_path")
+  "$csc" -nologo -target:exe -out:"$win_out" "$win_src"
   log_info "$out — done ($(du -h "$out_path" | cut -f1))"
 }
 
