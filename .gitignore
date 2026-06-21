@@ -44,5 +44,6 @@ scripts/setfg.exe
 *.cer
 *.pfx
 *.keystore
-models/
+/models/
+# Large Sherpa models — download dir (bundled by scripts)
 resources/sherpa-models/pyannote/
