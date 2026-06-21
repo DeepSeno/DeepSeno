@@ -68,7 +68,7 @@ jobs:
       # Without them the build will run unsigned — fine for CI / pre-release.
       - name: Import Apple code-signing certificate
         id: import-cert
-        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
+        if: secrets.APPLE_CERTIFICATE_BASE64 != ''
         env:
           CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
