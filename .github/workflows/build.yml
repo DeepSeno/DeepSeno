@@ -120,6 +120,7 @@ jobs:
           if [ ! -d node_modules/sherpa-onnx-darwin-x64 ]; then
             npm pack "sherpa-onnx-darwin-x64@${SHERPA_VER}" --pack-destination "$TMPDIR" 2>/dev/null || \
               npm pack "sherpa-onnx-darwin-x64@^${SHERPA_VER}" --pack-destination "$TMPDIR"
+            mkdir -p "$TMPDIR/sherpa"
             tar -xzf "$TMPDIR"/sherpa-onnx-darwin-x64-*.tgz -C "$TMPDIR/sherpa"
             mv "$TMPDIR/sherpa/package" node_modules/sherpa-onnx-darwin-x64
             echo "✅ sherpa-onnx-darwin-x64 installed"
@@ -129,6 +130,7 @@ jobs:
           if [ ! -d node_modules/sqlite-vec-darwin-x64 ]; then
             npm pack "sqlite-vec-darwin-x64@${SQLITE_VEC_VER}" --pack-destination "$TMPDIR" 2>/dev/null || \
               npm pack "sqlite-vec-darwin-x64@${SQLITE_VEC_VER}" --pack-destination "$TMPDIR"
+            mkdir -p "$TMPDIR/sqlite"
             tar -xzf "$TMPDIR"/sqlite-vec-darwin-x64-*.tgz -C "$TMPDIR/sqlite"
             mv "$TMPDIR/sqlite/package" node_modules/sqlite-vec-darwin-x64
             echo "✅ sqlite-vec-darwin-x64 installed"
