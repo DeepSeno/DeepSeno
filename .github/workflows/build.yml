@@ -383,44 +383,41 @@ jobs:
             python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
           [ -z "$TOKEN" ] && echo "Login failed" && exit 1
 
-          # Upload macOS
-          for f in artifacts/macos/*.dmg artifacts/macos/*.zip; do
-            [ -f "$f" ] || continue
-            fname=$(basename "$f")
-            echo "[Release] Uploading $fname..."
-            URL=$(curl -sf "$API_BASE/admin/releases/upload-url" \
-              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")}]}" | \
-              python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['presigned_url'])")
-            curl -sf -X PUT -T "$f" "$URL"
-          done
+          # Upload all files and capture CDN URLs
+          rm -f /tmp/confirm.json
+          echo "[" > /tmp/confirm.json
+          first=true
 
-          # Upload Windows
-          for f in artifacts/windows/*.exe; do
-            [ -f "$f" ] || continue
-            fname=$(basename "$f")
-            echo "[Release] Uploading $fname..."
-            URL=$(curl -sf "$API_BASE/admin/releases/upload-url" \
-              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")}]}" | \
-              python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['presigned_url'])")
-            curl -sf -X PUT -T "$f" "$URL"
-          done
-
-          echo "[Release] All uploaded!"
-
-          # Confirm upload — creates DB records + auto-set latest
-          echo "[Release] Confirming uploads..."
-          CONFIRM_JSON="["
-          for f in artifacts/macos/*.dmg artifacts/macos/*.zip artifacts/windows/*.exe; do
-            [ -f "$f" ] || continue
+          upload_file() {
+            local f="$1"
+            local fname fsize resp cdn_url
             fname=$(basename "$f")
             fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
-            CONFIRM_JSON+="{\"filename\":\"$fname\",\"cdn_url\":\"\",\"size\":$fsize,\"checksum\":\"\"},"
+            echo "[Release] Uploading $fname (${fsize} bytes)..."
+            
+            resp=$(curl -sf "$API_BASE/admin/releases/upload-url" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$fsize}]}")
+            
+            cdn_url=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0].get('cdn_url',''))")
+            presigned=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0].get('presigned_url',''))")
+            
+            curl -sf -X PUT -T "$f" "$presigned"
+            echo "[Release] OK, CDN: $cdn_url"
+            
+            [ "$first" = true ] && first=false || echo "," >> /tmp/confirm.json
+            echo -n "{\"filename\":\"$fname\",\"cdn_url\":\"$cdn_url\",\"size\":$fsize,\"checksum\":\"\"}" >> /tmp/confirm.json
+          }
+
+          for f in artifacts/macos/*.dmg artifacts/macos/*.zip artifacts/windows/*.exe; do
+            [ -f "$f" ] || continue
+            upload_file "$f"
           done
-          CONFIRM_JSON="${CONFIRM_JSON%,}]"
+
+          echo "]" >> /tmp/confirm.json
+          echo "[Release] Confirming uploads..."
           curl -sf "$API_BASE/admin/releases/confirm-upload" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"files\":$CONFIRM_JSON}"
+            -d @/tmp/confirm.json
           echo "[Release] Confirmed!"
