@@ -134,7 +134,8 @@
           "target": "nsis",
           "arch": [
             "x64"
-          ]
+          ],
+          "artifactName": "${productName}-${version}-win-x64.${ext}"
         }
       ]
     },
@@ -146,14 +147,16 @@
           "arch": [
             "arm64",
             "x64"
-          ]
+          ],
+          "artifactName": "${productName}-${version}-${arch}.${ext}"
         },
         {
           "target": "zip",
           "arch": [
             "arm64",
             "x64"
-          ]
+          ],
+          "artifactName": "${productName}-${version}-${arch}-mac.${ext}"
         }
       ],
       "category": "public.app-category.productivity",
