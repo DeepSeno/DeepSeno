@@ -369,12 +369,12 @@ jobs:
 
       # ── Push to release server (auto-updater) ──────────────
       - name: Push to release server
-        if: ${{ secrets.RELEASE_ADMIN_EMAIL != '' }}
         env:
           API_BASE: ${{ secrets.API_BASE_URL }}
           ADMIN_EMAIL: ${{ secrets.RELEASE_ADMIN_EMAIL }}
           ADMIN_PASSWORD: ${{ secrets.RELEASE_ADMIN_PASSWORD }}
         run: |
+          [ -z "${ADMIN_EMAIL:-}" ] && echo "[Release] ADMIN_EMAIL not set, skipping" && exit 0
           set -e
           echo "[Release] Logging in..."
           TOKEN=$(curl -sf "$API_BASE/auth/login" \
