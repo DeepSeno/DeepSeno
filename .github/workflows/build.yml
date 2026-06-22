@@ -366,3 +366,45 @@ jobs:
             artifacts/macos/*
             artifacts/windows/*
           fail_on_unmatched_files: true
+
+      # ── Push to release server (auto-updater) ──────────────
+      - name: Push to release server
+        if: ${{ secrets.RELEASE_ADMIN_EMAIL != '' }}
+        env:
+          API_BASE: ${{ secrets.API_BASE_URL }}
+          ADMIN_EMAIL: ${{ secrets.RELEASE_ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.RELEASE_ADMIN_PASSWORD }}
+        run: |
+          set -e
+          echo "[Release] Logging in..."
+          TOKEN=$(curl -sf "$API_BASE/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
+          [ -z "$TOKEN" ] && echo "Login failed" && exit 1
+
+          # Upload macOS
+          for f in artifacts/macos/*.dmg artifacts/macos/*.zip; do
+            [ -f "$f" ] || continue
+            fname=$(basename "$f")
+            echo "[Release] Uploading $fname..."
+            URL=$(curl -sf "$API_BASE/admin/releases/upload-url" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")}]}" | \
+              python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['presigned_url'])")
+            curl -sf -X PUT -T "$f" "$URL"
+          done
+
+          # Upload Windows
+          for f in artifacts/windows/*.exe; do
+            [ -f "$f" ] || continue
+            fname=$(basename "$f")
+            echo "[Release] Uploading $fname..."
+            URL=$(curl -sf "$API_BASE/admin/releases/upload-url" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")}]}" | \
+              python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['presigned_url'])")
+            curl -sf -X PUT -T "$f" "$URL"
+          done
+
+          echo "[Release] All uploaded!"
