@@ -159,12 +159,11 @@ jobs:
           if [ -n "${APPLE_API_KEY:-}" ] && \
              [ -n "${APPLE_API_KEY_ID:-}" ] && \
              [ -n "${APPLE_API_ISSUER:-}" ]; then
-            echo "[CI] Notarization enabled (API key present)"
-            pnpm exec electron-builder --mac --arm64 --x64 --config.notarize=true
+            echo "[CI] Notarization: APPLE_API_KEY is set, electron-builder will auto-notarize"
           else
-            echo "[CI] Notarization disabled (API key not configured)"
-            pnpm exec electron-builder --mac --arm64 --x64
+            echo "[CI] Notarization: APPLE_API_KEY not configured, skipping"
           fi
+          pnpm exec electron-builder --mac --arm64 --x64
 
       # ── Upload artifacts ───────────────────────────────────
       - name: Upload macOS artifacts

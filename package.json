@@ -159,8 +159,7 @@
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": false
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "asarUnpack": [
       "node_modules/sherpa-onnx-node/**",
