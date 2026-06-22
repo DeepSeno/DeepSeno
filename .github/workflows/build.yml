@@ -167,6 +167,20 @@ jobs:
           fi
           pnpm exec electron-builder --mac --arm64 --x64
 
+      # ── Rename arch-less files to include x64 suffix ────────
+      - name: Rename x64 artifacts
+        run: |
+          cd out
+          VER="${{ inputs.version }}"
+          for f in DeepSeno-${VER}.dmg DeepSeno-${VER}-mac.zip; do
+            if [ -f "$f" ]; then
+              new=$(echo "$f" | sed "s/DeepSeno-${VER}/DeepSeno-${VER}-x64/")
+              mv "$f" "$new"
+              echo "Renamed $f → $new"
+            fi
+          done
+        shell: bash
+
       # ── Upload artifacts ───────────────────────────────────
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -274,6 +288,20 @@ jobs:
           CSC_LINK: ${{ secrets.WIN_CERTIFICATE_BASE64 }}
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
         run: pnpm exec electron-builder --win --x64
+
+      # ── Rename to include arch suffix ───────────────────────
+      - name: Rename Windows artifacts
+        shell: bash
+        run: |
+          cd out
+          VER="${{ inputs.version }}"
+          for f in "DeepSeno.Setup.${VER}.exe"; do
+            if [ -f "$f" ]; then
+              new="DeepSeno-${VER}-win-x64.exe"
+              mv "$f" "$new"
+              echo "Renamed $f → $new"
+            fi
+          done
 
       # ── Upload artifacts ───────────────────────────────────
       - name: Upload Windows artifacts
