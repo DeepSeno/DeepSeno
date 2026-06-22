@@ -295,12 +295,15 @@ jobs:
         run: |
           cd out
           VER="${{ inputs.version }}"
-          for f in "DeepSeno.Setup.${VER}.exe"; do
-            if [ -f "$f" ]; then
-              new="DeepSeno-${VER}-win-x64.exe"
-              mv "$f" "$new"
-              echo "Renamed $f → $new"
-            fi
+          for pattern in "DeepSeno.Setup.${VER}.exe" "DeepSeno Setup ${VER}.exe" "DeepSeno-Setup-${VER}.exe"; do
+            for f in $pattern; do
+              if [ -f "$f" ]; then
+                new="DeepSeno-${VER}-win-x64.exe"
+                mv "$f" "$new"
+                echo "Renamed $f → $new"
+                break 2
+              fi
+            done
           done
 
       # ── Upload artifacts ───────────────────────────────────
@@ -385,7 +388,7 @@ jobs:
 
           # Upload all files and capture CDN URLs
           rm -f /tmp/confirm.json
-          echo "[" > /tmp/confirm.json
+          echo '{"files":[' > /tmp/confirm.json
           first=true
 
           upload_file() {
@@ -414,7 +417,7 @@ jobs:
             upload_file "$f"
           done
 
-          echo "]" >> /tmp/confirm.json
+          echo "]}" >> /tmp/confirm.json
           echo "[Release] Confirming uploads..."
           curl -sf "$API_BASE/admin/releases/confirm-upload" \
             -H "Authorization: Bearer $TOKEN" \
