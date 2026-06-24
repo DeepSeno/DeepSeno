@@ -133,6 +133,8 @@ export interface ModelPullProgress {
   status: string;
   total: number;
   completed: number;
+  error?: string;
+  updatedAt?: number;
 }
 
 export interface SetupProgress {
@@ -675,6 +677,10 @@ export interface VoiceBrainApi {
 
   // Environment & Models
   detectEnvironment: () => Promise<EnvCheckResult>;
+  listModels: () => Promise<string[]>;
+  pullModel: (modelName: string, force?: boolean) => Promise<{ success: boolean; model: string; error?: string }>;
+  cancelPull: (modelName?: string) => Promise<void>;
+  getPullStatus: () => Promise<ModelPullProgress[]>;
   checkSherpaModels: () => Promise<SherpaModelsCheckResult>;
   downloadSherpaModels: (mirror?: string, force?: boolean) => Promise<{ success: boolean; error?: string }>;
   cancelSherpaDownload: () => Promise<void>;

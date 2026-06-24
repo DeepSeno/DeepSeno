@@ -498,14 +498,27 @@ export class QueryEngine {
   private async cachedEmbed(text: string): Promise<number[]> {
     const cached = this.embeddingCache.get(this.embedModel, text);
     if (cached) return cached;
-    try {
-      const embedding = await this.embedClient.embed(this.embedModel, text);
-      this.embeddingCache.set(this.embedModel, text, embedding);
-      return embedding;
-    } catch (err: any) {
-      console.warn(`[RAG] Embedding failed for model ${this.embedModel}: ${err?.message}`);
-      return [];
+
+    let lastError: any;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const embedding = await this.embedClient.embed(this.embedModel, text);
+        if (!Array.isArray(embedding) || embedding.length === 0) {
+          throw new Error(`Embedding returned empty vector for model ${this.embedModel}`);
+        }
+        this.embeddingCache.set(this.embedModel, text, embedding);
+        return embedding;
+      } catch (err: any) {
+        lastError = err;
+        if (attempt < 3) {
+          console.warn(`[RAG] Embedding failed for model ${this.embedModel}, retrying (${attempt}/3): ${err?.message}`);
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+        }
+      }
     }
+
+    console.warn(`[RAG] Embedding failed for model ${this.embedModel}: ${lastError?.message}`);
+    throw lastError;
   }
 
   /** Dynamic context budget based on query intent. */

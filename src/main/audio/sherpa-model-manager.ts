@@ -10,6 +10,8 @@ export interface SherpaModelInfo {
   id: string;
   name: string;
   description: string;
+  /** Approximate bytes used only for stable aggregate progress display. */
+  downloadSizeBytes?: number;
   /** Files expected in the model subdirectory. url is only needed for direct GitHub downloads. */
   files: { name: string; url?: string; minSize?: number }[];
   /** Subdirectory under sherpa-models/ */
@@ -30,6 +32,8 @@ const BASE_URL = 'https://github.com/k2-fsa/sherpa-onnx/releases/download';
 const HF_BASE = 'https://huggingface.co';
 const HF_MIRROR = 'https://hf-mirror.com';
 const MODELSCOPE_API = 'https://modelscope.cn/api/v1/models';
+const KiB = 1024;
+const MiB = 1024 * KiB;
 
 /** Get the path to bundled sherpa-models in resources (for packaged app). */
 function getBundledModelsDir(): string {
@@ -49,6 +53,7 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
     name: 'SenseVoice (ASR)',
     description: 'Multilingual speech recognition (zh/en/ja/ko/yue)',
     subdir: 'sensevoice',
+    downloadSizeBytes: 229 * MiB,
     hfRepo: 'csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17',
     msRepo: 'pengzhendong/sherpa-onnx-sense-voice-zh-en-ja-ko-yue',
     archive: {
@@ -56,7 +61,7 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
       stripDir: 'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17',
     },
     files: [
-      { name: 'model.int8.onnx', minSize: 200 * 1024 * 1024 },
+      { name: 'model.int8.onnx', minSize: 200 * MiB },
       { name: 'tokens.txt' },
     ],
   },
@@ -66,11 +71,12 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
     description: 'Voice activity detection',
     subdir: 'vad',
     hfRepo: 'csukuangfj/vad',
+    downloadSizeBytes: 700 * KiB,
     files: [
       {
         name: 'silero_vad.onnx',
         url: `${BASE_URL}/asr-models/silero_vad.onnx`,
-        minSize: 100 * 1024,
+        minSize: 500 * KiB,
       },
     ],
   },
@@ -80,12 +86,13 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
     description: 'Speaker segmentation for diarization (Rev.ai reverb-v2)',
     subdir: 'pyannote',
     hfRepo: 'csukuangfj/sherpa-onnx-reverb-diarization-v2',
+    downloadSizeBytes: 96 * MiB,
     archive: {
       url: `${BASE_URL}/speaker-segmentation-models/sherpa-onnx-reverb-diarization-v2.tar.bz2`,
       stripDir: 'sherpa-onnx-reverb-diarization-v2',
     },
     files: [
-      { name: 'model.int8.onnx', minSize: 4 * 1024 * 1024 },
+      { name: 'model.int8.onnx', minSize: 80 * MiB },
     ],
   },
   {
@@ -95,11 +102,12 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
     subdir: 'speaker',
     hfRepo: 'csukuangfj/speaker-embedding-models',
     msRepo: 'lihuoo/3dspeaker-recognition-models',
+    downloadSizeBytes: 112 * MiB,
     files: [
       {
         name: '3dspeaker_speech_eres2net_large_sv_zh-cn_3dspeaker_16k.onnx',
         url: `${BASE_URL}/speaker-recongition-models/3dspeaker_speech_eres2net_large_sv_zh-cn_3dspeaker_16k.onnx`,
-        minSize: 80 * 1024 * 1024,
+        minSize: 90 * MiB,
       },
     ],
   },
@@ -122,6 +130,10 @@ export class SherpaModelManager {
 
   getMirror(): ModelMirror {
     return this.mirror;
+  }
+
+  private estimateModelDownloadBytes(model: SherpaModelInfo): number {
+    return model.downloadSizeBytes ?? model.files.reduce((sum, f) => sum + (f.minSize ?? 0), 0);
   }
 
   /** Get the base models directory. */
@@ -515,11 +527,13 @@ export class SherpaModelManager {
     if (missingModels.length === 0) return;
 
     let cumCompleted = 0;
-    let cumTotal = 0;
+    const plannedTotal = missingModels.reduce((sum, model) => sum + this.estimateModelDownloadBytes(model), 0);
+    let cumTotal = plannedTotal;
 
     for (const model of missingModels) {
       let modelCompleted = 0;
       let modelTotal = 0;
+      const modelEstimate = this.estimateModelDownloadBytes(model);
       const baseCompleted = cumCompleted;
 
       await this.downloadModel(
@@ -528,15 +542,19 @@ export class SherpaModelManager {
           // Skip per-model 'done' marker
           if (fileName === 'done') return;
 
-          // Set model total once from first non-trivial value (skip tiny HEAD fallbacks)
-          if (modelTotal === 0 && total > 1024) {
+          // Set model total once from first non-trivial value when no stable
+          // aggregate estimate is available.
+          if (cumTotal === 0 && modelTotal === 0 && total > 1024) {
             modelTotal = total;
             cumTotal += total;
           }
 
           // Update cumulative completed based on this model's progress
-          modelCompleted = completed;
+          modelCompleted = modelEstimate > 0 ? Math.min(completed, modelEstimate) : completed;
           cumCompleted = baseCompleted + modelCompleted;
+          if (cumTotal > 0) {
+            cumCompleted = Math.min(cumCompleted, cumTotal);
+          }
 
           onProgress?.(cumCompleted, cumTotal || cumCompleted, model.id, fileName);
         },
@@ -545,7 +563,10 @@ export class SherpaModelManager {
       );
 
       // Ensure cumulative completed includes full model size after download
-      cumCompleted = baseCompleted + (modelTotal || modelCompleted);
+      cumCompleted = baseCompleted + (modelEstimate || modelTotal || modelCompleted);
+      if (cumTotal > 0) {
+        cumCompleted = Math.min(cumCompleted, cumTotal);
+      }
     }
   }
 }

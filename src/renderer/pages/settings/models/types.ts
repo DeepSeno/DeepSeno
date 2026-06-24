@@ -30,7 +30,7 @@ export interface ModelsSectionProps {
   localModelProgress: Record<string, { completed: number; total: number }>;
   onInstallLocal: () => void;
   onPullLocalModel: (modelName: string, force?: boolean) => void;
-  onCancelLocalPull: () => void;
+  onCancelLocalPull: (modelName?: string) => void;
   onLocalNotReady?: () => void;
 
   // Cloud

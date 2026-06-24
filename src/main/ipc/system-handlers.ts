@@ -5,8 +5,6 @@ import os from 'os';
 import path from 'path';
 import type { IpcContext } from './context';
 import { getLlamaServer } from './context';
-import { findModel } from '../llm/gguf-model-catalog';
-import { getLLMModelsDir } from '../paths';
 import { loadSettings, updateSettings, AppSettings } from '../settings';
 import { getSherpaModelMirror, getEffectiveMirror } from '../mirror-config';
 import { getDbPath, getVecDbPath, getOutputDir, getEffectiveDataDir, getLLMModelsDir } from '../paths';
@@ -21,20 +19,47 @@ import { requireString, requireUrl, ValidationError } from './validate';
 import { AnalyticsTracker } from '../analytics/tracker';
 import { getDefaultPrompts } from '../llm/default-prompts';
 import { findModel, getDownloadUrl } from '../llm/gguf-model-catalog';
+import { type GGUFDownloadState, ggufDownloadStateStore } from '../llm/gguf-download-state';
 
 // Module-level state for tracking active downloads (survives page navigation)
 let sherpaDlState: { model: string; completed: number; total: number; status: string } | null = null;
 
 // ─── GGUF Model Download ───────────────────────────────────
 
-/** Active GGUF download abort controller (one at a time). */
-let ggufAbort: AbortController | null = null;
+const activeGGUFDownloads = new Map<string, {
+  controller: AbortController;
+  fileKey: string;
+  promise: Promise<{ success: boolean; model: string; error?: string }>;
+}>();
+const activeGGUFFileDownloads = new Map<string, {
+  controller: AbortController;
+  model: string;
+  promise: Promise<{ success: boolean; model: string; error?: string }>;
+}>();
+
+function emitGGUFState(ctx: IpcContext, state: GGUFDownloadState): void {
+  const win = ctx.getWindow();
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('model:pullProgress', state);
+  }
+}
+
+function updateGGUFState(
+  ctx: IpcContext,
+  model: string,
+  patch: Partial<Omit<GGUFDownloadState, 'model' | 'updatedAt'>>,
+): GGUFDownloadState {
+  const state = ggufDownloadStateStore.update(model, patch);
+  emitGGUFState(ctx, state);
+  return state;
+}
 
 /** Download a GGUF file from HuggingFace (or mirror) with progress reporting. */
 async function downloadGGUF(
   modelId: string,
   ctx: IpcContext,
   signal?: AbortSignal,
+  force = false,
 ): Promise<{ success: boolean; error?: string }> {
   const entry = findModel(modelId);
   if (!entry) return { success: false, error: `Unknown model: ${modelId}` };
@@ -44,7 +69,7 @@ async function downloadGGUF(
   const tmpPath = destPath + '.downloading';
 
   // Skip if already fully downloaded
-  if (fs.existsSync(destPath)) {
+  if (!force && fs.existsSync(destPath)) {
     const stat = fs.statSync(destPath);
     if (stat.size >= entry.fileSizeBytes * 0.95) {
       console.log(`[GGUF] Model already downloaded: ${entry.fileName} (${stat.size} bytes)`);
@@ -114,7 +139,9 @@ async function streamToFile(
     while (true) {
       if (signal?.aborted) {
         reader.cancel().catch(() => {});
-        return { success: false, error: 'cancelled' };
+        const abortError = new Error('cancelled');
+        abortError.name = 'AbortError';
+        throw abortError;
       }
 
       if (streamError) throw streamError;
@@ -126,8 +153,21 @@ async function streamToFile(
       if (!ws.write(value)) {
         await new Promise<void>((resolve, reject) => {
           if (streamError) { reject(streamError); return; }
-          ws.once('drain', resolve);
-          ws.once('error', (err) => { streamError = err; reject(err); });
+          const cleanup = () => {
+            ws.off('drain', onDrain);
+            ws.off('error', onError);
+          };
+          const onDrain = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = (err: Error) => {
+            streamError = err;
+            cleanup();
+            reject(err);
+          };
+          ws.once('drain', onDrain);
+          ws.once('error', onError);
         });
       }
       completed += value.length;
@@ -136,15 +176,11 @@ async function streamToFile(
       const now = Date.now();
       if (now - lastEmit > 300) {
         lastEmit = now;
-        const win = ctx.getWindow();
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('model:pullProgress', {
-            model: entry.id,
-            status: 'downloading',
-            completed,
-            total: totalBytes,
-          });
-        }
+        updateGGUFState(ctx, entry.id, {
+          status: 'downloading',
+          completed,
+          total: totalBytes,
+        });
       }
     }
 
@@ -160,16 +196,11 @@ async function streamToFile(
 
     console.log(`[GGUF] Download complete: ${entry.fileName} (${completed} bytes)`);
 
-    // Final progress event
-    const win = ctx.getWindow();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('model:pullProgress', {
-        model: entry.id,
-        status: 'success',
-        completed,
-        total: totalBytes,
-      });
-    }
+    updateGGUFState(ctx, entry.id, {
+      status: 'success',
+      completed,
+      total: totalBytes,
+    });
 
     return { success: true };
   } catch (err: any) {
@@ -375,6 +406,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
   // ─── Environment Detection ─────────────────────────────────
   ipcMain.handle('system:detectEnvironment', async () => {
+    const settings = loadSettings();
     const results = await Promise.allSettled([
       (async () => {
         // Check via FFmpegManager (downloaded or legacy bundled)
@@ -383,9 +415,19 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         return ctx.spawnCheck('ffmpeg', ['-version']);
       })(),
       (async () => {
+        if (settings.llmProvider === 'openai') {
+          if (!settings.cloudApiUrl || !settings.cloudApiKey || !settings.cloudModel) {
+            throw new Error('cloud API is not configured');
+          }
+          const client = new OpenAIClient(settings.cloudApiUrl, settings.cloudApiKey);
+          const ok = await client.isAvailable();
+          if (!ok) throw new Error('cloud API is not reachable');
+          return 'Cloud API';
+        }
+
         const ok = await ctx.getLLM().isAvailable();
         if (!ok) throw new Error('not running');
-        return 'ok';
+        return 'Local';
       })(),
     ]);
 
@@ -393,7 +435,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       ? { status: 'ok' as const, version: results[0].value }
       : { status: 'missing' as const };
     const localResult = results[1].status === 'fulfilled'
-      ? { status: 'ok' as const }
+      ? { status: 'ok' as const, version: results[1].value }
       : { status: 'missing' as const };
 
     // Check sherpa-onnx models
@@ -428,7 +470,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       });
       if (res.ok) return { ok: true };
       // Some providers don't support GET /models — try a minimal chat completion
-      if (res.status === 404 || res.status === 405) {
+      if (res.status !== 401 && res.status !== 403) {
         const chatRes = await fetch(`${baseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -482,58 +524,128 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   ipcMain.handle('system:listModels', async () => {
     try {
       const modelsDir = getLLMModelsDir();
-      const files = fs.readdirSync(modelsDir);
-      const downloaded = new Set(files.filter((f) => f.endsWith('.gguf') && !f.endsWith('.downloading')));
-      // Map file names back to model IDs
       const { GGUF_CATALOG } = await import('../llm/gguf-model-catalog');
       return GGUF_CATALOG
-        .filter((m) => downloaded.has(m.fileName))
+        .filter((m) => {
+          try {
+            const stat = fs.statSync(path.join(modelsDir, m.fileName));
+            return stat.size >= m.fileSizeBytes * 0.95;
+          } catch {
+            return false;
+          }
+        })
         .map((m) => m.id);
     } catch {
       return [];
     }
   });
 
-  ipcMain.handle('system:pullModel', async (_event, modelName: string) => {
+  ipcMain.handle('system:pullModel', async (_event, modelName: string, force?: boolean) => {
     requireString(modelName, 'modelName', 200);
 
-    // Cancel any existing download before starting a new one
-    if (ggufAbort) {
-      ggufAbort.abort();
-      ggufAbort = null;
+    const entry = findModel(modelName);
+    if (!entry) {
+      return { success: false, model: modelName, error: `Unknown model: ${modelName}` };
     }
-    ggufAbort = new AbortController();
-    const signal = ggufAbort.signal;
 
-    try {
-      console.log(`[PullModel] Starting download: ${modelName}`);
-      const result = await downloadGGUF(modelName, ctx, signal);
-      if (result.success) {
-        return { success: true, model: modelName };
-      }
-      return { success: false, model: modelName, error: result.error };
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
-        console.log(`[PullModel] Cancelled: ${modelName}`);
-        return { success: false, model: modelName, error: 'cancelled' };
-      }
-      console.error(`[PullModel] Error downloading "${modelName}":`, err);
-      return { success: false, model: modelName, error: err.message || 'Unknown error' };
-    } finally {
-      ggufAbort = null;
+    const fileKey = path.join(getLLMModelsDir(), entry.fileName);
+    const active = activeGGUFDownloads.get(entry.id) || activeGGUFFileDownloads.get(fileKey);
+    if (active) {
+      return active.promise;
     }
+
+    const controller = new AbortController();
+    const activeDownload = {
+      controller,
+      fileKey,
+      promise: Promise.resolve({ success: false, model: entry.id, error: 'not started' }),
+    };
+    activeGGUFDownloads.set(entry.id, activeDownload);
+
+    const promise = (async (): Promise<{ success: boolean; model: string; error?: string }> => {
+      updateGGUFState(ctx, entry.id, {
+        status: 'downloading',
+        completed: 0,
+        total: entry.fileSizeBytes,
+      });
+
+      try {
+        console.log(`[PullModel] Starting download: ${entry.id}`);
+        const result = await downloadGGUF(entry.id, ctx, controller.signal, !!force);
+        if (result.success) {
+          const current = ggufDownloadStateStore.get(entry.id);
+          updateGGUFState(ctx, entry.id, {
+            status: 'success',
+            completed: current?.completed && current.completed > 0 ? current.completed : entry.fileSizeBytes,
+            total: current?.total && current.total > 0 ? current.total : entry.fileSizeBytes,
+          });
+          return { success: true, model: entry.id };
+        }
+
+        const status = result.error === 'cancelled' ? 'cancelled' : 'error';
+        updateGGUFState(ctx, entry.id, {
+          status,
+          completed: ggufDownloadStateStore.get(entry.id)?.completed ?? 0,
+          total: ggufDownloadStateStore.get(entry.id)?.total ?? entry.fileSizeBytes,
+          error: status === 'error' ? (result.error || 'Download failed') : undefined,
+        });
+        return { success: false, model: entry.id, error: result.error };
+      } catch (err: any) {
+        const isCancelled = err.name === 'AbortError' || controller.signal.aborted;
+        const status = isCancelled ? 'cancelled' : 'error';
+        if (isCancelled) {
+          console.log(`[PullModel] Cancelled: ${entry.id}`);
+        } else {
+          console.error(`[PullModel] Error downloading "${entry.id}":`, err);
+        }
+        updateGGUFState(ctx, entry.id, {
+          status,
+          completed: ggufDownloadStateStore.get(entry.id)?.completed ?? 0,
+          total: ggufDownloadStateStore.get(entry.id)?.total ?? entry.fileSizeBytes,
+          error: status === 'error' ? (err.message || 'Unknown error') : undefined,
+        });
+        return {
+          success: false,
+          model: entry.id,
+          error: isCancelled ? 'cancelled' : (err.message || 'Unknown error'),
+        };
+      } finally {
+        const current = activeGGUFDownloads.get(entry.id);
+        if (current?.controller === controller) {
+          activeGGUFDownloads.delete(entry.id);
+        }
+        const currentFile = activeGGUFFileDownloads.get(fileKey);
+        if (currentFile?.controller === controller) {
+          activeGGUFFileDownloads.delete(fileKey);
+        }
+      }
+    })();
+
+    activeDownload.promise = promise;
+    activeGGUFFileDownloads.set(fileKey, { controller, model: entry.id, promise });
+    return promise;
   });
 
-  ipcMain.handle('system:cancelPull', async () => {
-    if (ggufAbort) {
-      ggufAbort.abort();
-      ggufAbort = null;
+  ipcMain.handle('system:cancelPull', async (_event, modelName?: string) => {
+    if (modelName) {
+      requireString(modelName, 'modelName', 200);
+      const entry = findModel(modelName);
+      if (entry) {
+        const fileKey = path.join(getLLMModelsDir(), entry.fileName);
+        (activeGGUFDownloads.get(entry.id) || activeGGUFFileDownloads.get(fileKey))?.controller.abort();
+      } else {
+        activeGGUFDownloads.get(modelName)?.controller.abort();
+      }
+      return;
+    }
+
+    for (const active of activeGGUFDownloads.values()) {
+      active.controller.abort();
     }
   });
 
   ipcMain.handle('system:getPullStatus', () => {
-    // Return null — no persistent pull state for GGUF downloads
-    return null;
+    return ggufDownloadStateStore.snapshot();
   });
 
   // ─── Sherpa-ONNX Model Management ─────────────────────────
@@ -548,8 +660,11 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   });
 
   let sherpaAbort: AbortController | null = null;
+  let sherpaDownloadPromise: Promise<{ success: boolean; error?: string }> | null = null;
 
   ipcMain.handle('sherpa:downloadModels', async (_event, opts?: { mirror?: string; force?: boolean } | string) => {
+    if (sherpaDownloadPromise) return sherpaDownloadPromise;
+
     // Support both new object format and legacy string format
     const mirror = typeof opts === 'object' ? opts?.mirror : opts;
     const force = typeof opts === 'object' ? opts?.force : false;
@@ -567,80 +682,88 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       return { success: true };
     }
 
-    // Cancel background download manager to avoid file conflicts
-    const bgMgr = ctx.getDownloadManager();
-    if (bgMgr) {
-      bgMgr.cancel();
-      // Wait briefly for abort to propagate
-      await new Promise(r => setTimeout(r, 300));
-    }
-
-    sherpaAbort = new AbortController();
+    const controller = new AbortController();
+    sherpaAbort = controller;
     const win = ctx.getWindow();
 
-    try {
-      await mm.downloadAllModels(
-        (completed, total, modelId, fileName) => {
-          sherpaDlState = {
-            model: `sherpa:${modelId}`,
-            completed,
-            total,
-            status: `downloading ${fileName}`,
-          };
-          if (win && !win.isDestroyed()) {
-            win.webContents.send('model:pullProgress', {
+    sherpaDownloadPromise = (async (): Promise<{ success: boolean; error?: string }> => {
+      // Cancel background download manager to avoid file conflicts. This is
+      // inside the shared promise so duplicate UI calls cannot pass through
+      // the wait window and start a second Sherpa download.
+      const bgMgr = ctx.getDownloadManager();
+      if (bgMgr) {
+        bgMgr.cancel();
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      try {
+        await mm.downloadAllModels(
+          (completed, total, modelId, fileName) => {
+            sherpaDlState = {
               model: `sherpa:${modelId}`,
-              status: `downloading ${fileName}`,
-              total,
               completed,
-            });
+              total,
+              status: `downloading ${fileName}`,
+            };
+            if (win && !win.isDestroyed()) {
+              win.webContents.send('model:pullProgress', {
+                model: `sherpa:${modelId}`,
+                status: `downloading ${fileName}`,
+                total,
+                completed,
+              });
+            }
+          },
+          controller.signal,
+          force,
+        );
+
+        // Verify all models are actually installed after download.
+        // On Windows, antivirus software may scan/lock files briefly after
+        // download, so retry verification with increasing delays.
+        let allReady = mm.areAllModelsReady();
+        if (!allReady) {
+          const retries = 5;
+          const baseDelay = 1000; // 1s, 2s, 3s, 4s, 5s
+          for (let i = 1; i <= retries; i++) {
+            console.log(`[sherpa:downloadModels] Verification attempt ${i}/${retries}, waiting ${baseDelay * i}ms...`);
+            await new Promise(resolve => setTimeout(resolve, baseDelay * i));
+            allReady = mm.areAllModelsReady();
+            if (allReady) break;
           }
-        },
-        sherpaAbort.signal,
-        force,
-      );
-
-      // Verify all models are actually installed after download
-      // On Windows, antivirus software may scan/lock files briefly after download,
-      // so we retry verification with increasing delays
-      let allReady = mm.areAllModelsReady();
-      if (!allReady) {
-        const retries = 5;
-        const baseDelay = 1000; // 1s, 2s, 3s, 4s, 5s
-        for (let i = 1; i <= retries; i++) {
-          console.log(`[sherpa:downloadModels] Verification attempt ${i}/${retries}, waiting ${baseDelay * i}ms...`);
-          await new Promise(resolve => setTimeout(resolve, baseDelay * i));
-          allReady = mm.areAllModelsReady();
-          if (allReady) break;
         }
-      }
-      if (!allReady) {
-        const statuses = mm.getModelsStatus();
-        const missing = statuses.filter(s => !s.installed).map(s => s.name);
-        console.error(`[sherpa:downloadModels] Download completed but verification failed after retries. Missing: ${missing.join(', ')}`);
-        return { success: false, error: `Model verification failed: ${missing.join(', ')} not found after download. This may be caused by antivirus software or a download mirror issue.` };
-      }
+        if (!allReady) {
+          const statuses = mm.getModelsStatus();
+          const missing = statuses.filter(s => !s.installed).map(s => s.name);
+          console.error(`[sherpa:downloadModels] Download completed but verification failed after retries. Missing: ${missing.join(', ')}`);
+          return { success: false, error: `Model verification failed: ${missing.join(', ')} not found after download. This may be caused by antivirus software or a download mirror issue.` };
+        }
 
-      // Send completion
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('model:pullProgress', {
-          model: 'sherpa:all',
-          status: 'success',
-          total: 1,
-          completed: 1,
-        });
-      }
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('model:pullProgress', {
+            model: 'sherpa:all',
+            status: 'success',
+            total: 1,
+            completed: 1,
+          });
+        }
 
-      return { success: true };
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
-        return { success: false, error: 'cancelled' };
+        return { success: true };
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          return { success: false, error: 'cancelled' };
+        }
+        return { success: false, error: err.message || 'Download failed' };
+      } finally {
+        if (sherpaAbort === controller) {
+          sherpaAbort = null;
+        }
+        sherpaDlState = null;
+        sherpaDownloadPromise = null;
       }
-      return { success: false, error: err.message || 'Download failed' };
-    } finally {
-      sherpaAbort = null;
-      sherpaDlState = null;
-    }
+    })();
+
+    return sherpaDownloadPromise;
   });
 
   ipcMain.handle('sherpa:cancelDownload', async () => {

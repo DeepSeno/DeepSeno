@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { execFileSync } from 'child_process';
+import ffmpeg from 'fluent-ffmpeg';
 import { VoiceBrainDB } from '../db/database';
 import { AudioPreprocessor } from '../audio/preprocessor';
 import { Transcriber } from '../audio/transcriber';
@@ -1307,6 +1308,7 @@ export class Processor {
   private async processVideo(task: QueueTask): Promise<void> {
     const originalPath = task.filePath;
     const fileName = path.basename(originalPath);
+    let recordingId: number | undefined;
     console.log(`[Processor] Video pipeline for: ${fileName} — extracting audio + keyframes`);
 
     try {
@@ -1320,7 +1322,6 @@ export class Processor {
     );
 
     await new Promise<void>((resolve, reject) => {
-      const ffmpeg = require('fluent-ffmpeg');
       ffmpeg(originalPath)
         .noVideo()
         .audioCodec('pcm_s16le')
@@ -1343,7 +1344,6 @@ export class Processor {
     if (needsTranscode) {
       console.log(`[Processor] Transcoding video to H.264 for web playback...`);
       await new Promise<void>((resolve, reject) => {
-        const ffmpeg = require('fluent-ffmpeg');
         ffmpeg(originalPath)
           .videoCodec('libx264')
           .addOption('-preset', 'fast')
@@ -1366,7 +1366,6 @@ export class Processor {
 
     // 2. Pre-create recording with video media_type so audio pipeline reuses it
     let recordedAt: string | undefined;
-    let recordingId: number;
     if (task.recordingId) {
       recordingId = task.recordingId;
       this.db.clearRecordingData(recordingId);
@@ -1486,6 +1485,8 @@ export class Processor {
 
     // Run audio pipeline
     await this.processFile(task);
+    task.filePath = originalPath;
+    task.recordingId = recordingId;
 
     // 5. Index frame analysis segments (after audio pipeline, which sets up queryEngine indexing)
     if (frameSegmentIds.length > 0 && this.queryEngine) {
@@ -1499,12 +1500,21 @@ export class Processor {
       console.log(`[Processor] Video: indexed ${frameSegmentIds.length} frame analysis segments`);
     }
     } catch (err: any) {
+      const message = err?.message || String(err);
+      task.filePath = originalPath;
+      if (recordingId) task.recordingId = recordingId;
       console.error(`[Processor] Video pipeline fatal error for ${fileName}:`, err);
       this.taskQueue.updateTask(task.id, {
         status: 'failed',
-        error: `Video processing failed: ${err.message || err}`,
+        error: `Video processing failed: ${message}`,
       });
-      try { this.db.updateRecordingStatus(task.recordingId || 0, 'failed'); } catch { /* ignore */ }
+      if (recordingId) {
+        try { this.db.updateRecordingStatus(recordingId, 'failed'); } catch { /* ignore */ }
+      }
+      throw new Error(`Video processing failed: ${message}`);
+    } finally {
+      task.filePath = originalPath;
+      if (recordingId) task.recordingId = recordingId;
     }
   }
 

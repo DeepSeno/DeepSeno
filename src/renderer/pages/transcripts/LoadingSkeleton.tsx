@@ -25,7 +25,7 @@ export default function LoadingSkeleton({ tr }: LoadingSkeletonProps) {
         }}
       >
         {/* Left rail skeleton */}
-        <div style={{ width: 280, borderRight: '1px solid var(--line)', display: 'flex', flexDirection: 'column', background: 'var(--bg)', flexShrink: 0 }}>
+        <div style={{ width: 320, borderRight: '1px solid var(--line)', display: 'flex', flexDirection: 'column', background: 'var(--bg)', flexShrink: 0 }}>
           <div style={{ padding: 12, borderBottom: '1px solid var(--line-soft)' }}>
             <Skeleton className="h-8 w-full rounded-lg" />
           </div>

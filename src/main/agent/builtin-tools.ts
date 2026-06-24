@@ -12,6 +12,7 @@ import { formatLocalDate } from '../utils/date';
 import type { AppSettings } from '../settings';
 import type { MessageRouter } from '../channels/router';
 import { getStr } from '../i18n';
+import { extractPdfText } from '../pipeline/text-extractor';
 
 export interface ToolContext {
   getDb: () => VoiceBrainDB;
@@ -1249,27 +1250,22 @@ export function registerBuiltinTools(registry: ToolRegistry, ctx: ToolContext): 
           return fail(getStr('tool.read_pdf.not_found')(filePath));
         }
 
-        // Use require() for CJS compatibility in Electron main process
-        const pdfParse = require('pdf-parse');
-        const buffer = fs.readFileSync(filePath);
-        const opts: any = {};
-        if (params.max_pages) {
-          opts.max = params.max_pages;
-        }
-        const data = await pdfParse(buffer, opts);
+        const data = await extractPdfText(filePath, { maxPages: params.max_pages });
+        const fullText = data.text || '';
+        const pages = data.pageCount || 0;
 
         // Truncate to avoid token overflow (~12K chars)
         const MAX_CHARS = 12000;
-        const truncated = data.text.length > MAX_CHARS;
-        const text = truncated ? data.text.slice(0, MAX_CHARS) + '\n\n[... content truncated]' : data.text;
+        const truncated = fullText.length > MAX_CHARS;
+        const text = truncated ? fullText.slice(0, MAX_CHARS) + '\n\n[... content truncated]' : fullText;
 
-        console.log(`[read_pdf] ${filePath} → ${data.numpages} pages, ${data.text.length} chars`);
+        console.log(`[read_pdf] ${filePath} → ${pages} pages, ${fullText.length} chars`);
         return ok({
           text,
-          pages: data.numpages,
+          pages,
           truncated,
-          originalLength: data.text.length,
-          message: getStr('tool.read_pdf.success')(data.numpages, data.text.length),
+          originalLength: fullText.length,
+          message: getStr('tool.read_pdf.success')(pages, fullText.length),
         });
       } catch (err: any) {
         return fail(getStr('tool.read_pdf.error')(err.message));

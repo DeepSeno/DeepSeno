@@ -32,6 +32,7 @@ interface ConversationListProps {
   onDeleteRecording?: (recordingId: number) => void;
   onRenameRecording?: (recordingId: number, newTitle: string) => void;
   onChangeCategory?: (recordingId: number, category: string | null) => void;
+  width?: number;
 }
 
 const CATEGORY_KEYS = ['all', 'note', 'meeting', 'document', 'media'] as const;
@@ -110,6 +111,7 @@ const ConversationList = React.memo(function ConversationList({
   tr, lang, className,
   categoryFilter, onCategoryChange, categoryCounts,
   onDeleteRecording, onRenameRecording, onChangeCategory,
+  width = 320,
 }: ConversationListProps) {
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -118,7 +120,15 @@ const ConversationList = React.memo(function ConversationList({
   return (
     <div
       className={`flex flex-col flex-shrink-0 ${className || ''}`}
-      style={{ width: 280, borderRight: '1px solid var(--line)', background: 'var(--bg)', minHeight: 0 }}
+      style={{
+        width,
+        minWidth: width,
+        maxWidth: width,
+        borderRight: '1px solid var(--line)',
+        background: 'var(--bg)',
+        minHeight: 0,
+        overflow: 'hidden',
+      }}
     >
       {/* Search + Category tabs */}
       <div style={{ padding: '12px 12px 8px', borderBottom: '1px solid var(--line-soft)', display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -136,7 +146,7 @@ const ConversationList = React.memo(function ConversationList({
         </div>
 
         {/* Category filter */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, minWidth: 0 }}>
           {CATEGORY_KEYS.map((key) => {
             const active = categoryFilter === key;
             const count = categoryCounts[key] || 0;
@@ -152,6 +162,7 @@ const ConversationList = React.memo(function ConversationList({
                   fontSize: 11,
                   opacity: disabled ? 0.4 : 1,
                   cursor: disabled ? 'default' : 'pointer',
+                  minWidth: 0,
                 }}
               >
                 {key !== 'all' && <CatIcon cat={key} />}
@@ -254,7 +265,15 @@ const ConversationList = React.memo(function ConversationList({
                       }}
                     >
                       {/* Line 1: title + date */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: isEditing ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) auto',
+                          alignItems: 'start',
+                          gap: 8,
+                          minWidth: 0,
+                        }}
+                      >
                         {isEditing ? (
                           <InlineEdit
                             value={conv.title}
@@ -271,6 +290,7 @@ const ConversationList = React.memo(function ConversationList({
                               textOverflow: 'ellipsis',
                               whiteSpace: 'nowrap',
                               minWidth: 0,
+                              display: 'block',
                             }}
                             onDoubleClick={(e) => { if (onRenameRecording) { e.stopPropagation(); setEditingId(conv.recordingId); } }}
                             title={conv.title}
@@ -304,8 +324,8 @@ const ConversationList = React.memo(function ConversationList({
                           </button>
                         </div>
                       ) : (
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, position: 'relative' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }} className="kz-mono kz-text-mute">
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, position: 'relative', gap: 8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, overflow: 'hidden' }} className="kz-mono kz-text-mute">
                             {conv.duration && <span style={{ fontSize: 10.5 }}>{conv.duration}</span>}
                             {conv.category === 'meeting' && conv.speakers > 0 && <span style={{ fontSize: 10.5 }}>{conv.speakers} {tr.speakers_unit}</span>}
                             {conv.category === 'document' && conv.pageCount != null && conv.pageCount > 0 && (

@@ -282,8 +282,27 @@ export class OpenAIClient implements LLMClient {
     try {
       const res = await fetch(`${this.baseUrl}/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(10_000),
       });
-      return res.ok;
+      if (res.ok) return true;
+      if (res.status === 401 || res.status === 403) return false;
+
+      const chatRes = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'test',
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (chatRes.ok) return true;
+      return chatRes.status === 400 || chatRes.status === 404;
     } catch {
       return false;
     }

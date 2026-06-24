@@ -166,6 +166,7 @@ vi.mock('../db/database', () => {
     getRecordingByPath: vi.fn(() => undefined),
     getRawDb: vi.fn(() => mockRawDb),
     setRecordingTags: vi.fn(),
+    updateRecordingFilePath: vi.fn(),
     buildVocabularyPromptBlock: vi.fn(() => ''),
   };
   return {
@@ -190,6 +191,12 @@ vi.mock('../audio/preprocessor', () => {
     __mockPreprocessor: preprocessor,
   };
 });
+
+vi.mock('../audio/ffmpeg-manager', () => ({
+  getFFmpegManager: vi.fn(() => ({
+    find: vi.fn(() => null),
+  })),
+}));
 
 // Mock Transcriber — use function class pattern
 vi.mock('../audio/transcriber', () => {
@@ -255,16 +262,29 @@ vi.mock('../output/markdown-generator', () => ({
 
 // Mock fluent-ffmpeg (imported by preprocessor)
 vi.mock('fluent-ffmpeg', () => {
-  const mockFfmpeg: any = vi.fn(() => ({
-    audioFrequency: vi.fn().mockReturnThis(),
-    audioChannels: vi.fn().mockReturnThis(),
-    audioCodec: vi.fn().mockReturnThis(),
-    output: vi.fn().mockReturnThis(),
-    setStartTime: vi.fn().mockReturnThis(),
-    setDuration: vi.fn().mockReturnThis(),
-    on: vi.fn().mockReturnThis(),
-    run: vi.fn(),
-  }));
+  const mockFfmpeg: any = vi.fn(() => {
+    const handlers: Record<string, (...args: any[]) => void> = {};
+    const chain: any = {
+      noVideo: vi.fn(() => chain),
+      videoCodec: vi.fn(() => chain),
+      addOption: vi.fn(() => chain),
+      audioFrequency: vi.fn(() => chain),
+      audioChannels: vi.fn(() => chain),
+      audioCodec: vi.fn(() => chain),
+      output: vi.fn(() => chain),
+      setStartTime: vi.fn(() => chain),
+      setDuration: vi.fn(() => chain),
+      on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+        handlers[event] = cb;
+        return chain;
+      }),
+      run: vi.fn(() => {
+        setTimeout(() => handlers.end?.(), 0);
+        return chain;
+      }),
+    };
+    return chain;
+  });
   mockFfmpeg.ffprobe = vi.fn();
   mockFfmpeg.setFfmpegPath = vi.fn();
   mockFfmpeg.setFfprobePath = vi.fn();
@@ -596,6 +616,50 @@ describe('Processor', () => {
       expect(result.status).toBe('completed');
       expect(mockDb.insertSegment).toHaveBeenCalled();
       expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
+    });
+
+    it('processes video through the audio pipeline and completes as the original video task', async () => {
+      const queue = processor.getTaskQueue();
+      processor.enqueue(`${TMP_DIR}/test_video_success.mp4`);
+
+      const result = await waitForTask(queue);
+
+      expect(result.status).toBe('completed');
+      expect(result.filePath).toBe(`${TMP_DIR}/test_video_success.mp4`);
+      expect(result.mediaType).toBe('video');
+      expect(mockDb.insertRecording).toHaveBeenCalledWith(expect.objectContaining({
+        file_name: 'test_video_success.mp4',
+        media_type: 'video',
+      }));
+      expect(mockDb.updateRecordingFilePath).toHaveBeenCalledWith(
+        1,
+        `${VB_TEST_BASE}/output/videos/test_video_success.mp4`,
+      );
+      expect(mockPreprocessor.convertTo16kMono).toHaveBeenCalledWith(
+        `${VB_TEST_BASE}/temp/test_video_success-audio.wav`,
+        `${VB_TEST_BASE}/temp`,
+      );
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
+    });
+
+    it('marks video task failed when delegated audio pipeline fails', async () => {
+      mockTranscribeFn.mockRejectedValueOnce(new Error('ASR model not found'));
+
+      const queue = processor.getTaskQueue();
+      processor.enqueue(`${TMP_DIR}/test_video.mp4`);
+
+      const result = await waitForTask(queue);
+
+      expect(result.status).toBe('failed');
+      expect(result.filePath).toBe(`${TMP_DIR}/test_video.mp4`);
+      expect(result.mediaType).toBe('video');
+      expect(result.error).toContain('Video processing failed');
+      expect(result.error).toContain('Transcription failed');
+      expect(mockDb.insertRecording).toHaveBeenCalledWith(expect.objectContaining({
+        file_name: 'test_video.mp4',
+        media_type: 'video',
+      }));
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'failed');
     });
   });
 

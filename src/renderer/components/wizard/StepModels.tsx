@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Download, CheckCircle2, XCircle, Loader2, Clock, Cpu, HardDrive, Monitor, Server } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useApi, ModelPullProgress, HardwareInfo } from '../../hooks/useApi';
@@ -14,6 +14,8 @@ interface ModelInfo {
 type ModelStatus = 'queued' | 'downloading' | 'done' | 'error' | 'skipped';
 type LocalStage = 'checking' | 'not_installed' | 'downloading' | 'installing' | 'starting' | 'ready' | 'error' | 'already_installed';
 
+const PULL_TERMINAL_RESTORE_WINDOW_MS = 60 * 1000;
+
 interface Props {
   onModelsReady: (models: string[]) => void;
   onSkip?: () => void;
@@ -25,6 +27,12 @@ const QUALITY_TONE: Record<string, 'warn' | 'info' | 'success'> = {
   good: 'info',
   excellent: 'success',
 };
+
+function shouldRestorePullState(state: ModelPullProgress): boolean {
+  if (state.status === 'downloading') return true;
+  if (!state.updatedAt) return false;
+  return Date.now() - state.updatedAt <= PULL_TERMINAL_RESTORE_WINDOW_MS;
+}
 
 export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommendedModel }: Props) {
   const { t, lang } = useI18n();
@@ -44,12 +52,47 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
   const [statuses, setStatuses] = useState<Record<string, ModelStatus>>({});
   const [progress, setProgress] = useState<Record<string, { completed: number; total: number; status: string }>>({});
   const [downloading, setDownloading] = useState(false);
+  const downloadingRef = useRef(false);
   const downloadedRef = useRef<string[]>([]);
+  const pullUpdatedAtRef = useRef<Record<string, number>>({});
   const [sherpaMirror, setSherpaMirror] = useState<'' | 'modelscope' | 'hf-mirror' | 'ghfast'>('modelscope');
 
   // Local install state
   const [localStage, setLocalStage] = useState<LocalStage>('checking');
   const [localProgress, setLocalProgress] = useState<{ completed: number; total: number }>({ completed: 0, total: 0 });
+
+  const applyPullProgress = useCallback((data: ModelPullProgress) => {
+    if (!data?.model) return;
+
+    const key = data.model.startsWith('sherpa:') ? 'sherpa-onnx' : data.model;
+    const incomingUpdatedAt = data.updatedAt ?? Date.now();
+    const lastUpdatedAt = pullUpdatedAtRef.current[key] ?? 0;
+    if (data.updatedAt && lastUpdatedAt > data.updatedAt) return;
+    pullUpdatedAtRef.current[key] = Math.max(lastUpdatedAt, incomingUpdatedAt);
+
+    setProgress((prev) => ({
+      ...prev,
+      [key]: { completed: data.completed, total: data.total, status: data.status },
+    }));
+
+    setStatuses((prev) => {
+      const next = { ...prev };
+      if (data.status === 'success' || data.status === 'done') {
+        next[key] = 'done';
+      } else if (data.status === 'error') {
+        next[key] = 'error';
+      } else if (data.status === 'cancelled') {
+        next[key] = 'queued';
+      } else {
+        next[key] = 'downloading';
+      }
+      return next;
+    });
+
+    if ((data.status === 'success' || data.status === 'done') && !downloadedRef.current.includes(key)) {
+      downloadedRef.current.push(key);
+    }
+  }, []);
 
   // Detect hardware on mount
   useEffect(() => {
@@ -111,7 +154,12 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
         const initial: Record<string, ModelStatus> = {};
         const done: string[] = [];
         for (const m of MODELS) {
-          if (m.isLocal && installed.some((n: string) => n.startsWith(m.name.split(':')[0]))) {
+          const localInstalled = installed.some((n: string) => (
+            n === m.name ||
+            n === `${m.name}:latest` ||
+            `${n}:latest` === `${m.name}:latest`
+          ));
+          if (m.isLocal && localInstalled) {
             initial[m.name] = 'done';
             done.push(m.name);
           } else if (m.name === 'sherpa-onnx' && sherpaStatus.allReady) {
@@ -121,7 +169,15 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
             initial[m.name] = 'queued';
           }
         }
-        setStatuses(initial);
+        setStatuses((prev) => {
+          const next = { ...initial };
+          for (const [name, status] of Object.entries(prev)) {
+            if (status === 'downloading' || status === 'error') {
+              next[name] = status;
+            }
+          }
+          return next;
+        });
         downloadedRef.current = done;
         if (done.length === MODELS.length) {
           onModelsReady(done);
@@ -137,17 +193,20 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
   // Subscribe to pull progress events
   useEffect(() => {
     const unsub = api.onModelPullProgress((_e, data: ModelPullProgress) => {
-      setProgress((prev) => {
-        // sherpa progress events are cumulative — route to 'sherpa-onnx' key
-        const key = data.model.startsWith('sherpa:') ? 'sherpa-onnx' : data.model;
-        return {
-          ...prev,
-          [key]: { completed: data.completed, total: data.total, status: data.status },
-        };
-      });
+      applyPullProgress(data);
     });
     return unsub;
-  }, []);
+  }, [api, applyPullProgress]);
+
+  useEffect(() => {
+    api.getPullStatus().then((states) => {
+      const list = Array.isArray(states) ? states : [];
+      for (const state of list) {
+        if (!shouldRestorePullState(state)) continue;
+        applyPullProgress(state);
+      }
+    }).catch(() => {});
+  }, [api, applyPullProgress]);
 
   // Subscribe to Local install progress events
   useEffect(() => {
@@ -159,48 +218,53 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
   }, []);
 
   async function startDownloads() {
+    if (downloadingRef.current) return;
+    downloadingRef.current = true;
     setDownloading(true);
 
-    // Step 0: Install Local if not installed
-    if (localStage === 'not_installed') {
-      setLocalStage('downloading');
-      const result = await api.installLocal();
-      if (!result.success) {
-        setLocalStage('error');
-        setDownloading(false);
-        return;
-      }
-      setLocalStage('ready');
-    }
-
-    // Step 1-N: Download models (existing logic)
-    const toDownload = MODELS.filter((m) => statuses[m.name] !== 'done');
-
-    for (const model of toDownload) {
-      setStatuses((prev) => ({ ...prev, [model.name]: 'downloading' }));
-      try {
-        if (model.isLocal) {
-          const result = await api.pullModel(model.name);
-          if (!result.success) {
-            setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
-            continue;
-          }
-        } else if (model.name === 'sherpa-onnx') {
-          const result = await api.downloadSherpaModels(sherpaMirror);
-          if (!result.success) {
-            setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
-            continue;
-          }
+    try {
+      // Step 0: Install Local if not installed
+      if (localStage === 'not_installed') {
+        setLocalStage('downloading');
+        const result = await api.installLocal();
+        if (!result.success) {
+          setLocalStage('error');
+          return;
         }
-        setStatuses((prev) => ({ ...prev, [model.name]: 'done' }));
-        downloadedRef.current.push(model.name);
-      } catch {
-        setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
+        setLocalStage('ready');
       }
-    }
 
-    setDownloading(false);
-    onModelsReady(downloadedRef.current);
+      // Step 1-N: Download models (existing logic)
+      const toDownload = MODELS.filter((m) => statuses[m.name] !== 'done');
+
+      for (const model of toDownload) {
+        setStatuses((prev) => ({ ...prev, [model.name]: 'downloading' }));
+        try {
+          if (model.isLocal) {
+            const result = await api.pullModel(model.name);
+            if (!result.success) {
+              setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
+              continue;
+            }
+          } else if (model.name === 'sherpa-onnx') {
+            const result = await api.downloadSherpaModels(sherpaMirror);
+            if (!result.success) {
+              setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
+              continue;
+            }
+          }
+          setStatuses((prev) => ({ ...prev, [model.name]: 'done' }));
+          downloadedRef.current.push(model.name);
+        } catch {
+          setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
+        }
+      }
+
+      onModelsReady(downloadedRef.current);
+    } finally {
+      downloadingRef.current = false;
+      setDownloading(false);
+    }
   }
 
   function formatBytes(bytes: number): string {
@@ -254,7 +318,9 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
   const qualityTone = hardware ? (QUALITY_TONE[hardware.recommendedQuality] || 'info') : 'info';
 
   // Compute Local download progress percentage
-  const localPct = localProgress.total > 0 ? Math.round((localProgress.completed / localProgress.total) * 100) : 0;
+  const localPct = localProgress.total > 0
+    ? Math.min(100, Math.max(0, Math.round((localProgress.completed / localProgress.total) * 100)))
+    : 0;
 
   return (
     <div className="flex flex-col flex-1 px-12 py-6 overflow-y-auto">
@@ -382,8 +448,8 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
         {MODELS.map((model) => {
             const status = statuses[model.name] || 'queued';
             const prog = progress[model.name];
-            const pct = prog && prog.total > 0 && prog.total > prog.completed
-              ? Math.min(100, Math.round((prog.completed / prog.total) * 100))
+            const pct = prog && prog.total > 0
+              ? Math.min(100, Math.max(0, Math.round((prog.completed / prog.total) * 100)))
               : 0;
             const showSize = prog && prog.total > 1024;
 

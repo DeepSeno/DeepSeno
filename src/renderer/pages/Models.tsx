@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Cpu, Sliders, Wrench } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useApi } from '../hooks/useApi';
+import type { ModelPullProgress } from '../hooks/useApi';
 import { useSettings } from '../hooks/useSettings';
 import { useNotifications } from '../components/NotificationCenter';
 import { StatusBadge } from '../components/settings';
@@ -11,6 +12,19 @@ import AdvancedSection from './settings/models/AdvancedSection';
 import type { LocalInstallStage, LocalModelStatus } from './settings/models/types';
 
 export type { LocalInstallStage, LocalModelStatus };
+
+function toPercent(completed: number, total: number): number {
+  if (!total || total <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
+}
+
+const PULL_TERMINAL_RESTORE_WINDOW_MS = 60 * 1000;
+
+function shouldRestorePullState(state: ModelPullProgress): boolean {
+  if (state.status === 'downloading') return true;
+  if (!state.updatedAt) return false;
+  return Date.now() - state.updatedAt <= PULL_TERMINAL_RESTORE_WINDOW_MS;
+}
 
 export default function Models() {
   const { t, lang } = useI18n();
@@ -39,6 +53,8 @@ export default function Models() {
   const [localModelStatuses, setLocalModelStatuses] = useState<Record<string, LocalModelStatus>>({});
   const [localModelErrors, setLocalModelErrors] = useState<Record<string, string>>({});
   const [localModelProgress, setLocalModelProgress] = useState<Record<string, { completed: number; total: number }>>({});
+  const localModelPullUpdatedAtRef = useRef<Record<string, number>>({});
+  const localModelPullInFlightRef = useRef<Set<string>>(new Set());
   const [localTesting, setLocalTesting] = useState(false);
   const [recentlyTested, setRecentlyTested] = useState<string | null>(null);
 
@@ -55,6 +71,58 @@ export default function Models() {
 
   // ─── Hardware info for model recommendations ───────────────
   const [totalMemoryGB, setTotalMemoryGB] = useState(0);
+
+  const applyLocalModelPullState = useCallback((data: ModelPullProgress) => {
+    if (!data?.model || data.model.startsWith('sherpa:')) return;
+    const incomingUpdatedAt = data.updatedAt ?? Date.now();
+    const lastUpdatedAt = localModelPullUpdatedAtRef.current[data.model] ?? 0;
+    if (data.updatedAt && lastUpdatedAt > data.updatedAt) return;
+    localModelPullUpdatedAtRef.current[data.model] = Math.max(lastUpdatedAt, incomingUpdatedAt);
+
+    const status = data.status || 'downloading';
+    setLocalModelStatuses((prev) => {
+      const next = { ...prev };
+      if (status === 'testing') {
+        next[data.model] = 'testing';
+      } else if (status === 'success' || status === 'done') {
+        next[data.model] = 'done';
+      } else if (status === 'cancelled') {
+        next[data.model] = 'queued';
+      } else if (status === 'error') {
+        next[data.model] = 'error';
+      } else {
+        next[data.model] = 'downloading';
+      }
+      return next;
+    });
+
+    setLocalModelErrors((prev) => {
+      const next = { ...prev };
+      if (status === 'error') {
+        next[data.model] = data.error || s.model_failed;
+      } else if (status?.startsWith('updating_local')) {
+        next[data.model] = s.local_updating;
+      } else {
+        delete next[data.model];
+      }
+      return next;
+    });
+
+    setLocalModelProgress((prev) => {
+      const next = { ...prev };
+      if (status === 'cancelled' || status === 'error') {
+        delete next[data.model];
+        return next;
+      }
+      if ((data.total ?? 0) > 0 || (data.completed ?? 0) > 0) {
+        next[data.model] = {
+          completed: data.completed ?? 0,
+          total: data.total ?? 0,
+        };
+      }
+      return next;
+    });
+  }, [s.local_updating, s.model_failed]);
 
   // ─── Load data on mount ────────────────────────────────────
   useEffect(() => {
@@ -81,7 +149,7 @@ export default function Models() {
       if (dlState) {
         setSvModelStatus('downloading');
         if (dlState.total > 0) {
-          setSvDownloadProgress(Math.round((dlState.completed / dlState.total) * 100));
+          setSvDownloadProgress(toPercent(dlState.completed, dlState.total));
         }
       } else {
         setSvModelStatus(r.allReady ? 'ready' : 'missing');
@@ -96,32 +164,14 @@ export default function Models() {
           setSvModelStatus('ready');
           setSvDownloadProgress(100);
         } else if (data.total > 0) {
-          setSvDownloadProgress(Math.round((data.completed / data.total) * 100));
+          setSvDownloadProgress(toPercent(data.completed, data.total));
         }
       } else {
-        if (data.status === 'testing') {
-          setLocalModelStatuses((prev) => ({ ...prev, [data.model]: 'testing' }));
-          setLocalModelErrors((prev) => {
-            const next = { ...prev };
-            delete next[data.model];
-            return next;
-          });
-        }
-        if (data.status?.startsWith('updating_local')) {
-          setLocalModelStatuses((prev) => ({ ...prev, [data.model]: 'downloading' }));
-          setLocalModelErrors((prev) => ({
-            ...prev,
-            [data.model]: s.local_updating,
-          }));
-        }
-        setLocalModelProgress((prev) => ({
-          ...prev,
-          [data.model]: { completed: data.completed, total: data.total },
-        }));
+        applyLocalModelPullState(data);
       }
     });
     return unsub;
-  }, []);
+  }, [applyLocalModelPullState]);
 
   useEffect(() => {
     api.isLocalInstalled().then((installed) => {
@@ -136,16 +186,14 @@ export default function Models() {
   }, []);
 
   useEffect(() => {
-    api.getPullStatus().then((state) => {
-      if (state) {
-        setLocalModelStatuses((prev) => ({ ...prev, [state.model]: 'downloading' }));
-        setLocalModelProgress((prev) => ({
-          ...prev,
-          [state.model]: { completed: state.completed, total: state.total },
-        }));
+    api.getPullStatus().then((states) => {
+      const list = Array.isArray(states) ? states : [];
+      for (const state of list) {
+        if (!shouldRestorePullState(state)) continue;
+        applyLocalModelPullState(state);
       }
     }).catch(() => {});
-  }, []);
+  }, [api, applyLocalModelPullState]);
 
   useEffect(() => {
     const llm = settings?.llmModel || 'qwen3.5:4b';
@@ -154,8 +202,14 @@ export default function Models() {
     setLocalModelStatuses((prev) => {
       const next = { ...prev };
       for (const m of toCheck) {
-        if (next[m] !== 'downloading' && next[m] !== 'testing') {
-          next[m] = localModels.some((n) => n === m || n === `${m}:latest` || `${n}:latest` === `${m}:latest`) ? 'done' : 'queued';
+        const installed = localModels.some((n) => n === m || n === `${m}:latest` || `${n}:latest` === `${m}:latest`);
+        if (next[m] === 'downloading' || next[m] === 'testing') {
+          continue;
+        }
+        if (installed) {
+          next[m] = 'done';
+        } else if (next[m] !== 'error') {
+          next[m] = 'queued';
         }
       }
       return next;
@@ -266,6 +320,8 @@ export default function Models() {
   }, [api, s, toast, checkLocal, handleInstallLocal]);
 
   const handlePullLocalModel = useCallback(async (modelName: string, force = false) => {
+    if (localModelPullInFlightRef.current.has(modelName)) return;
+    localModelPullInFlightRef.current.add(modelName);
     setLocalModelStatuses((prev) => ({ ...prev, [modelName]: 'downloading' }));
     setLocalModelErrors((prev) => { const next = { ...prev }; delete next[modelName]; return next; });
     try {
@@ -290,6 +346,8 @@ export default function Models() {
       setLocalModelStatuses((prev) => ({ ...prev, [modelName]: 'error' }));
       setLocalModelErrors((prev) => ({ ...prev, [modelName]: msg }));
       toast('error', msg);
+    } finally {
+      localModelPullInFlightRef.current.delete(modelName);
     }
   }, [api, toast, checkLocal]);
 
@@ -365,8 +423,8 @@ export default function Models() {
     }
   }, [api, s, settings?.llmModel, toast, lang]);
 
-  const handleCancelLocalPull = useCallback(() => {
-    api.cancelPull();
+  const handleCancelLocalPull = useCallback((modelName?: string) => {
+    api.cancelPull(modelName);
   }, [api]);
 
   // ─── Loading state ───────────────────────────────────────────

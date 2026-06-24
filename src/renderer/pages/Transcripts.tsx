@@ -72,6 +72,12 @@ export default function Transcripts() {
   const [showTranscript, setShowTranscript] = useState(true);
   const isCompact = containerWidth < 1024;
   const isMobile = containerWidth < 768;
+  const conversationListWidth = isMobile
+    ? 280
+    : containerWidth >= 1280
+      ? Math.min(360, Math.max(320, Math.round(containerWidth * 0.22)))
+      : 300;
+  const showSideQAPanel = showTranscript && !isMobile && containerWidth >= 1100;
 
   // --- Effects ---
 
@@ -548,12 +554,12 @@ export default function Transcripts() {
       >
         {isMobile && showSidebar && (
           <div className="absolute inset-0 z-20 flex">
-            <ConversationList {...sidebarProps} className="!w-[280px] shadow-xl z-10" />
+            <ConversationList {...sidebarProps} width={280} className="shadow-xl z-10" />
             <div className="flex-1 bg-black/20" onClick={() => setShowSidebar(false)} />
           </div>
         )}
 
-        {!isMobile && <ConversationList {...sidebarProps} />}
+        {!isMobile && <ConversationList {...sidebarProps} width={conversationListWidth} />}
 
         {/* Main content area: per-column headers, no global top bar */}
         <div className="flex-1 flex min-h-0" style={{ background: 'var(--bg-card)' }}>
@@ -594,7 +600,7 @@ export default function Transcripts() {
               </div>
             );
 
-            const qaColumn = showTranscript && !isMobile ? (
+            const qaColumn = showSideQAPanel ? (
               <>
                 <div onMouseDown={handleDragStart} className="group/drag flex-shrink-0 cursor-col-resize flex items-center justify-center relative" style={{ width: 12 }}>
                   <div className="group-hover/drag:bg-[var(--line-strong)] transition-colors" style={{ width: 1, height: '100%', background: 'var(--line)' }} />

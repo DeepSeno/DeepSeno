@@ -14,6 +14,11 @@ import { useApi } from '../../../hooks/useApi';
 import { useI18n } from '../../../i18n';
 import type { ModelsSectionProps } from './types';
 
+function toPercent(completed: number, total: number): number {
+  if (!total || total <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
+}
+
 interface CloudPreset {
   id: string;
   name: string;
@@ -417,7 +422,7 @@ export default function EnginesSection(props: ModelsSectionProps) {
                 {llmListItems.map((model) => {
                   const status = localModelStatuses[model.name] || 'queued';
                   const prog = localModelProgress[model.name];
-                  const pct = prog && prog.total > 0 ? Math.round((prog.completed / prog.total) * 100) : 0;
+                  const pct = prog && prog.total > 0 ? toPercent(prog.completed, prog.total) : 0;
                   const isSelected = model.name === llmModel;
                   const isDownloading = status === 'downloading';
                   const isTesting = status === 'testing';
@@ -517,7 +522,7 @@ export default function EnginesSection(props: ModelsSectionProps) {
                             </span>
                           )}
                           {isDownloading ? (
-                            <button onClick={onCancelLocalPull} className="kz-btn kz-btn--sm">
+                            <button onClick={() => onCancelLocalPull(model.name)} className="kz-btn kz-btn--sm">
                               <XCircle size={11} />
                               {s.cancel}
                             </button>
@@ -572,7 +577,7 @@ export default function EnginesSection(props: ModelsSectionProps) {
                 {(() => {
                   const embedStatus = localModelStatuses['bge-m3'] || 'queued';
                   const embedProg = localModelProgress['bge-m3'];
-                  const embedPct = embedProg && embedProg.total > 0 ? Math.round((embedProg.completed / embedProg.total) * 100) : 0;
+                  const embedPct = embedProg && embedProg.total > 0 ? toPercent(embedProg.completed, embedProg.total) : 0;
                   const isDownloading = embedStatus === 'downloading';
                   const isTesting = embedStatus === 'testing';
                   return (
@@ -615,7 +620,7 @@ export default function EnginesSection(props: ModelsSectionProps) {
                             </span>
                           )}
                           {isDownloading ? (
-                            <button onClick={onCancelLocalPull} className="kz-btn kz-btn--sm">
+                            <button onClick={() => onCancelLocalPull('bge-m3')} className="kz-btn kz-btn--sm">
                               <XCircle size={11} />
                               {s.cancel}
                             </button>

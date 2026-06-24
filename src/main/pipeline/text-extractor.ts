@@ -6,10 +6,14 @@ interface ExtractedText {
   wordCount?: number;
 }
 
+interface ExtractPdfOptions {
+  maxPages?: number;
+}
+
 export async function extractText(filePath: string, mediaType: string): Promise<ExtractedText> {
   switch (mediaType) {
     case 'pdf':
-      return extractPdf(filePath);
+      return extractPdfText(filePath);
     case 'docx':
       return extractDocx(filePath);
     case 'text':
@@ -19,37 +23,81 @@ export async function extractText(filePath: string, mediaType: string): Promise<
   }
 }
 
-async function extractPdf(filePath: string): Promise<ExtractedText> {
+export async function extractPdfText(filePath: string, options: ExtractPdfOptions = {}): Promise<ExtractedText> {
+  ensurePdfJsGlobals();
   const mod = await import('pdf-parse');
   const PDFParse = mod.PDFParse || mod.default;
 
   const buffer = await fs.readFile(filePath);
 
-  // pdf-parse v2: class-based API — new PDFParse(Uint8Array) + load() + getText()
-  if (typeof PDFParse === 'function' && PDFParse.prototype && PDFParse.prototype.load) {
+  // pdf-parse v2: class-based API — new PDFParse({ data }) + getText()
+  if (typeof PDFParse === 'function' && PDFParse.prototype && PDFParse.prototype.getText) {
     const uint8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const parser = new PDFParse(uint8);
-    await parser.load();
-    const info = await parser.getInfo();
-    const result = await parser.getText();
-    const text = (typeof result === 'string' ? result : result?.text || '').trim();
-    parser.destroy();
-    return {
-      text,
-      pageCount: info?.total || info?.numPages || undefined,
-      wordCount: countWords(text),
-    };
+    const parser = new PDFParse({ data: uint8 });
+    try {
+      const parseOptions = options.maxPages && options.maxPages > 0
+        ? { first: Math.floor(options.maxPages) }
+        : undefined;
+      const result = await parser.getText(parseOptions);
+      const text = (typeof result === 'string' ? result : result?.text || '').trim();
+      return {
+        text,
+        pageCount: typeof result === 'string' ? undefined : result?.total,
+        wordCount: countWords(text),
+      };
+    } finally {
+      await parser.destroy?.();
+    }
   }
 
   // pdf-parse v1: function-based API — pdfParse(buffer) returns { text, numpages }
   const pdfParse = PDFParse;
-  const data = await pdfParse(buffer);
+  const data = await pdfParse(buffer, options.maxPages ? { max: Math.floor(options.maxPages) } : undefined);
   const text = data.text.trim();
   return {
     text,
     pageCount: data.numpages,
     wordCount: countWords(text),
   };
+}
+
+function ensurePdfJsGlobals(): void {
+  const g = globalThis as typeof globalThis & {
+    DOMMatrix?: any;
+  };
+
+  if (!g.DOMMatrix) {
+    g.DOMMatrix = class DOMMatrix {
+      a = 1;
+      b = 0;
+      c = 0;
+      d = 1;
+      e = 0;
+      f = 0;
+      is2D = true;
+      isIdentity = true;
+
+      constructor(init?: number[] | string) {
+        if (Array.isArray(init)) {
+          this.a = Number(init[0] ?? 1);
+          this.b = Number(init[1] ?? 0);
+          this.c = Number(init[2] ?? 0);
+          this.d = Number(init[3] ?? 1);
+          this.e = Number(init[4] ?? 0);
+          this.f = Number(init[5] ?? 0);
+          this.isIdentity = this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 && this.e === 0 && this.f === 0;
+        }
+      }
+
+      multiplySelf(): this { return this; }
+      preMultiplySelf(): this { return this; }
+      translate(): this { return this; }
+      translateSelf(): this { return this; }
+      scale(): this { return this; }
+      scaleSelf(): this { return this; }
+      invertSelf(): this { return this; }
+    };
+  }
 }
 
 async function extractDocx(filePath: string): Promise<ExtractedText> {

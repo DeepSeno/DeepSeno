@@ -330,8 +330,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('system:pullModel', modelName, force),
   testLocal: (modelName?: string) =>
     ipcRenderer.invoke('system:testLocal', modelName),
-  cancelPull: () =>
-    ipcRenderer.invoke('system:cancelPull'),
+  cancelPull: (modelName?: string) =>
+    ipcRenderer.invoke('system:cancelPull', modelName),
   getPullStatus: () =>
     ipcRenderer.invoke('system:getPullStatus'),
   checkSherpaModels: () =>

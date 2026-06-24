@@ -28,6 +28,8 @@ const ENV_LABELS: Record<string, { en: string; zh: string }> = {
   sherpaModels:{ en: 'ASR Models',   zh: 'ASR 模型' },
 };
 
+const CLOUD_ENV_LABEL = { en: 'Cloud API', zh: '云端 API' };
+
 function formatBytes(bytes: number) {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -249,7 +251,10 @@ export default function SystemSection({
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {ENV_KEYS.map((key, i) => {
               const val = envResult[key];
-              const label = ENV_LABELS[key]?.[lang === 'zh' ? 'zh' : 'en'] || (key as string);
+              const locale = lang === 'zh' ? 'zh' : 'en';
+              const label = key === 'local' && settings.llmProvider === 'openai'
+                ? CLOUD_ENV_LABEL[locale]
+                : ENV_LABELS[key]?.[locale] || (key as string);
               const isMissing = val.status !== 'ok';
               return (
                 <div

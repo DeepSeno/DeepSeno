@@ -191,6 +191,8 @@ export function createMockApi(): VoiceBrainApi {
     }),
     listModels: async () => [],
     pullModel: async (m: string) => ({ success: false, model: m }),
+    cancelPull: async () => {},
+    getPullStatus: async () => [],
     checkSherpaModels: async () => ({ allReady: false, models: [] }),
     downloadSherpaModels: async () => ({ success: false, error: 'mock' }),
     cancelSherpaDownload: async () => {},
