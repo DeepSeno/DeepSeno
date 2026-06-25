@@ -412,7 +412,9 @@ jobs:
             echo -n "{\"filename\":\"$fname\",\"cdn_url\":\"$cdn_url\",\"size\":$fsize,\"checksum\":\"\"}" >> /tmp/confirm.json
           }
 
-          for f in artifacts/macos/*.dmg artifacts/macos/*.zip artifacts/windows/*.exe; do
+          # 发布服务器只需要可安装包。macOS ZIP 仍保留在 GitHub Release 产物中，
+          # 但不再上传到发布服务器，避免 ZIP 上传失败阻断发布。
+          for f in artifacts/macos/*.dmg artifacts/windows/*.exe; do
             [ -f "$f" ] || continue
             upload_file "$f"
           done
