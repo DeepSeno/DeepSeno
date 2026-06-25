@@ -1067,6 +1067,7 @@ export const zh = {
       model_smoke_testing: '模型测试中',
       model_smoke_test_ok: '模型测试通过',
       model_smoke_test_failed: '模型测试失败',
+      model_smoke_test_timeout: '模型测试超时，请确认模型已下载且 Local 正在运行',
       model_storage: '模型存储',
       model_storage_desc: '打开 Local 模型目录，可手动删除不需要的模型',
       open_directory: '打开目录',

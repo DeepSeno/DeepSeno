@@ -5,6 +5,7 @@ import { loadSettings } from '../settings';
 import { getLLMModel } from '../llm/create-client';
 import { requireId, requireString, ValidationError } from './validate';
 import { RagStreamRegistry } from '../rag/stream-state';
+import { assertRagModelConfigured, formatRagModelError } from '../rag/model-readiness';
 
 let streamAbort: AbortController | null = null;
 let scopedStreamAbort: AbortController | null = null;
@@ -140,10 +141,12 @@ export function registerRagHandlers(ctx: IpcContext): void {
   ipcMain.handle('rag:query', async (_event, question: string) => {
     try {
       const validQuestion = requireString(question, 'question', 5000);
+      assertRagModelConfigured(loadSettings());
       return await ctx.getQueryEngine().query(validQuestion);
     } catch (err: any) {
+      const message = formatRagModelError(err);
       return {
-        answer: `查询失败: ${err.message || 'Unknown error'}. 请确认 Local 已启动且 bge-m3、qwen3.5 模型已加载。`,
+        answer: `查询失败: ${message}`,
         sources: [],
       };
     }
@@ -168,7 +171,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
   ipcMain.handle('rag:queryStream', async (_event, question: string, sessionId?: number) => {
     try {
       const validQuestion = requireString(question, 'question', 5000);
-      const _ragSettings = loadSettings();
+      assertRagModelConfigured(loadSettings());
       const win = ctx.getWindow();
       let fullText = '';
       streamAbort = new AbortController();
@@ -240,11 +243,12 @@ export function registerRagHandlers(ctx: IpcContext): void {
       return { success: true };
     } catch (err: any) {
       streamRegistry.cancelGlobal();
+      const message = formatRagModelError(err);
       const win = ctx.getWindow();
       if (win && !win.isDestroyed()) {
-        win.webContents.send('rag:stream:error', err.message || 'Unknown error');
+        win.webContents.send('rag:stream:error', message);
       }
-      return { success: false, error: err.message };
+      return { success: false, error: message };
     }
   });
 
@@ -274,6 +278,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
     try {
       const validQuestion = requireString(question, 'question', 5000);
       const validRecordingId = requireId(recordingId, 'recordingId');
+      assertRagModelConfigured(loadSettings());
       const win = ctx.getWindow();
 
       try {
@@ -330,11 +335,12 @@ export function registerRagHandlers(ctx: IpcContext): void {
       return { success: true };
     } catch (err: any) {
       streamRegistry.cancelScoped();
+      const message = formatRagModelError(err);
       const win = ctx.getWindow();
       if (win && !win.isDestroyed()) {
-        win.webContents.send('rag:scoped:error', err.message || 'Unknown error');
+        win.webContents.send('rag:scoped:error', message);
       }
-      return { success: false, error: err.message };
+      return { success: false, error: message };
     }
   });
 }

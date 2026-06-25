@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useNotifications } from '../../components/NotificationCenter';
 import { Translations } from '../../i18n';
 import { ChatMessage, Source, Session, UnifiedSession, nextMsgId, parseDbTime } from './types';
+import { getRagStreamFailureMessage } from './rag-stream-result';
 
 export function useChat(a: Translations['asst']) {
   const api = useApi();
@@ -41,6 +42,7 @@ export function useChat(a: Translations['asst']) {
   const [elapsed, setElapsed] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelledRef = useRef(false);
+  const userStoppedRef = useRef(false);
   const aRef = useRef(a);
   useEffect(() => { aRef.current = a; }, [a]);
   // Ref to latest loadSessions so the once-only stream subscription effect
@@ -333,6 +335,7 @@ export function useChat(a: Translations['asst']) {
     setInput('');
     streamTextRef.current = '';
     cancelledRef.current = false;
+    userStoppedRef.current = false;
     streamIdRef.current += 1;
 
     if (!firstMessageSent.current) {
@@ -370,9 +373,24 @@ export function useChat(a: Translations['asst']) {
         }
         return;
       }
-      await api.ragQueryStream(query, activeSessionId);
-    } catch {
-      const errContent = `[${a.error}] ${a.error_desc}`;
+      const result = await api.ragQueryStream(query, activeSessionId);
+      const failure = getRagStreamFailureMessage(result, a.error_desc);
+      if (failure) {
+        if (userStoppedRef.current) {
+          setIsLoading(false);
+          setStreamStatus('');
+          return;
+        }
+        throw new Error(failure);
+      }
+    } catch (err: any) {
+      if (userStoppedRef.current) {
+        setIsLoading(false);
+        setStreamStatus('');
+        return;
+      }
+      const detail = typeof err?.message === 'string' && err.message.trim() ? err.message : a.error_desc;
+      const errContent = `[${a.error}] ${detail}`;
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.streaming) return [...prev.slice(0, -1), { ...last, content: errContent, streaming: false }];
@@ -424,6 +442,7 @@ export function useChat(a: Translations['asst']) {
 
   function handleStop() {
     cancelledRef.current = true;
+    userStoppedRef.current = true;
     streamTextRef.current = '';
     api.ragCancelStream().catch(() => {});
     setMessages((prev) => {

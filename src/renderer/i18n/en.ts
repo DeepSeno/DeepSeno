@@ -1068,6 +1068,7 @@ export const en = {
       model_smoke_testing: 'Model testing',
       model_smoke_test_ok: 'Model test passed',
       model_smoke_test_failed: 'Model test failed',
+      model_smoke_test_timeout: 'Model test timed out. Make sure the model is downloaded and Local is running.',
       model_storage: 'Model Storage',
       model_storage_desc: 'Open Local models directory to manually delete models',
       open_directory: 'Open folder',

@@ -26,6 +26,7 @@ import {
   toLocalDateStr,
 } from './dashboard/index';
 import { deriveRecordingTitle } from '../utils/recordingTitle';
+import { isModelInstalled } from './settings/models/model-status';
 
 const IMPORT_FILTERS = [
   {
@@ -254,13 +255,14 @@ export default function Dashboard() {
         const sherpaResult = await api.checkSherpaModels();
         const sherpaReady = sherpaResult.allReady;
 
-        // LLM is ready if: (local provider + has model selected) OR (cloud provider + has url + key + model)
+        // LLM is ready only when the selected runtime is actually usable.
         let llmReady = false;
         if (settings.llmProvider === 'openai') {
           llmReady = !!(settings.cloudApiUrl && settings.cloudApiKey && settings.cloudModel);
         } else {
-          // Local: check if model is selected
-          llmReady = !!(settings.llmModel);
+          const selectedModel = settings.llmModel || 'qwen3.5:4b';
+          const models = await api.listModels();
+          llmReady = isModelInstalled(models, selectedModel);
         }
 
         if (!cancelled) {

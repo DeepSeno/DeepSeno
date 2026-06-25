@@ -524,17 +524,15 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   ipcMain.handle('system:listModels', async () => {
     try {
       const modelsDir = getLLMModelsDir();
-      const { GGUF_CATALOG } = await import('../llm/gguf-model-catalog');
-      return GGUF_CATALOG
-        .filter((m) => {
-          try {
-            const stat = fs.statSync(path.join(modelsDir, m.fileName));
-            return stat.size >= m.fileSizeBytes * 0.95;
-          } catch {
-            return false;
-          }
-        })
-        .map((m) => m.id);
+      const { getDownloadedGGUFModelIds } = await import('../llm/gguf-model-files');
+      return getDownloadedGGUFModelIds((fileName) => {
+        try {
+          const stat = fs.statSync(path.join(modelsDir, fileName));
+          return stat.size;
+        } catch {
+          return null;
+        }
+      });
     } catch {
       return [];
     }

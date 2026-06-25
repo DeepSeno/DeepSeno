@@ -13,6 +13,7 @@ import Select from '../../../components/Select';
 import { useApi } from '../../../hooks/useApi';
 import { useI18n } from '../../../i18n';
 import type { ModelsSectionProps } from './types';
+import { getLocalModelTestButtonClass } from './local-model-test';
 
 function toPercent(completed: number, total: number): number {
   if (!total || total <= 0) return 0;
@@ -57,7 +58,7 @@ interface ModelCatalogEntry {
 }
 
 const MODEL_CATALOG: ModelCatalogEntry[] = [
-  { name: 'qwen3.5:4b',   fileGB: 3.4, runGB: 6,  perf: 70, arch: 'dense' },
+  { name: 'qwen3.5:4b',   fileGB: 2.7, runGB: 6,  perf: 70, arch: 'dense' },
   { name: 'qwen3.5:9b',   fileGB: 6.6, runGB: 10, perf: 78, arch: 'dense' },
   { name: 'qwen3.5:27b',  fileGB: 17,  runGB: 22, perf: 86, arch: 'dense' },
   { name: 'qwen3.5:35b',  fileGB: 24,  runGB: 30, perf: 85, arch: 'moe' },
@@ -485,16 +486,16 @@ export default function EnginesSection(props: ModelsSectionProps) {
                               <button
                                 onClick={() => onTestLocal(model.name)}
                                 disabled={localTesting}
-                                className={`kz-btn kz-btn--sm${localTesting ? ' opacity-50' : ''}`}
+                                className={getLocalModelTestButtonClass(model.name, recentlyTested, localTesting)}
                               >
                                 {localTesting ? (
                                   <Loader2 size={11} className="animate-spin" />
                                 ) : recentlyTested === model.name ? (
-                                  <CheckCircle2 size={11} className="text-emerald-500" />
+                                  <CheckCircle2 size={11} />
                                 ) : (
                                   <RefreshCw size={11} />
                                 )}
-                                {recentlyTested === model.name ? '' : s.test}
+                                {s.test}
                               </button>
                             </>
                           )}
@@ -586,7 +587,7 @@ export default function EnginesSection(props: ModelsSectionProps) {
                         <div className="w-3 h-3 flex-shrink-0" />
                         <div className="flex-1 min-w-0 flex items-center gap-2">
                           <span className="kz-mono kz-text-soft truncate" style={{ fontSize: 12.5 }}>bge-m3</span>
-                          <span className="kz-mono kz-text-faint flex-shrink-0" style={{ fontSize: 11 }}>~1.2 GB</span>
+                          <span className="kz-mono kz-text-faint flex-shrink-0" style={{ fontSize: 11 }}>~0.63 GB</span>
                           <span className="kz-badge kz-badge--violet">embed</span>
                         </div>
                         <div className="flex items-center gap-2 flex-shrink-0">

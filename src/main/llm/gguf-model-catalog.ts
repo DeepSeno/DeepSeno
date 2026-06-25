@@ -50,7 +50,7 @@ export const GGUF_CATALOG: GGUFModelEntry[] = [
   {
     id: 'qwen3.5:4b',
     fileName: 'Qwen3.5-4B-Q4_K_M.gguf',
-    fileSizeBytes: 3_400_000_000,
+    fileSizeBytes: 2_740_000_000,
     msRepo: 'unsloth/Qwen3.5-4B-GGUF',
     msFilePath: 'Qwen3.5-4B-Q4_K_M.gguf',
     mirrors: {
@@ -112,7 +112,7 @@ export const GGUF_CATALOG: GGUFModelEntry[] = [
   {
     id: 'bge-m3',
     fileName: 'bge-m3-Q8_0.gguf',
-    fileSizeBytes: 1_200_000_000,
+    fileSizeBytes: 634_000_000,
     msRepo: 'gpustack/bge-m3-GGUF',
     msFilePath: 'bge-m3-Q8_0.gguf',
     mirrors: {

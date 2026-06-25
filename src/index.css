@@ -561,6 +561,15 @@
   background: var(--bg-card);
 }
 .kz-btn--danger:hover { background: var(--c-danger-bg); }
+.kz-btn--success {
+  color: var(--c-success);
+  border-color: var(--c-success);
+  background: var(--bg-card);
+}
+.kz-btn--success:hover {
+  border-color: var(--c-success);
+  background: var(--bg-card);
+}
 .kz-btn--sm { height: 27px; padding: 0 11px; font-size: 11.5px; border-radius: 7px; }
 .kz-btn--lg { height: 38px; padding: 0 18px; font-size: 13px; }
 

@@ -10,6 +10,8 @@ import EnginesSection from './settings/models/EnginesSection';
 import BehaviorSection from './settings/models/BehaviorSection';
 import AdvancedSection from './settings/models/AdvancedSection';
 import type { LocalInstallStage, LocalModelStatus } from './settings/models/types';
+import { isModelInstalled, mergeInstalledModelStatuses } from './settings/models/model-status';
+import { LOCAL_MODEL_TEST_TIMEOUT_MS, shouldRestartLocalServerAfterTest, toLocalModelApiName } from './settings/models/local-model-test';
 
 export type { LocalInstallStage, LocalModelStatus };
 
@@ -27,7 +29,7 @@ function shouldRestorePullState(state: ModelPullProgress): boolean {
 }
 
 export default function Models() {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const api = useApi();
   const { toast } = useNotifications();
   const s = t.settings;
@@ -128,9 +130,8 @@ export default function Models() {
   useEffect(() => {
     if (settings?.llmProvider === 'local') {
       checkLlamaServer();
-    } else {
-      checkLocal();
     }
+    checkLocal();
     api.detectHardware().then((hw) => setTotalMemoryGB(hw.totalMemoryGB)).catch(() => {});
   }, []);
 
@@ -197,23 +198,7 @@ export default function Models() {
 
   useEffect(() => {
     const llm = settings?.llmModel || 'qwen3.5:4b';
-    const QWEN_SIZES = ['qwen3.5:4b', 'qwen3.5:9b', 'qwen3.5:27b', 'qwen3.5:35b', 'qwen3.5:122b'];
-    const toCheck = new Set([...QWEN_SIZES, llm, 'bge-m3']);
-    setLocalModelStatuses((prev) => {
-      const next = { ...prev };
-      for (const m of toCheck) {
-        const installed = localModels.some((n) => n === m || n === `${m}:latest` || `${n}:latest` === `${m}:latest`);
-        if (next[m] === 'downloading' || next[m] === 'testing') {
-          continue;
-        }
-        if (installed) {
-          next[m] = 'done';
-        } else if (next[m] !== 'error') {
-          next[m] = 'queued';
-        }
-      }
-      return next;
-    });
+    setLocalModelStatuses((prev) => mergeInstalledModelStatuses(prev, localModels, llm));
   }, [localModels, settings?.llmModel]);
 
   // ─── Core callbacks ──────────────────────────────────────────
@@ -352,7 +337,9 @@ export default function Models() {
   }, [api, toast, checkLocal]);
 
   const handleTestLocal = useCallback(async (modelName?: string) => {
-    const model = modelName || settings?.llmModel || 'qwen3.5:4b';
+    const selectedModel = settings?.llmModel || 'qwen3.5:4b';
+    const model = modelName || selectedModel;
+    const shouldRestoreSelectedModel = shouldRestartLocalServerAfterTest(model, selectedModel);
     setLocalTesting(true);
     try {
       // Ensure llama-server is running
@@ -368,28 +355,32 @@ export default function Models() {
       const port = (await api.llamaStatus()).port;
       if (!port) throw new Error('llama-server port not available');
 
-      // Convert model name to GGUF filename format (e.g. "qwen3.5:4b" → "Qwen3.5-4B-Q4_K_M")
-      const modelMap: Record<string, string> = {
-        'qwen3.5:4b': 'Qwen3.5-4B-Q4_K_M',
-        'qwen3.5:9b': 'Qwen3.5-9B-Q4_K_M',
-        'qwen3.5:27b': 'Qwen3.5-27B-Q4_K_M',
-        'qwen3.5:35b': 'Qwen3.5-35B-A3B-Q4_K_M',
-        'qwen3.5:122b': 'Qwen3.5-122B-A10B-Q4_K_M',
-      };
-      const apiModel = modelMap[model] || model;
+      const apiModel = toLocalModelApiName(model);
 
       // Send a test request via the running server
-
-      const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: apiModel,
-          messages: [{ role: 'user', content: 'hi' }],
-          max_tokens: 5,
-          temperature: 0,
-        }),
-      });
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), LOCAL_MODEL_TEST_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: apiModel,
+            messages: [{ role: 'user', content: 'hi' }],
+            max_tokens: 5,
+            temperature: 0,
+          }),
+          signal: controller.signal,
+        });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          throw new Error(s.model_smoke_test_timeout || 'Model test timed out');
+        }
+        throw err;
+      } finally {
+        window.clearTimeout(timer);
+      }
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -412,16 +403,16 @@ export default function Models() {
       setLocalModelErrors((prev) => ({ ...prev, [model]: msg }));
       toast('error', msg);
     } finally {
+      setLocalTesting(false);
       // Restore the selected model if we tested a different one
-      if (model !== selectedModel) {
+      if (shouldRestoreSelectedModel) {
         try {
           await api.llamaStop();
           await api.llamaStart();
         } catch { /* best effort restore */ }
       }
-      setLocalTesting(false);
     }
-  }, [api, s, settings?.llmModel, toast, lang]);
+  }, [api, s, settings?.llmModel, toast]);
 
   const handleCancelLocalPull = useCallback((modelName?: string) => {
     api.cancelPull(modelName);
@@ -442,8 +433,8 @@ export default function Models() {
   const llmReady = settings?.llmProvider === 'openai'
     ? cloudStatus === 'connected'
     : settings?.llmProvider === 'local'
-      ? localModelStatuses[llmModel] === 'done'  // Model downloaded = ready
-      : localModels.some((n) => n === llmModel || n === `${llmModel}:latest` || `${n}:latest` === `${llmModel}:latest`);
+      ? localModelStatuses[llmModel] === 'done' || isModelInstalled(localModels, llmModel)
+      : isModelInstalled(localModels, llmModel);
   const sherpaReady = svModelStatus === 'ready';
   const engineReady = settings?.llmProvider === 'openai' ? true : settings?.llmProvider === 'local' ? true : localReady; // llama-server binary is always bundled
   const allReady = engineReady && llmReady && sherpaReady;
