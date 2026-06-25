@@ -155,8 +155,16 @@ export default function Recordings() {
     'wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm',
     'mp4', 'mkv', 'avi', 'mov', 'wmv',
     'pdf', 'docx', 'txt', 'md',
+    'jpg', 'jpeg', 'png', 'heic', 'webp',
   ]);
   const DOC_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md']);
+  const IMPORT_FILTERS = [
+    { name: 'All Supported', extensions: ['wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm', 'mp4', 'mkv', 'avi', 'mov', 'wmv', 'pdf', 'docx', 'txt', 'md', 'jpg', 'jpeg', 'png', 'heic', 'webp'] },
+    { name: 'Audio', extensions: ['wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm'] },
+    { name: 'Video', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv'] },
+    { name: 'Documents', extensions: ['pdf', 'docx', 'txt', 'md'] },
+    { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'heic', 'webp'] },
+  ];
   const MAX_MEDIA_SIZE = 500 * 1024 * 1024; // 500MB for audio/video
   const MAX_DOC_SIZE = 50 * 1024 * 1024;    // 50MB for documents
 
@@ -187,15 +195,35 @@ export default function Recordings() {
   }
 
   async function handleBrowse() {
-    const filePath = await api.openFile([
-      { name: 'All Supported', extensions: ['wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm', 'mp4', 'mkv', 'avi', 'mov', 'pdf', 'docx', 'txt', 'md'] },
-      { name: 'Audio', extensions: ['wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm'] },
-      { name: 'Video', extensions: ['mp4', 'mkv', 'avi', 'mov'] },
-      { name: 'Documents', extensions: ['pdf', 'docx', 'txt', 'md'] },
-    ]);
-    if (filePath) {
-      try { await api.enqueue(filePath); } catch (err) { toast('error', r.pipeline_failed, String(err)); }
+    try {
+      const filePaths = await api.openFiles(IMPORT_FILTERS);
+      if (!filePaths || filePaths.length === 0) return;
+
+      let enqueued = 0;
+      let skipped = 0;
+      let lastError = '';
+      for (const filePath of filePaths) {
+        try {
+          const result = await api.enqueue(filePath);
+          if (result?.status === 'failed') {
+            skipped++;
+            lastError = result.error || r.unknown_error;
+          } else {
+            enqueued++;
+          }
+        } catch (err) {
+          skipped++;
+          lastError = String(err);
+        }
+      }
+      if (enqueued > 0) {
+        toast('success', `${enqueued} ${r.files_queued}`, skipped > 0 ? `${skipped} ${r.files_skipped}` : undefined);
+      } else if (skipped > 0) {
+        toast('error', r.pipeline_failed, lastError || r.drop_formats);
+      }
       loadQueue();
+    } catch (err) {
+      toast('error', r.pipeline_failed, String(err));
     }
   }
 

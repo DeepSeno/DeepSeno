@@ -4,9 +4,11 @@ import { MemoryExtractor } from '../agent/memory-extractor';
 import { loadSettings } from '../settings';
 import { getLLMModel } from '../llm/create-client';
 import { requireId, requireString, ValidationError } from './validate';
+import { RagStreamRegistry } from '../rag/stream-state';
 
 let streamAbort: AbortController | null = null;
 let scopedStreamAbort: AbortController | null = null;
+const streamRegistry = new RagStreamRegistry();
 
 export function registerRagHandlers(ctx: IpcContext): void {
   // ─── Chat Sessions ───────────────────────────────────────
@@ -152,6 +154,15 @@ export function registerRagHandlers(ctx: IpcContext): void {
       streamAbort.abort();
       streamAbort = null;
     }
+    streamRegistry.cancelGlobal();
+  });
+
+  ipcMain.handle('rag:getActiveStream', (_event, sessionId?: number) => {
+    try {
+      return streamRegistry.getGlobal(typeof sessionId === 'number' ? sessionId : undefined);
+    } catch {
+      return null;
+    }
   });
 
   ipcMain.handle('rag:queryStream', async (_event, question: string, sessionId?: number) => {
@@ -161,15 +172,18 @@ export function registerRagHandlers(ctx: IpcContext): void {
       const win = ctx.getWindow();
       let fullText = '';
       streamAbort = new AbortController();
+      streamRegistry.startGlobal({ question: validQuestion, sessionId });
       const result = await ctx.getQueryEngine().queryStream(
         validQuestion,
         (chunk) => {
           fullText += chunk;
+          streamRegistry.appendGlobalChunk(chunk);
           if (win && !win.isDestroyed()) {
             win.webContents.send('rag:stream:chunk', chunk);
           }
         },
         (status) => {
+          streamRegistry.setGlobalStatus(status);
           if (win && !win.isDestroyed()) {
             win.webContents.send('rag:stream:status', status);
           }
@@ -199,6 +213,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
       if (win && !win.isDestroyed()) {
         win.webContents.send('rag:stream:done', result.sources);
       }
+      streamRegistry.finishGlobal();
 
       // Extract memories from chat conversation (fire-and-forget, never blocks response)
       try {
@@ -224,6 +239,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
 
       return { success: true };
     } catch (err: any) {
+      streamRegistry.cancelGlobal();
       const win = ctx.getWindow();
       if (win && !win.isDestroyed()) {
         win.webContents.send('rag:stream:error', err.message || 'Unknown error');
@@ -237,6 +253,15 @@ export function registerRagHandlers(ctx: IpcContext): void {
     if (scopedStreamAbort) {
       scopedStreamAbort.abort();
       scopedStreamAbort = null;
+    }
+    streamRegistry.cancelScoped();
+  });
+
+  ipcMain.handle('rag:getActiveScopedStream', (_event, recordingId: number) => {
+    try {
+      return streamRegistry.getScoped(requireId(recordingId, 'recordingId'));
+    } catch {
+      return null;
     }
   });
 
@@ -265,16 +290,19 @@ export function registerRagHandlers(ctx: IpcContext): void {
 
       let fullText = '';
       scopedStreamAbort = new AbortController();
+      streamRegistry.startScoped({ question: validQuestion, recordingId: validRecordingId });
       const result = await ctx.getQueryEngine().queryScopedStream(
         validQuestion,
         validRecordingId,
         (chunk) => {
           fullText += chunk;
+          streamRegistry.appendScopedChunk(chunk);
           if (win && !win.isDestroyed()) {
             win.webContents.send('rag:scoped:chunk', chunk);
           }
         },
         (status) => {
+          streamRegistry.setScopedStatus(status);
           if (win && !win.isDestroyed()) {
             win.webContents.send('rag:scoped:status', status);
           }
@@ -298,8 +326,10 @@ export function registerRagHandlers(ctx: IpcContext): void {
       if (win && !win.isDestroyed()) {
         win.webContents.send('rag:scoped:done', result.sources);
       }
+      streamRegistry.finishScoped();
       return { success: true };
     } catch (err: any) {
+      streamRegistry.cancelScoped();
       const win = ctx.getWindow();
       if (win && !win.isDestroyed()) {
         win.webContents.send('rag:scoped:error', err.message || 'Unknown error');

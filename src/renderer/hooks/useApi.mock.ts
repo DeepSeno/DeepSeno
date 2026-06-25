@@ -91,6 +91,7 @@ const defaultSettings: AppSettings = {
 export function createMockApi(): VoiceBrainApi {
   return {
     openFile: async () => null,
+    openFiles: async () => [],
     selectDirectory: async () => null,
     enqueue: async (_filePath: string) => ({ id: 'mock', status: 'pending' }),
     getQueue: async () => [],
@@ -156,11 +157,13 @@ export function createMockApi(): VoiceBrainApi {
     ragQuery: async () => ({ answer: '', sources: [] }),
     ragQueryStream: async () => ({ success: false }),
     ragCancelStream: async () => {},
+    getActiveRagStream: async () => null,
     onRagStreamChunk: () => () => {},
     onRagStreamDone: () => () => {},
     onRagStreamError: () => () => {},
     onRagStreamStatus: () => () => {},
     ragScopedQueryStream: async () => ({ success: false }),
+    getActiveScopedRagStream: async () => null,
     onRagScopedChunk: () => () => {},
     onRagScopedDone: () => () => {},
     onRagScopedError: () => () => {},

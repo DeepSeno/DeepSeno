@@ -961,32 +961,39 @@ export class Processor {
       if (!this.queryEngine) {
         console.warn('[Processor] Step 8: Vector indexing skipped — queryEngine not initialized (non-fatal)');
       } else {
-        const indexReporter = new ProgressReporter({
-          label: '向量索引',
-          total: allMergedSegments.length,
-          onTick: (note) => {
-            console.log(`[Processor] ${note}`);
-            this.taskQueue.updateTask(task.id, { notes: note });
-          },
-          step: Math.max(1, Math.floor(allMergedSegments.length / 10)),
-        });
-        let indexed = 0;
-        for (let vi = 0; vi < allMergedSegments.length; vi++) {
-          const seg = allMergedSegments[vi];
-          if (seg.segment_id && seg.clean_text) {
-            await this.queryEngine.indexSegment(
-              seg.segment_id,
-              seg.clean_text
-            );
-            indexed++;
+        try {
+          const indexReporter = new ProgressReporter({
+            label: '向量索引',
+            total: allMergedSegments.length,
+            onTick: (note) => {
+              console.log(`[Processor] ${note}`);
+              this.taskQueue.updateTask(task.id, { notes: note });
+            },
+            step: Math.max(1, Math.floor(allMergedSegments.length / 10)),
+          });
+          let indexed = 0;
+          for (let vi = 0; vi < allMergedSegments.length; vi++) {
+            const seg = allMergedSegments[vi];
+            if (seg.segment_id && seg.clean_text) {
+              await this.queryEngine.indexSegment(
+                seg.segment_id,
+                seg.clean_text
+              );
+              indexed++;
+            }
+            // Sub-step progress: 85 → 95 across segments
+            this.taskQueue.updateTask(task.id, {
+              progress: Math.round(85 + ((vi + 1) / allMergedSegments.length) * 10),
+            });
+            indexReporter.advance();
           }
-          // Sub-step progress: 85 → 95 across segments
+          console.log(`[Processor] Step 8: Indexed ${indexed}/${allMergedSegments.length} segments into vector store`);
+        } catch (err: any) {
+          console.warn(`[Processor] Step 8: Vector indexing failed (non-fatal): ${err?.message || err}`);
           this.taskQueue.updateTask(task.id, {
-            progress: Math.round(85 + ((vi + 1) / allMergedSegments.length) * 10),
-        });
-        indexReporter.advance();
+            notes: `向量索引失败，已保留文本内容: ${String(err?.message || err).slice(0, 80)}`,
+          });
         }
-        console.log(`[Processor] Step 8: Indexed ${indexed}/${allMergedSegments.length} segments into vector store`);
       }
 
       // 9. Generate Markdown output + Obsidian sync
@@ -1200,16 +1207,23 @@ export class Processor {
       // 7. Vector indexing
       if (this.queryEngine) {
         this.taskQueue.updateTask(task.id, { status: 'indexing', progress: 75, notes: 'Indexing vectors...' });
-        let indexed = 0;
-        for (const segId of segmentIds) {
-          const seg = this.db.getSegment(segId);
-          const text = seg?.clean_text || seg?.raw_text || '';
-          if (text.length > 10) {
-            await this.queryEngine.indexSegment(segId, text);
-            indexed++;
+        try {
+          let indexed = 0;
+          for (const segId of segmentIds) {
+            const seg = this.db.getSegment(segId);
+            const text = seg?.clean_text || seg?.raw_text || '';
+            if (text.length > 10) {
+              await this.queryEngine.indexSegment(segId, text);
+              indexed++;
+            }
           }
+          console.log(`[Processor] Doc step 7: Indexed ${indexed}/${segmentIds.length} chunks`);
+        } catch (err: any) {
+          console.warn(`[Processor] Doc step 7: Vector indexing failed (non-fatal): ${err?.message || err}`);
+          this.taskQueue.updateTask(task.id, {
+            notes: `向量索引失败，已保留文档文本: ${String(err?.message || err).slice(0, 80)}`,
+          });
         }
-        console.log(`[Processor] Doc step 7: Indexed ${indexed}/${segmentIds.length} chunks`);
       }
 
       // 8. Memory extraction
@@ -1490,14 +1504,18 @@ export class Processor {
 
     // 5. Index frame analysis segments (after audio pipeline, which sets up queryEngine indexing)
     if (frameSegmentIds.length > 0 && this.queryEngine) {
-      for (const segId of frameSegmentIds) {
-        const seg = this.db.getSegment(segId);
-        const text = seg?.clean_text || seg?.raw_text || '';
-        if (text.length > 10) {
-          await this.queryEngine.indexSegment(segId, text);
+      try {
+        for (const segId of frameSegmentIds) {
+          const seg = this.db.getSegment(segId);
+          const text = seg?.clean_text || seg?.raw_text || '';
+          if (text.length > 10) {
+            await this.queryEngine.indexSegment(segId, text);
+          }
         }
+        console.log(`[Processor] Video: indexed ${frameSegmentIds.length} frame analysis segments`);
+      } catch (err: any) {
+        console.warn(`[Processor] Video frame vector indexing failed (non-fatal): ${err?.message || err}`);
       }
-      console.log(`[Processor] Video: indexed ${frameSegmentIds.length} frame analysis segments`);
     }
     } catch (err: any) {
       const message = err?.message || String(err);
@@ -1735,16 +1753,23 @@ export class Processor {
       // 7. Vector indexing
       if (this.queryEngine) {
         this.taskQueue.updateTask(task.id, { status: 'indexing', progress: 70, notes: 'Indexing vectors...' });
-        let indexed = 0;
-        for (const segId of segmentIds) {
-          const seg = this.db.getSegment(segId);
-          const text = seg?.clean_text || seg?.raw_text || '';
-          if (text.length > 10) {
-            await this.queryEngine.indexSegment(segId, text);
-            indexed++;
+        try {
+          let indexed = 0;
+          for (const segId of segmentIds) {
+            const seg = this.db.getSegment(segId);
+            const text = seg?.clean_text || seg?.raw_text || '';
+            if (text.length > 10) {
+              await this.queryEngine.indexSegment(segId, text);
+              indexed++;
+            }
           }
+          console.log(`[Processor] Image step 7: Indexed ${indexed}/${segmentIds.length} segments`);
+        } catch (err: any) {
+          console.warn(`[Processor] Image step 7: Vector indexing failed (non-fatal): ${err?.message || err}`);
+          this.taskQueue.updateTask(task.id, {
+            notes: `向量索引失败，已保留图片分析文本: ${String(err?.message || err).slice(0, 80)}`,
+          });
         }
-        console.log(`[Processor] Image step 7: Indexed ${indexed}/${segmentIds.length} segments`);
       }
 
       // 8. Memory extraction
@@ -1987,16 +2012,23 @@ export class Processor {
       // 6. Vector indexing
       if (this.queryEngine) {
         this.taskQueue.updateTask(task.id, { status: 'indexing', progress: 85, notes: 'Indexing vectors...' });
-        let indexed = 0;
-        for (const segId of allSegmentIds) {
-          const seg = this.db.getSegment(segId);
-          const text = seg?.clean_text || seg?.raw_text || '';
-          if (text.length > 10) {
-            await this.queryEngine.indexSegment(segId, text);
-            indexed++;
+        try {
+          let indexed = 0;
+          for (const segId of allSegmentIds) {
+            const seg = this.db.getSegment(segId);
+            const text = seg?.clean_text || seg?.raw_text || '';
+            if (text.length > 10) {
+              await this.queryEngine.indexSegment(segId, text);
+              indexed++;
+            }
           }
+          console.log(`[Processor] Image group: indexed ${indexed}/${allSegmentIds.length} segments`);
+        } catch (err: any) {
+          console.warn(`[Processor] Image group vector indexing failed (non-fatal): ${err?.message || err}`);
+          this.taskQueue.updateTask(task.id, {
+            notes: `向量索引失败，已保留图片组分析文本: ${String(err?.message || err).slice(0, 80)}`,
+          });
         }
-        console.log(`[Processor] Image group: indexed ${indexed}/${allSegmentIds.length} segments`);
       }
 
       // 7. Memory extraction

@@ -8,7 +8,7 @@ export default function Assistant() {
   const { t, lang } = useI18n();
   const a = t.asst;
 
-  const chat = useChat(a, t, lang);
+  const chat = useChat(a);
 
   return (
     <div className="h-[calc(100vh-7rem)] flex flex-col">

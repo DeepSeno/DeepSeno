@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('api', {
   // #region Dialog APIs
   openFile: (filters?: { name: string; extensions: string[] }[]) =>
     ipcRenderer.invoke('dialog:openFile', filters),
+  openFiles: (filters?: { name: string; extensions: string[] }[]) =>
+    ipcRenderer.invoke('dialog:openFiles', filters),
   selectDirectory: () =>
     ipcRenderer.invoke('dialog:selectDirectory'),
   // #endregion
@@ -246,6 +248,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('rag:queryStream', question, sessionId),
   ragCancelStream: () =>
     ipcRenderer.invoke('rag:cancelStream'),
+  getActiveRagStream: (sessionId?: number) =>
+    ipcRenderer.invoke('rag:getActiveStream', sessionId),
   onRagStreamChunk: (cb: (_event: any, chunk: string) => void) => {
     ipcRenderer.on('rag:stream:chunk', cb);
     return () => { ipcRenderer.removeListener('rag:stream:chunk', cb); };
@@ -272,6 +276,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('rag:scopedQueryStream', question, recordingId, history),
   ragCancelScopedStream: () =>
     ipcRenderer.invoke('rag:cancelScopedStream'),
+  getActiveScopedRagStream: (recordingId: number) =>
+    ipcRenderer.invoke('rag:getActiveScopedStream', recordingId),
   onRagScopedChunk: (cb: (_event: any, chunk: string) => void) => {
     ipcRenderer.on('rag:scoped:chunk', cb);
     return () => { ipcRenderer.removeListener('rag:scoped:chunk', cb); };

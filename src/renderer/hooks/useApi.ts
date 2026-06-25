@@ -313,6 +313,18 @@ export interface RagSource {
   time: string;
 }
 
+export interface ActiveRagStream {
+  kind: 'global' | 'scoped';
+  question: string;
+  text: string;
+  status: string;
+  active: boolean;
+  startedAt: number;
+  updatedAt: number;
+  sessionId?: number;
+  recordingId?: number;
+}
+
 export interface ChannelSessionRow {
   id: number;
   channel_id: string;
@@ -496,16 +508,19 @@ export interface ParsedSchedule {
 export interface VoiceBrainApi {
   // Dialog
   openFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
+  openFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>;
   selectDirectory: () => Promise<string | null>;
 
   // Pipeline
-  enqueue: (filePath: string) => Promise<{ id: string; status: string }>;
+  enqueue: (filePath: string) => Promise<{ id: string; status: string; error?: string }>;
   getQueue: () => Promise<Array<{
     id: string;
     filePath: string;
     status: string;
     progress: number;
     error?: string;
+    notes?: string;
+    mediaType?: string;
     createdAt: string;
   }>>;
   cancelTask: (taskId: string) => Promise<boolean>;
@@ -639,6 +654,7 @@ export interface VoiceBrainApi {
   ragQuery: (question: string) => Promise<{ answer: string; sources: RagSource[] }>;
   ragQueryStream: (question: string, sessionId?: number) => Promise<{ success: boolean; error?: string }>;
   ragCancelStream: () => Promise<void>;
+  getActiveRagStream: (sessionId?: number) => Promise<ActiveRagStream | null>;
   onRagStreamChunk: (cb: (event: IpcEvent, chunk: string) => void) => () => void;
   onRagStreamDone: (cb: (event: IpcEvent, sources: RagSource[]) => void) => () => void;
   onRagStreamError: (cb: (event: IpcEvent, error: string) => void) => () => void;
@@ -650,6 +666,7 @@ export interface VoiceBrainApi {
     recordingId: number,
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   ) => Promise<{ success: boolean; error?: string }>;
+  getActiveScopedRagStream: (recordingId: number) => Promise<ActiveRagStream | null>;
   onRagScopedChunk: (cb: (event: IpcEvent, chunk: string) => void) => () => void;
   onRagScopedDone: (cb: (event: IpcEvent, sources: RagSource[]) => void) => () => void;
   onRagScopedError: (cb: (event: IpcEvent, error: string) => void) => () => void;

@@ -306,7 +306,7 @@ export const zh = {
       drop_desc: '\u62d6\u62fd\u6587\u4ef6\u5230\u6b64\u5904\uff0c\u6216\u70b9\u51fb\u6d4f\u89c8',
       queue_in_progress: '\u8fdb\u884c\u4e2d',
       auto_process: '\u81ea\u52a8\u5904\u7406',
-      drop_formats: '\u97f3\u9891 \u00b7 \u89c6\u9891 \u00b7 \u6587\u6863',
+      drop_formats: '\u97f3\u9891 \u00b7 \u89c6\u9891 \u00b7 \u6587\u6863 \u00b7 \u56fe\u7247',
       recording_saved: '\u5f55\u97f3\u5df2\u4fdd\u5b58\u5e76\u5165\u961f',
       recording_error: '\u5f55\u97f3\u5931\u8d25',
       ffmpeg_missing: 'FFmpeg 未安装，请安装 FFmpeg 以启用录音功能。',

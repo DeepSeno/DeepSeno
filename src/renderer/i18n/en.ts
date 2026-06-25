@@ -303,7 +303,7 @@ export const en = {
       drop_desc: 'Drag files here or click to browse',
       queue_in_progress: 'in progress',
       auto_process: 'Auto-process',
-      drop_formats: 'Audio \u00b7 Video \u00b7 Documents',
+      drop_formats: 'Audio \u00b7 Video \u00b7 Documents \u00b7 Images',
       recording_saved: 'Recording saved and queued',
       recording_error: 'Recording failed',
       ffmpeg_missing: 'FFmpeg not available. Install FFmpeg to enable recording.',

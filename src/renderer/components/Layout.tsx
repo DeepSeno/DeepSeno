@@ -29,6 +29,7 @@ const SUPPORTED_EXTS = new Set([
   'wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm',
   'mp4', 'mkv', 'avi', 'mov', 'wmv',
   'pdf', 'docx', 'txt', 'md',
+  'jpg', 'jpeg', 'png', 'heic', 'webp',
 ]);
 const DOC_EXTS = new Set(['pdf', 'docx', 'txt', 'md']);
 const MAX_MEDIA_SIZE = 500 * 1024 * 1024; // 500MB for audio/video

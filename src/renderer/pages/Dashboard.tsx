@@ -14,6 +14,7 @@ import { useApi, RecordingRow, MeetingNotes, CuratedDay } from '../hooks/useApi'
 import { useNavigate, useLocation } from 'react-router-dom';
 import { OnboardingCard } from '../components/OnboardingCard';
 import { Skeleton } from '../components/Skeleton';
+import { useNotifications } from '../components/NotificationCenter';
 import {
   TodayEvents,
   QuickAsk,
@@ -26,6 +27,22 @@ import {
 } from './dashboard/index';
 import { deriveRecordingTitle } from '../utils/recordingTitle';
 
+const IMPORT_FILTERS = [
+  {
+    name: 'All Supported',
+    extensions: [
+      'wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm',
+      'mp4', 'mkv', 'avi', 'mov', 'wmv',
+      'pdf', 'docx', 'txt', 'md',
+      'jpg', 'jpeg', 'png', 'heic', 'webp',
+    ],
+  },
+  { name: 'Audio', extensions: ['wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm'] },
+  { name: 'Video', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv'] },
+  { name: 'Documents', extensions: ['pdf', 'docx', 'txt', 'md'] },
+  { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'heic', 'webp'] },
+];
+
 // ─── Component ───────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -33,7 +50,9 @@ export default function Dashboard() {
   const api = useApi();
   const navigate = useNavigate();
   const location = useLocation();
+  const { toast } = useNotifications();
   const d = t.dash;
+  const r = t.rec;
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -259,13 +278,38 @@ export default function Dashboard() {
   // ─── Event handlers ────────────────────────────────────────
 
   const handleImportFile = useCallback(async () => {
-    const filePath = await api.openFile([
-      { name: 'Audio', extensions: ['wav', 'mp3', 'm4a', 'ogg', 'flac', 'webm'] },
-      { name: 'Video', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv'] },
-      { name: 'Documents', extensions: ['pdf', 'docx', 'txt', 'md'] },
-    ]);
-    if (filePath) await api.enqueue(filePath);
-  }, [api]);
+    try {
+      const filePaths = await api.openFiles(IMPORT_FILTERS);
+      if (!filePaths || filePaths.length === 0) return;
+
+      let enqueued = 0;
+      let skipped = 0;
+      let lastError = '';
+      for (const filePath of filePaths) {
+        try {
+          const result = await api.enqueue(filePath);
+          if (result?.status === 'failed') {
+            skipped++;
+            lastError = result.error || r.unknown_error;
+          } else {
+            enqueued++;
+          }
+        } catch (err) {
+          skipped++;
+          lastError = String(err);
+        }
+      }
+
+      if (enqueued > 0) {
+        toast('success', `${enqueued} ${r.files_queued}`, skipped > 0 ? `${skipped} ${r.files_skipped}` : undefined);
+      } else if (skipped > 0) {
+        toast('error', r.pipeline_failed, lastError || r.drop_formats);
+      }
+      fetchData();
+    } catch (err) {
+      toast('error', r.pipeline_failed, String(err));
+    }
+  }, [api, fetchData, r, toast]);
 
   // ─── Derived data ──────────────────────────────────────────
 

@@ -41,6 +41,7 @@ export function useScopedChat(recordingId: number | undefined) {
     (async () => {
       try {
         const rows = await window.api.getRecordingChatMessages(recordingId);
+        const activeStream = await window.api.getActiveScopedRagStream(recordingId).catch(() => null);
         if (cancelled) return;
         const hydrated: ScopedMessage[] = rows
           .filter((r) => r.role === 'user' || r.role === 'assistant')
@@ -50,9 +51,27 @@ export function useScopedChat(recordingId: number | undefined) {
             role: r.role as 'user' | 'assistant',
             content: r.content,
           }));
-        setMessages(hydrated);
+        if (activeStream?.active) {
+          streamTextRef.current = activeStream.text || '';
+          setStatus(activeStream.status || '');
+          setIsLoading(true);
+          const hasQuestion = hydrated.some((m) => m.role === 'user' && m.content === activeStream.question);
+          setMessages([
+            ...hydrated,
+            ...(hasQuestion ? [] : [{ clientId: nextClientId(), role: 'user' as const, content: activeStream.question }]),
+            { clientId: nextClientId(), role: 'assistant', content: activeStream.text || '', streaming: true },
+          ]);
+        } else {
+          setIsLoading(false);
+          setStatus('');
+          setMessages(hydrated);
+        }
       } catch {
-        if (!cancelled) setMessages([]);
+        if (!cancelled) {
+          setMessages([]);
+          setIsLoading(false);
+          setStatus('');
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -115,7 +134,7 @@ export function useScopedChat(recordingId: number | undefined) {
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           if (last?.streaming) return [...prev.slice(0, -1), { ...last, content: errContent, streaming: false }];
-          return [...prev, { role: 'assistant', content: errContent }];
+          return [...prev, { clientId: nextClientId(), role: 'assistant', content: errContent }];
         });
         setIsLoading(false);
       }),

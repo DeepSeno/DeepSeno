@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useApi, ChatMessageRow, RagSource, ChannelSessionRow } from '../../hooks/useApi';
+import { useApi, ChatMessageRow, RagSource, ChannelSessionRow, ActiveRagStream } from '../../hooks/useApi';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useNotifications } from '../../components/NotificationCenter';
 import { Translations } from '../../i18n';
 import { ChatMessage, Source, Session, UnifiedSession, nextMsgId, parseDbTime } from './types';
 
-export function useChat(a: Translations['asst'], t: Translations, lang: string) {
+export function useChat(a: Translations['asst']) {
   const api = useApi();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -146,8 +146,30 @@ export function useChat(a: Translations['asst'], t: Translations, lang: string) 
   async function loadSessionMessages(sessionId: number) {
     try {
       const rows = await api.getSessionMessages(sessionId);
+      let activeStream: ActiveRagStream | null = null;
+      try {
+        activeStream = await api.getActiveRagStream(sessionId);
+      } catch {
+        activeStream = null;
+      }
       if (!rows || rows.length === 0) {
-        setMessages([{ id: nextMsgId(), role: 'system', content: a.welcome }]);
+        const baseMessages: ChatMessage[] = [{ id: nextMsgId(), role: 'system', content: a.welcome }];
+        if (activeStream?.active) {
+          streamTextRef.current = activeStream.text || '';
+          setStreamStatus(activeStream.status || '');
+          setIsLoading(true);
+          cancelledRef.current = false;
+          firstMessageSent.current = true;
+          setMessages([
+            ...baseMessages,
+            { id: nextMsgId(), role: 'user', content: activeStream.question },
+            { id: nextMsgId(), role: 'assistant', content: activeStream.text || '', streaming: true },
+          ]);
+        } else {
+          setIsLoading(false);
+          setStreamStatus('');
+          setMessages(baseMessages);
+        }
         return;
       }
       const loaded: ChatMessage[] = rows.map((r: ChatMessageRow) => {
@@ -157,11 +179,29 @@ export function useChat(a: Translations['asst'], t: Translations, lang: string) 
         }
         return { id: nextMsgId(), dbId: r.id, role: r.role as ChatMessage['role'], content: r.content || '', sources };
       });
-      setMessages([{ id: nextMsgId(), role: 'system', content: a.welcome }, ...loaded]);
-      firstMessageSent.current = loaded.some((m) => m.role === 'user');
+      const baseMessages: ChatMessage[] = [{ id: nextMsgId(), role: 'system', content: a.welcome }, ...loaded];
+      if (activeStream?.active) {
+        streamTextRef.current = activeStream.text || '';
+        setStreamStatus(activeStream.status || '');
+        setIsLoading(true);
+        cancelledRef.current = false;
+        const hasQuestion = loaded.some((m) => m.role === 'user' && m.content === activeStream.question);
+        setMessages([
+          ...baseMessages,
+          ...(hasQuestion ? [] : [{ id: nextMsgId(), role: 'user' as const, content: activeStream.question }]),
+          { id: nextMsgId(), role: 'assistant', content: activeStream.text || '', streaming: true },
+        ]);
+      } else {
+        setIsLoading(false);
+        setStreamStatus('');
+        setMessages(baseMessages);
+      }
+      firstMessageSent.current = loaded.some((m) => m.role === 'user') || !!activeStream?.active;
     } catch (err) {
       console.error('[Assistant] Failed to load session messages:', err);
       setMessages([{ id: nextMsgId(), role: 'system', content: a.welcome }]);
+      setIsLoading(false);
+      setStreamStatus('');
     }
   }
 

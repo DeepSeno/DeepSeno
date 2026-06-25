@@ -133,6 +133,7 @@ vi.mock('../db/database', () => {
   };
   const db = {
     insertRecording: vi.fn(() => 1),
+    updateRecording: vi.fn(),
     updateRecordingStatus: vi.fn(),
     updateRecordingDuration: vi.fn(),
     getRecording: vi.fn(() => ({
@@ -157,6 +158,7 @@ vi.mock('../db/database', () => {
     getSpeaker: vi.fn(() => ({ id: 1, name: 'Speaker 1' })),
     getPerson: vi.fn(() => ({ id: 1, name: 'Person 1' })),
     getSegment: vi.fn(() => null),
+    updateSegmentCleanText: vi.fn(),
     saveMeetingNotes: vi.fn(),
     updateRecordingAutoTitle: vi.fn(),
     updateRecordingImportance: vi.fn(),
@@ -197,6 +199,15 @@ vi.mock('../audio/ffmpeg-manager', () => ({
     find: vi.fn(() => null),
   })),
 }));
+
+vi.mock('../pipeline/text-extractor', () => {
+  const extractText = vi.fn(async () => ({
+    text: 'DeepSeno imported document content for indexing fallback verification.',
+    pageCount: 1,
+    wordCount: 8,
+  }));
+  return { extractText, __mockExtractText: extractText };
+});
 
 // Mock Transcriber — use function class pattern
 vi.mock('../audio/transcriber', () => {
@@ -315,7 +326,10 @@ vi.mock('fs', async () => {
       }),
       mkdirSync: vi.fn(),
       writeFileSync: vi.fn(),
-      readFileSync: actual.readFileSync,
+      readFileSync: vi.fn((p: any, ...args: any[]) => {
+        if (typeof p === 'string' && p.includes('test_image')) return Buffer.from('fake image');
+        return actual.readFileSync(p, ...args);
+      }),
       copyFileSync: vi.fn(),
       readdirSync: vi.fn(() => []),
       renameSync: vi.fn(),
@@ -332,7 +346,10 @@ vi.mock('fs', async () => {
     }),
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
-    readFileSync: actual.readFileSync,
+    readFileSync: vi.fn((p: any, ...args: any[]) => {
+      if (typeof p === 'string' && p.includes('test_image')) return Buffer.from('fake image');
+      return actual.readFileSync(p, ...args);
+    }),
     copyFileSync: vi.fn(),
     readdirSync: vi.fn(() => []),
     renameSync: vi.fn(),
@@ -348,6 +365,7 @@ const { __mockDb: mockDb } = await import('../db/database') as any;
 const { __mockPreprocessor: mockPreprocessor } = await import('../audio/preprocessor') as any;
 const { __mockLLMClient: mockLLMClient } = await import('../llm/create-client') as any;
 const { __mockTranscribeFn: mockTranscribeFn } = await import('../audio/transcriber') as any;
+const { __mockExtractText: mockExtractText } = await import('../pipeline/text-extractor') as any;
 
 // ── Helper: wait for task completion or failure ──
 
@@ -389,9 +407,15 @@ describe('Processor', () => {
     mockDb.getSegmentsByDate.mockReturnValue([]);
     mockDb.getSegmentIdsByRecording.mockReturnValue([]);
     mockDb.getAllRecordings.mockReturnValue([]);
+    mockDb.getSegment.mockReturnValue(null);
     mockDb.getRecording.mockReturnValue({
       id: 1, file_path: `${TMP_DIR}/test.wav`, file_name: 'test.wav',
       duration_seconds: 15, recorded_at: '2026-02-27T10:00:00', status: 'processing',
+    });
+    mockExtractText.mockResolvedValue({
+      text: 'DeepSeno imported document content for indexing fallback verification.',
+      pageCount: 1,
+      wordCount: 8,
     });
     mockPreprocessor.convertTo16kMono.mockResolvedValue(`${TMP_DIR}/test_16k_mono.wav`);
     mockPreprocessor.getDuration.mockResolvedValue(15);
@@ -616,6 +640,91 @@ describe('Processor', () => {
       expect(result.status).toBe('completed');
       expect(mockDb.insertSegment).toHaveBeenCalled();
       expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
+    });
+
+    it('continues audio pipeline when vector indexing fails', async () => {
+      const mockIndexSegment = vi.fn(async () => {
+        throw new Error('Embedding model returned 404');
+      });
+      processor.setQueryEngine({
+        indexSegment: mockIndexSegment,
+        deleteSegments: vi.fn(),
+      } as any);
+
+      const queue = processor.getTaskQueue();
+      processor.enqueue(`${TMP_DIR}/test_vector_fallback.wav`);
+
+      const result = await waitForTask(queue);
+
+      expect(result.status).toBe('completed');
+      expect(mockIndexSegment).toHaveBeenCalled();
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
+      expect(mockDb.updateRecordingStatus).not.toHaveBeenCalledWith(1, 'failed');
+    });
+
+    it('continues document pipeline when vector indexing fails', async () => {
+      const mockIndexSegment = vi.fn(async () => {
+        throw new Error('Embedding model returned 404');
+      });
+      processor.setQueryEngine({
+        indexSegment: mockIndexSegment,
+        deleteSegments: vi.fn(),
+      } as any);
+      mockDb.insertSegment.mockReturnValue(42);
+      mockDb.getSegment.mockImplementation((id: number) => (
+        id === 42
+          ? {
+              id: 42,
+              raw_text: 'DeepSeno imported document content for indexing fallback verification.',
+              clean_text: 'DeepSeno imported document content for indexing fallback verification.',
+            }
+          : null
+      ));
+
+      const queue = processor.getTaskQueue();
+      processor.enqueue(`${TMP_DIR}/test_document.pdf`);
+
+      const result = await waitForTask(queue);
+
+      expect(result.status).toBe('completed');
+      expect(mockExtractText).toHaveBeenCalledWith(`${TMP_DIR}/test_document.pdf`, 'pdf');
+      expect(mockIndexSegment).toHaveBeenCalledWith(42, expect.stringContaining('DeepSeno imported document'));
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
+      expect(mockDb.updateRecordingStatus).not.toHaveBeenCalledWith(1, 'failed');
+    });
+
+    it('continues image pipeline when vector indexing fails', async () => {
+      const mockIndexSegment = vi.fn(async () => {
+        throw new Error('Embedding model returned 404');
+      });
+      processor.setQueryEngine({
+        indexSegment: mockIndexSegment,
+        deleteSegments: vi.fn(),
+      } as any);
+      mockLLMClient.generateJSON.mockResolvedValueOnce({
+        description: 'A whiteboard photo with DeepSeno project notes.',
+        ocr_text: 'DeepSeno release checklist and import validation.',
+      });
+      mockDb.insertSegment.mockReturnValue(77);
+      mockDb.getSegment.mockImplementation((id: number) => (
+        id === 77
+          ? {
+              id: 77,
+              raw_text: 'DeepSeno release checklist and import validation.',
+              clean_text: 'DeepSeno release checklist and import validation.',
+            }
+          : null
+      ));
+
+      const queue = processor.getTaskQueue();
+      processor.enqueue(`${TMP_DIR}/test_image.png`);
+
+      const result = await waitForTask(queue);
+
+      expect(result.status).toBe('completed');
+      expect(mockIndexSegment).toHaveBeenCalledWith(77, expect.stringContaining('DeepSeno release checklist'));
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
+      expect(mockDb.updateRecordingStatus).not.toHaveBeenCalledWith(1, 'failed');
     });
 
     it('processes video through the audio pipeline and completes as the original video task', async () => {
