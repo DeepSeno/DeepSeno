@@ -494,21 +494,105 @@ jobs:
 
           upload_manifest_to_cos() {
             local f="$1"
-            local fname fsize checksum version_key root_key cdn_url
+            local fname fsize checksum version_key root_key cdn_url manifest_headers
             fname=$(basename "$f")
             fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
             checksum=$(sha256sum "$f" | awk '{print $1}')
             version_key="releases/${VERSION}/${fname}"
             root_key="releases/${fname}"
             cdn_url="${CDN_BASE}/${root_key}"
+            manifest_headers='{"Cache-Control":"no-cache, no-store, max-age=0","Content-Type":"application/x-yaml"}'
             echo "[Release] Uploading $fname (${fsize} bytes)..."
 
             # Keep a versioned copy for inspection, then update the root
             # manifest last because electron-updater reads it as the switch.
-            coscmd upload -f "$f" "$version_key"
-            coscmd upload -f "$f" "$root_key"
+            coscmd upload -f -H "$manifest_headers" "$f" "$version_key"
+            coscmd upload -f -H "$manifest_headers" "$f" "$root_key"
             echo "[Release] OK, CDN: $cdn_url"
             add_confirm_item "$fname" "$cdn_url" "$fsize" "$checksum"
+          }
+
+          purge_cdn_manifests() {
+            python3 - <<'PY'
+          import datetime
+          import hashlib
+          import hmac
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+
+          secret_id = os.environ["COS_SECRET_ID"]
+          secret_key = os.environ["COS_SECRET_KEY"]
+          cdn_base = "https://" + os.environ["COS_CDN_DOMAIN"].removeprefix("https://").removeprefix("http://").rstrip("/")
+          urls = [
+              f"{cdn_base}/releases/latest-mac.yml",
+              f"{cdn_base}/releases/latest.yml",
+          ]
+
+          service = "cdn"
+          host = "cdn.tencentcloudapi.com"
+          endpoint = f"https://{host}/"
+          action = "PurgeUrlsCache"
+          version = "2018-06-06"
+          timestamp = int(time.time())
+          date = datetime.datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
+          payload = json.dumps({"Urls": urls}, separators=(",", ":"))
+
+          canonical_headers = f"content-type:application/json; charset=utf-8\nhost:{host}\nx-tc-action:{action.lower()}\n"
+          signed_headers = "content-type;host;x-tc-action"
+          canonical_request = "\n".join([
+              "POST",
+              "/",
+              "",
+              canonical_headers,
+              signed_headers,
+              hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+          ])
+          credential_scope = f"{date}/{service}/tc3_request"
+          string_to_sign = "\n".join([
+              "TC3-HMAC-SHA256",
+              str(timestamp),
+              credential_scope,
+              hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+          ])
+
+          def sign(key, msg):
+              return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+          secret_date = sign(("TC3" + secret_key).encode("utf-8"), date)
+          secret_service = sign(secret_date, service)
+          secret_signing = sign(secret_service, "tc3_request")
+          signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+          authorization = (
+              "TC3-HMAC-SHA256 "
+              f"Credential={secret_id}/{credential_scope}, "
+              f"SignedHeaders={signed_headers}, "
+              f"Signature={signature}"
+          )
+          request = urllib.request.Request(
+              endpoint,
+              data=payload.encode("utf-8"),
+              headers={
+                  "Authorization": authorization,
+                  "Content-Type": "application/json; charset=utf-8",
+                  "Host": host,
+                  "X-TC-Action": action,
+                  "X-TC-Timestamp": str(timestamp),
+                  "X-TC-Version": version,
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              body = response.read().decode("utf-8")
+          print(f"[Release] Purged CDN manifests: {', '.join(urls)}")
+          parsed = json.loads(body)
+          if "Error" in parsed.get("Response", {}):
+              print(body)
+              sys.exit(1)
+          print(body)
+          PY
           }
 
           upload_group() {
@@ -534,6 +618,7 @@ jobs:
           upload_group upload_file_to_cos artifacts/macos/*.zip
           upload_group upload_file_to_cos artifacts/macos/*.blockmap artifacts/windows/*.blockmap
           upload_group upload_manifest_to_cos artifacts/macos/latest-mac.yml artifacts/windows/latest.yml
+          purge_cdn_manifests
 
           rm -f /tmp/confirm.json
           python3 -c 'import glob,json,sys; items=[]; [items.append(json.load(open(path, encoding="utf-8"))) for path in sorted(glob.glob(sys.argv[1] + "/item.*"))]; print(json.dumps({"files":items}, separators=(",",":")))' "$CONFIRM_DIR" > /tmp/confirm.json
