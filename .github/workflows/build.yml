@@ -307,22 +307,25 @@ jobs:
         run: |
           cd out
           VER="${{ inputs.version }}"
-          for pattern in "DeepSeno.Setup.${VER}.exe" "DeepSeno Setup ${VER}.exe" "DeepSeno-Setup-${VER}.exe"; do
-            for f in $pattern; do
-              if [ -f "$f" ]; then
-                new="DeepSeno-${VER}-win-x64.exe"
-                mv "$f" "$new"
-                echo "Renamed $f → $new"
-                if [ -f "$f.blockmap" ]; then
-                  mv "$f.blockmap" "$new.blockmap"
-                  echo "Renamed $f.blockmap → $new.blockmap"
-                fi
-                if [ -f latest.yml ]; then
-                  node -e 'const fs=require("fs"); const [file, oldName, newName]=process.argv.slice(1); const text=fs.readFileSync(file,"utf8"); fs.writeFileSync(file, text.split(oldName).join(newName));' latest.yml "$f" "$new"
-                fi
-                break 2
+          candidates=(
+            "DeepSeno.Setup.${VER}.exe"
+            "DeepSeno Setup ${VER}.exe"
+            "DeepSeno-Setup-${VER}.exe"
+          )
+          for f in "${candidates[@]}"; do
+            if [ -f "$f" ]; then
+              new="DeepSeno-${VER}-win-x64.exe"
+              mv "$f" "$new"
+              echo "Renamed $f → $new"
+              if [ -f "$f.blockmap" ]; then
+                mv "$f.blockmap" "$new.blockmap"
+                echo "Renamed $f.blockmap → $new.blockmap"
               fi
-            done
+              if [ -f latest.yml ]; then
+                node -e 'const fs=require("fs"); const [file, oldName, newName]=process.argv.slice(1); const text=fs.readFileSync(file,"utf8"); fs.writeFileSync(file, text.split(oldName).join(newName));' latest.yml "$f" "$new"
+              fi
+              break
+            fi
           done
 
       # ── Upload artifacts ───────────────────────────────────
