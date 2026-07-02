@@ -393,16 +393,32 @@ jobs:
             artifacts/windows/*
           fail_on_unmatched_files: true
 
-      # ── Push to release server (auto-updater) ──────────────
-      - name: Push to release server
+      # ── Push to COS/CDN and register release records ───────
+      - name: Push to COS and release server
         timeout-minutes: 75
         env:
           API_BASE: ${{ secrets.API_BASE_URL }}
           ADMIN_EMAIL: ${{ secrets.RELEASE_ADMIN_EMAIL }}
           ADMIN_PASSWORD: ${{ secrets.RELEASE_ADMIN_PASSWORD }}
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_BUCKET_URL: ${{ secrets.COS_BUCKET_URL }}
+          COS_REGION: ${{ secrets.COS_REGION || 'ap-beijing' }}
+          COS_CDN_DOMAIN: ${{ secrets.COS_CDN_DOMAIN }}
         run: |
           [ -z "${ADMIN_EMAIL:-}" ] && echo "[Release] ADMIN_EMAIL not set, skipping" && exit 0
-          set -e
+          set -euo pipefail
+
+          for name in API_BASE ADMIN_EMAIL ADMIN_PASSWORD COS_SECRET_ID COS_SECRET_KEY COS_BUCKET_URL COS_REGION COS_CDN_DOMAIN; do
+            if [ -z "${!name:-}" ]; then
+              echo "[Release] $name not set"
+              exit 1
+            fi
+          done
+
+          echo "::add-mask::$COS_SECRET_ID"
+          echo "::add-mask::$COS_SECRET_KEY"
+
           echo "[Release] Logging in..."
           TOKEN=$(curl -sf "$API_BASE/auth/login" \
             -H "Content-Type: application/json" \
@@ -410,48 +426,99 @@ jobs:
             python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
           [ -z "$TOKEN" ] && echo "Login failed" && exit 1
 
-          # Upload updater/install files and capture CDN URLs.
+          echo "[Release] Installing coscmd..."
+          python3 -m pip install --user --disable-pip-version-check -q coscmd
+          export PATH="$HOME/.local/bin:$PATH"
+
+          COS_BUCKET=$(python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          raw = os.environ["COS_BUCKET_URL"].strip()
+          parsed = urlparse(raw if "://" in raw else "https://" + raw)
+          host = parsed.netloc or parsed.path
+          bucket = host.split(".cos.")[0]
+          if not bucket:
+              raise SystemExit("invalid COS_BUCKET_URL")
+          print(bucket)
+          PY
+          )
+          CDN_DOMAIN="${COS_CDN_DOMAIN#https://}"
+          CDN_DOMAIN="${CDN_DOMAIN#http://}"
+          CDN_BASE="https://${CDN_DOMAIN%/}"
+          VERSION="${{ inputs.version }}"
+
+          echo "[Release] Configuring coscmd for bucket ${COS_BUCKET} (${COS_REGION})..."
+          coscmd config \
+            -a "$COS_SECRET_ID" \
+            -s "$COS_SECRET_KEY" \
+            -b "$COS_BUCKET" \
+            -r "$COS_REGION" \
+            -m 16 \
+            -p 8 \
+            --retry 5 \
+            --timeout 120
+
+          # Upload updater/install files and capture CDN URLs. Files are sent
+          # directly from GitHub Actions to COS; the server only receives final
+          # CDN URLs during confirm-upload.
           # latest*.yml is intentionally uploaded last so clients never see a
           # manifest before all referenced ZIP/EXE/blockmap assets are ready.
           CONFIRM_DIR=$(mktemp -d)
           UPLOAD_CONCURRENCY=3
 
-          upload_file() {
+          add_confirm_item() {
+            local filename="$1"
+            local cdn_url="$2"
+            local fsize="$3"
+            local checksum="$4"
+            local item_file
+            item_file=$(mktemp "$CONFIRM_DIR/item.XXXXXX")
+            python3 -c 'import json,sys; print(json.dumps({"filename":sys.argv[1],"cdn_url":sys.argv[2],"size":int(sys.argv[3]),"checksum":sys.argv[4]}, separators=(",",":")))' "$filename" "$cdn_url" "$fsize" "$checksum" > "$item_file"
+          }
+
+          upload_file_to_cos() {
             local f="$1"
-            local fname fsize resp_file cdn_url presigned target_name first_cdn item_file
+            local fname fsize checksum key cdn_url
             fname=$(basename "$f")
             fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+            checksum=$(sha256sum "$f" | awk '{print $1}')
+            key="releases/$fname"
+            cdn_url="${CDN_BASE}/${key}"
             echo "[Release] Uploading $fname (${fsize} bytes)..."
 
-            resp_file=$(mktemp)
-            curl -sf "$API_BASE/admin/releases/upload-url" \
-              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$fsize}]}" \
-              > "$resp_file"
+            coscmd upload -f "$f" "$key"
+            echo "[Release] OK, CDN: $cdn_url"
+            add_confirm_item "$fname" "$cdn_url" "$fsize" "$checksum"
+          }
 
-            first_cdn=""
-            while IFS=$'\t' read -r target_name presigned cdn_url; do
-              [ -n "$presigned" ] || continue
-              echo "[Release]   -> $target_name"
-              curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 1800 \
-                -sf -X PUT -T "$f" "$presigned"
-              [ -n "$first_cdn" ] || first_cdn="$cdn_url"
-            done < <(python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); [print("{}\t{}\t{}".format(item.get("filename",""), item.get("presigned_url",""), item.get("cdn_url",""))) for item in data.get("data", [])]' "$resp_file")
-            rm -f "$resp_file"
+          upload_manifest_to_cos() {
+            local f="$1"
+            local fname fsize checksum version_key root_key cdn_url
+            fname=$(basename "$f")
+            fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
+            checksum=$(sha256sum "$f" | awk '{print $1}')
+            version_key="releases/${VERSION}/${fname}"
+            root_key="releases/${fname}"
+            cdn_url="${CDN_BASE}/${root_key}"
+            echo "[Release] Uploading $fname (${fsize} bytes)..."
 
-            [ -n "$first_cdn" ] || { echo "[Release] No upload URL returned for $fname"; exit 1; }
-            echo "[Release] OK, CDN: $first_cdn"
-
-            item_file=$(mktemp "$CONFIRM_DIR/item.XXXXXX")
-            python3 -c 'import json,sys; print(json.dumps({"filename":sys.argv[1],"cdn_url":sys.argv[2],"size":int(sys.argv[3]),"checksum":""}, separators=(",",":")))' "$fname" "$first_cdn" "$fsize" > "$item_file"
+            # Keep a versioned copy for inspection, then update the root
+            # manifest last because electron-updater reads it as the switch.
+            coscmd upload -f "$f" "$version_key"
+            coscmd upload -f "$f" "$root_key"
+            echo "[Release] OK, CDN: $cdn_url"
+            add_confirm_item "$fname" "$cdn_url" "$fsize" "$checksum"
           }
 
           upload_group() {
+            local uploader="$1"
+            shift
             local pids=()
             local f pid
             for f in "$@"; do
               [ -f "$f" ] || continue
-              upload_file "$f" &
+              "$uploader" "$f" &
               pids+=("$!")
               if [ "${#pids[@]}" -ge "$UPLOAD_CONCURRENCY" ]; then
                 wait "${pids[0]}"
@@ -463,10 +530,10 @@ jobs:
             done
           }
 
-          upload_group artifacts/macos/*.dmg artifacts/windows/*.exe
-          upload_group artifacts/macos/*.zip
-          upload_group artifacts/macos/*.blockmap artifacts/windows/*.blockmap
-          upload_group artifacts/macos/latest-mac.yml artifacts/windows/latest.yml
+          upload_group upload_file_to_cos artifacts/macos/*.dmg artifacts/windows/*.exe
+          upload_group upload_file_to_cos artifacts/macos/*.zip
+          upload_group upload_file_to_cos artifacts/macos/*.blockmap artifacts/windows/*.blockmap
+          upload_group upload_manifest_to_cos artifacts/macos/latest-mac.yml artifacts/windows/latest.yml
 
           rm -f /tmp/confirm.json
           python3 -c 'import glob,json,sys; items=[]; [items.append(json.load(open(path, encoding="utf-8"))) for path in sorted(glob.glob(sys.argv[1] + "/item.*"))]; print(json.dumps({"files":items}, separators=(",",":")))' "$CONFIRM_DIR" > /tmp/confirm.json
