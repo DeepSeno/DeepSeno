@@ -46,7 +46,7 @@ export default function Layout() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
   // Auto-update state
-  const [updateState, setUpdateState] = useState<'idle' | 'available' | 'downloading' | 'ready' | 'failed'>('idle');
+  const [updateState, setUpdateState] = useState<'idle' | 'available' | 'downloading' | 'ready' | 'installing' | 'failed'>('idle');
   const [updateVersion, setUpdateVersion] = useState('');
   const [updatePercent, setUpdatePercent] = useState(0);
   const [updateDismissed, setUpdateDismissed] = useState(false);
@@ -137,6 +137,11 @@ export default function Layout() {
       setUpdateState('failed');
       setUpdateDismissed(false);
     }
+  }, [api]);
+
+  const handleInstallUpdate = useCallback(() => {
+    setUpdateState('installing');
+    void api.installUpdate();
   }, [api]);
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -259,6 +264,12 @@ export default function Layout() {
                   {(t.update as any).ready}
                 </>
               )}
+              {updateState === 'installing' && (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  {(t.update as any).installing}
+                </>
+              )}
             </span>
             <span className="flex items-center gap-2">
               {updateState === 'available' && (
@@ -271,7 +282,7 @@ export default function Layout() {
               )}
               {updateState === 'ready' && (
                 <button
-                  onClick={() => api.installUpdate()}
+                  onClick={handleInstallUpdate}
                   className="px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700"
                 >
                   {(t.update as any).install}
@@ -285,7 +296,7 @@ export default function Layout() {
                   {(t.update as any).manual_download}
                 </button>
               )}
-              {updateState !== 'downloading' && (
+              {updateState !== 'downloading' && updateState !== 'installing' && (
                 <button
                   onClick={() => setUpdateDismissed(true)}
                   className={`p-0.5 rounded ${updateState === 'failed' ? 'hover:bg-amber-100' : 'hover:bg-blue-100'}`}

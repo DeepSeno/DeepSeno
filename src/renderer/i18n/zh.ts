@@ -1397,11 +1397,12 @@ export const zh = {
       available: '新版本 v{version} 可用',
       downloading: '正在下载更新... {percent}%',
       ready: '更新已就绪 — 重启即可生效',
+      installing: '正在重启并安装更新...',
       download: '下载更新',
       install: '重启并更新',
       dismiss: '忽略',
       check_failed: '检查更新失败',
-      install_failed: '自动更新无法应用（签名不匹配或暂存失败），请手动下载安装',
+      install_failed: '自动更新安装失败，请退出应用后重试，或手动下载安装',
       manual_download: '手动下载',
     },
     models: {

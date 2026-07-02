@@ -64,7 +64,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[UnhandledRejection]', reason);
 });
 
-import { app, BrowserWindow, protocol, net, globalShortcut, ipcMain, session, clipboard, Menu, Tray, nativeImage, screen, systemPreferences, shell, dialog, desktopCapturer } from 'electron';
+import { app, BrowserWindow, protocol, net, globalShortcut, ipcMain, session, clipboard, Menu, Tray, nativeImage, screen, systemPreferences, shell, dialog, desktopCapturer, autoUpdater as nativeAutoUpdater } from 'electron';
 
 // Enable remote debugging only in non-packaged (dev) builds for agent-browser.
 // Never expose the CDP port in production, otherwise any local process could take over the app.
@@ -1246,7 +1246,14 @@ app.whenReady().then(async () => {
 
   // Auto-update check (only in production)
   if (app.isPackaged) {
+    let installRequested = false;
+
     autoUpdater.autoDownload = false;
+    nativeAutoUpdater.on('before-quit-for-update', () => {
+      console.log('[AutoUpdater] before-quit-for-update');
+      isQuitting = true;
+      isUpdating = true;
+    });
     autoUpdater.on('update-available', (info) => {
       console.log(`[AutoUpdater] Update available: v${info.version}`);
       const win = getMainWindow();
@@ -1264,6 +1271,13 @@ app.whenReady().then(async () => {
     });
     autoUpdater.on('error', (err) => {
       console.warn('[AutoUpdater] Error:', err.message);
+      if (installRequested) {
+        installRequested = false;
+        isUpdating = false;
+        isQuitting = false;
+        const win = getMainWindow();
+        if (win) win.webContents.send('update-install-failed', { downloadUrl: typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__.replace(/\/api\/v1$/, '') : '' });
+      }
     });
     autoUpdater.checkForUpdates().catch(() => {});
 
@@ -1279,38 +1293,21 @@ app.whenReady().then(async () => {
         return { success: true };
       } catch (err: any) { return { success: false, error: err.message }; }
     });
-    let installRequested = false;
     ipcMain.handle('system:installUpdate', () => {
-      // Guard against repeated clicks. On macOS, electron-updater's quitAndInstall
-      // is a silent no-op (and leaks an 'update-downloaded' listener on the native
-      // autoUpdater each time) when Squirrel.Mac hasn't staged the update — e.g.
-      // when the running app's code-signing identity doesn't match the downloaded
-      // build (a locally dev-signed app can't update to a Developer ID release).
-      // Calling it repeatedly just piles up listeners, so only ever fire it once.
+      // Guard against repeated clicks. On macOS, retrying quitAndInstall while
+      // Squirrel.Mac is staging the update can add duplicate native listeners.
       if (installRequested) return;
       installRequested = true;
 
-      // Skip async cleanup in before-quit so electron-updater can handle the restart
+      // Let quitAndInstall close windows instead of our tray-close handler hiding them.
+      // Electron emits before-quit after closing windows for updates, so the native
+      // before-quit-for-update listener above keeps this flag set at the right moment.
       isQuitting = true;
       isUpdating = true;
-
-      // If the update actually installs, this process is replaced and the timer
-      // never runs. If quitAndInstall fails to restart (staging rejected), the
-      // timer fires → tell the renderer so the user can fall back to a manual
-      // download instead of clicking a button that silently does nothing.
-      const restartFallback = setTimeout(() => {
-        console.warn('[AutoUpdater] quitAndInstall did not restart the app within 8s — update staging likely failed (code-signing identity mismatch?). Prompting manual download.');
-        isUpdating = false;
-        isQuitting = false;
-        installRequested = false;
-        const win = getMainWindow();
-        if (win) win.webContents.send('update-install-failed', { downloadUrl: typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__.replace(/\/api\/v1$/, '') : '' });
-      }, 8000);
 
       try {
         autoUpdater.quitAndInstall(false, true);
       } catch (err: any) {
-        clearTimeout(restartFallback);
         isUpdating = false;
         isQuitting = false;
         installRequested = false;

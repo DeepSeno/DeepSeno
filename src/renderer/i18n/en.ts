@@ -1399,11 +1399,12 @@ export const en = {
       available: 'New version v{version} available',
       downloading: 'Downloading update... {percent}%',
       ready: 'Update ready — restart to apply',
+      installing: 'Restarting and installing update...',
       download: 'Download',
       install: 'Restart & Update',
       dismiss: 'Dismiss',
       check_failed: 'Update check failed',
-      install_failed: "Auto-update couldn't be applied (signature mismatch or staging failed). Please download manually.",
+      install_failed: "Auto-update couldn't be installed. Quit the app and retry, or download manually.",
       manual_download: 'Download manually',
     },
     models: {
