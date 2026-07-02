@@ -413,13 +413,12 @@ jobs:
           # Upload updater/install files and capture CDN URLs.
           # latest*.yml is intentionally uploaded last so clients never see a
           # manifest before all referenced ZIP/EXE/blockmap assets are ready.
-          rm -f /tmp/confirm.json
-          echo '{"files":[' > /tmp/confirm.json
-          first=true
+          CONFIRM_DIR=$(mktemp -d)
+          UPLOAD_CONCURRENCY=3
 
           upload_file() {
             local f="$1"
-            local fname fsize resp_file cdn_url presigned target_name first_cdn
+            local fname fsize resp_file cdn_url presigned target_name first_cdn item_file
             fname=$(basename "$f")
             fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
             echo "[Release] Uploading $fname (${fsize} bytes)..."
@@ -443,28 +442,34 @@ jobs:
             [ -n "$first_cdn" ] || { echo "[Release] No upload URL returned for $fname"; exit 1; }
             echo "[Release] OK, CDN: $first_cdn"
 
-            [ "$first" = true ] && first=false || echo "," >> /tmp/confirm.json
-            echo -n "{\"filename\":\"$fname\",\"cdn_url\":\"$first_cdn\",\"size\":$fsize,\"checksum\":\"\"}" >> /tmp/confirm.json
+            item_file=$(mktemp "$CONFIRM_DIR/item.XXXXXX")
+            python3 -c 'import json,sys; print(json.dumps({"filename":sys.argv[1],"cdn_url":sys.argv[2],"size":int(sys.argv[3]),"checksum":""}, separators=(",",":")))' "$fname" "$first_cdn" "$fsize" > "$item_file"
           }
 
-          for f in artifacts/macos/*.dmg artifacts/windows/*.exe; do
-            [ -f "$f" ] || continue
-            upload_file "$f"
-          done
-          for f in artifacts/macos/*.zip; do
-            [ -f "$f" ] || continue
-            upload_file "$f"
-          done
-          for f in artifacts/macos/*.blockmap artifacts/windows/*.blockmap; do
-            [ -f "$f" ] || continue
-            upload_file "$f"
-          done
-          for f in artifacts/macos/latest-mac.yml artifacts/windows/latest.yml; do
-            [ -f "$f" ] || continue
-            upload_file "$f"
-          done
+          upload_group() {
+            local pids=()
+            local f pid
+            for f in "$@"; do
+              [ -f "$f" ] || continue
+              upload_file "$f" &
+              pids+=("$!")
+              if [ "${#pids[@]}" -ge "$UPLOAD_CONCURRENCY" ]; then
+                wait "${pids[0]}"
+                pids=("${pids[@]:1}")
+              fi
+            done
+            for pid in "${pids[@]}"; do
+              wait "$pid"
+            done
+          }
 
-          echo "]}" >> /tmp/confirm.json
+          upload_group artifacts/macos/*.dmg artifacts/windows/*.exe
+          upload_group artifacts/macos/*.zip
+          upload_group artifacts/macos/*.blockmap artifacts/windows/*.blockmap
+          upload_group artifacts/macos/latest-mac.yml artifacts/windows/latest.yml
+
+          rm -f /tmp/confirm.json
+          python3 -c 'import glob,json,sys; items=[]; [items.append(json.load(open(path, encoding="utf-8"))) for path in sorted(glob.glob(sys.argv[1] + "/item.*"))]; print(json.dumps({"files":items}, separators=(",",":")))' "$CONFIRM_DIR" > /tmp/confirm.json
           echo "[Release] Confirming uploads..."
           curl -sf "$API_BASE/admin/releases/confirm-upload" \
             -H "Authorization: Bearer $TOKEN" \
