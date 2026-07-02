@@ -1249,10 +1249,13 @@ app.whenReady().then(async () => {
     let installRequested = false;
 
     autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoRunAppAfterInstall = true;
     nativeAutoUpdater.on('before-quit-for-update', () => {
       console.log('[AutoUpdater] before-quit-for-update');
       isQuitting = true;
       isUpdating = true;
+      void cleanupRuntimeServices();
     });
     autoUpdater.on('update-available', (info) => {
       console.log(`[AutoUpdater] Update available: v${info.version}`);
@@ -1293,10 +1296,10 @@ app.whenReady().then(async () => {
         return { success: true };
       } catch (err: any) { return { success: false, error: err.message }; }
     });
-    ipcMain.handle('system:installUpdate', () => {
+    ipcMain.handle('system:installUpdate', async () => {
       // Guard against repeated clicks. On macOS, retrying quitAndInstall while
       // Squirrel.Mac is staging the update can add duplicate native listeners.
-      if (installRequested) return;
+      if (installRequested) return { success: true };
       installRequested = true;
 
       // Let quitAndInstall close windows instead of our tray-close handler hiding them.
@@ -1306,7 +1309,9 @@ app.whenReady().then(async () => {
       isUpdating = true;
 
       try {
+        await cleanupRuntimeServices();
         autoUpdater.quitAndInstall(false, true);
+        return { success: true };
       } catch (err: any) {
         isUpdating = false;
         isQuitting = false;
@@ -1314,6 +1319,7 @@ app.whenReady().then(async () => {
         console.warn('[AutoUpdater] quitAndInstall threw:', err?.message);
         const win = getMainWindow();
         if (win) win.webContents.send('update-install-failed', { downloadUrl: typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__.replace(/\/api\/v1$/, '') : '' });
+        return { success: false, error: err?.message };
       }
     });
   }
@@ -1825,12 +1831,55 @@ app.on('activate', () => {
 });
 
 let cleanupStarted = false;
+let runtimeCleanupPromise: Promise<void> | null = null;
 let isUpdating = false; // set by quitAndInstall to skip async cleanup
+
+async function runShutdownTask(label: string, task: () => void | Promise<void>): Promise<void> {
+  try {
+    await task();
+  } catch (err) {
+    console.warn(`[main] ${label} cleanup failed during shutdown:`, err);
+  }
+}
+
+function cleanupRuntimeServices(): Promise<void> {
+  if (runtimeCleanupPromise) return runtimeCleanupPromise;
+  runtimeCleanupPromise = (async () => {
+    await runShutdownTask('global shortcuts', () => globalShortcut.unregisterAll());
+    await runShutdownTask('relay tunnel', () => {
+      relayTunnel?.disconnect();
+      relayTunnel = null;
+    });
+    await runShutdownTask('LAN server', () => {
+      lanServer?.stop();
+      lanServer = null;
+    });
+
+    const llamaStop = runShutdownTask('llama-server', async () => {
+      const server = llamaServer;
+      llamaServer = null;
+      await server?.stop();
+    });
+
+    await runShutdownTask('task scheduler', () => {
+      taskScheduler?.stop();
+      taskScheduler = null;
+    });
+    await runShutdownTask('Feishu bot', () => stopFeishuBot());
+    await runShutdownTask('channels', () => stopChannels());
+    await Promise.all([
+      llamaStop,
+      runShutdownTask('plugins', () => stopPlugins()),
+    ]);
+  })();
+  return runtimeCleanupPromise;
+}
+
 app.on('before-quit', (e) => {
   // Mark as quitting so window close handler allows actual close
   isQuitting = true;
 
-  // When installing an update, skip async cleanup — let electron-updater handle the restart
+  // The update install path runs cleanup before calling quitAndInstall.
   if (isUpdating) return;
 
   // Prevent default to allow async cleanup to complete before quitting
@@ -1838,22 +1887,6 @@ app.on('before-quit', (e) => {
   // Guard against re-entrant calls (e.g. rapid Cmd+Q)
   if (cleanupStarted) return;
   cleanupStarted = true;
-  globalShortcut.unregisterAll();
-  relayTunnel?.disconnect();
-  if (lanServer) {
-    lanServer.stop();
-    lanServer = null;
-  }
-  if (llamaServer) {
-    llamaServer.stop();
-    llamaServer = null;
-  }
-  if (taskScheduler) {
-    taskScheduler.stop();
-    taskScheduler = null;
-  }
-  stopFeishuBot();
-  stopChannels();
 
   // Await all async cleanup (with timeout), then quit for real
   const cleanupTimeout = setTimeout(() => {
@@ -1861,7 +1894,7 @@ app.on('before-quit', (e) => {
     app.exit(0);
   }, 10_000);
   Promise.all([
-    stopPlugins().catch(() => {}),
+    cleanupRuntimeServices(),
     cleanupIpc(),
   ]).finally(() => {
     clearTimeout(cleanupTimeout);

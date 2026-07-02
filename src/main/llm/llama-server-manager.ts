@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execFile, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
@@ -25,6 +25,60 @@ export class LlamaServerManager {
   private port: number | null = null;
   private currentModel: string | null = null;
   private mode: 'single' | 'router' = 'single';
+
+  private listChildPids(pid: number): Promise<number[]> {
+    return new Promise((resolve) => {
+      if (process.platform === 'win32') {
+        execFile(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}" | ForEach-Object { $_.ProcessId }`,
+          ],
+          { windowsHide: true },
+          (_err, stdout) => {
+            resolve(stdout.split(/\s+/).map(Number).filter(Boolean));
+          },
+        );
+        return;
+      }
+
+      execFile('pgrep', ['-P', String(pid)], (_err, stdout) => {
+        resolve(stdout.split(/\s+/).map(Number).filter(Boolean));
+      });
+    });
+  }
+
+  private killProcess(pid: number, signal: 'TERM' | 'KILL'): Promise<void> {
+    return new Promise((resolve) => {
+      if (process.platform === 'win32') {
+        const args = ['/PID', String(pid), '/T'];
+        if (signal === 'KILL') args.push('/F');
+        execFile('taskkill', args, { windowsHide: true }, () => resolve());
+        return;
+      }
+
+      try {
+        process.kill(pid, signal === 'TERM' ? 'SIGTERM' : 'SIGKILL');
+      } catch {
+        // Process already exited.
+      }
+      resolve();
+    });
+  }
+
+  private async killProcessTree(pid: number, signal: 'TERM' | 'KILL'): Promise<void> {
+    const children = await this.listChildPids(pid);
+    await Promise.all(children.map((childPid) => this.killProcessTree(childPid, signal)));
+    await this.killProcess(pid, signal);
+  }
+
+  private async killChildProcesses(pid: number, signal: 'TERM' | 'KILL'): Promise<void> {
+    const children = await this.listChildPids(pid);
+    await Promise.all(children.map((childPid) => this.killProcessTree(childPid, signal)));
+  }
 
   // ─── Binary path resolution ──────────────────────────────────
 
@@ -281,14 +335,21 @@ export class LlamaServerManager {
     console.log('[LlamaServer] Stopping...');
 
     const proc = this.process;
+    const pid = proc.pid;
     this.process = null;
     this.port = null;
     this.currentModel = null;
+
+    // Stop direct child model workers before the router exits and they get
+    // re-parented. This matters during auto-update because stale workers keep
+    // binaries open inside the old .app bundle.
+    if (pid) await this.killChildProcesses(pid, 'TERM');
 
     // Send SIGTERM, then force kill after 5s
     proc.kill('SIGTERM');
     const killed = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
+        if (pid) void this.killChildProcesses(pid, 'KILL');
         proc.kill('SIGKILL');
         resolve(false);
       }, 5000);
