@@ -6,13 +6,21 @@
 set -euo pipefail
 
 # ── Config ───────────────────────────────────────────
-CDN_BASE="${CDN_BASE_URL:-https://dl.deepseno.ai}"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "${PROJECT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PROJECT_DIR}/.env"
+  set +a
+fi
+
+CDN_BASE="${CDN_BASE_URL:-https://voicebrain-dl.enmooy.com}"
 COS_RELEASES_DIR="releases"
+PUBLISH_URL="${CDN_BASE%/}/${COS_RELEASES_DIR}"
 COSCMD="${COSCMD:-$(command -v coscmd 2>/dev/null \
   || find /Library/Frameworks/Python.framework -name coscmd -type f -perm +111 2>/dev/null | head -1 \
   || echo coscmd)}"
-API_BASE="${API_BASE_URL:-https://deepseno.ai/api/v1}"
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+API_BASE="${API_BASE_URL:-https://deepseno.enmooy.com/api/v1}"
 
 # Colors
 RED='\033[0;31m'
@@ -102,10 +110,10 @@ build_platform() {
       # Build with notarization enabled for official release.
       # Package.json has notarize:false by default (for open-source builds
       # without Apple credentials). The release script overrides it here.
-      electron-vite build && pnpm exec electron-rebuild -f -w sherpa-onnx-node && electron-builder --mac --arm64 --x64 --config.notarize=true
+      electron-vite build && pnpm exec electron-rebuild -f -w sherpa-onnx-node && electron-builder --mac --arm64 --x64 --config.notarize=true --config.publish.url="${PUBLISH_URL}"
       ;;
     win)
-      electron-vite build && pnpm exec electron-rebuild -f -w sherpa-onnx-node && electron-builder --win --x64
+      electron-vite build && pnpm exec electron-rebuild -f -w sherpa-onnx-node && electron-builder --win --x64 --config.publish.url="${PUBLISH_URL}"
       ;;
   esac
   log "Build complete"
@@ -131,7 +139,7 @@ upload_file() {
   log "Uploading $(basename "$local_path") ($human)"
 
   "$COSCMD" upload "$local_path" "$cos_key"
-  log "Uploaded → ${CDN_BASE}/${cos_key}"
+  log "Uploaded → ${CDN_BASE%/}/${cos_key}"
 }
 
 # ── Register in Admin API ────────────────────────────
@@ -186,9 +194,6 @@ release_mac() {
 
   step "Uploading macOS artifacts"
 
-  # Upload latest-mac.yml (required for electron-updater)
-  upload_file "${out_dir}/latest-mac.yml" "${COS_RELEASES_DIR}/latest-mac.yml"
-
   # Upload DMG files for THIS version only.
   # electron-builder names them: arm64 → DeepSeno-<ver>-arm64.dmg, x64 → DeepSeno-<ver>.dmg
   # Pin to $VERSION: out/ accumulates old DMGs, and a bare glob + `head -1` would
@@ -210,7 +215,7 @@ release_mac() {
       checksum=$(shasum -a 256 "$dmg" | awk '{print $1}')
       platform_key="macos_${arch}"
 
-      register_release "$VERSION" "$platform_key" "${CDN_BASE}/${COS_RELEASES_DIR}/${fname}" "$size" "$checksum"
+      register_release "$VERSION" "$platform_key" "${CDN_BASE%/}/${COS_RELEASES_DIR}/${fname}" "$size" "$checksum"
     fi
   done
 
@@ -221,6 +226,17 @@ release_mac() {
     upload_file "$zip" "${COS_RELEASES_DIR}/$(basename "$zip")"
   done
 
+  # Upload blockmaps for differential updates. Missing blockmaps may force
+  # electron-updater to fall back to full downloads or report noisy failures.
+  for blockmap in "${out_dir}/DeepSeno-${VERSION}"*.blockmap; do
+    [[ -f "$blockmap" ]] || continue
+    upload_file "$blockmap" "${COS_RELEASES_DIR}/$(basename "$blockmap")"
+  done
+
+  # Upload latest-mac.yml last so clients never see a manifest before all
+  # referenced artifacts are available.
+  upload_file "${out_dir}/latest-mac.yml" "${COS_RELEASES_DIR}/latest-mac.yml"
+
   log "macOS release complete"
 }
 
@@ -230,9 +246,6 @@ release_win() {
   local out_dir="${PROJECT_DIR}/out"
 
   step "Uploading Windows artifacts"
-
-  # Upload latest.yml (required for electron-updater)
-  upload_file "${out_dir}/latest.yml" "${COS_RELEASES_DIR}/latest.yml"
 
   # Find and upload this version's exe (pin to $VERSION — out/ may hold older builds)
   local exe
@@ -246,8 +259,16 @@ release_win() {
     size=$(stat -f%z "$exe" 2>/dev/null || stat --printf="%s" "$exe" 2>/dev/null)
     checksum=$(shasum -a 256 "$exe" | awk '{print $1}')
 
-    register_release "$VERSION" "windows" "${CDN_BASE}/${COS_RELEASES_DIR}/${fname}" "$size" "$checksum"
+    register_release "$VERSION" "windows" "${CDN_BASE%/}/${COS_RELEASES_DIR}/${fname}" "$size" "$checksum"
   fi
+
+  for blockmap in "${out_dir}/"*${VERSION}*.blockmap; do
+    [[ -f "$blockmap" ]] || continue
+    upload_file "$blockmap" "${COS_RELEASES_DIR}/$(basename "$blockmap")"
+  done
+
+  # Upload latest.yml last so Windows clients only see a fully uploaded release.
+  upload_file "${out_dir}/latest.yml" "${COS_RELEASES_DIR}/latest.yml"
 
   log "Windows release complete"
 }
@@ -289,7 +310,7 @@ upload_release_notes
 
 step "Release v${VERSION} complete!"
 echo ""
-echo "  CDN:   ${CDN_BASE}/${COS_RELEASES_DIR}/"
+echo "  CDN:   ${PUBLISH_URL}/"
 echo "  Admin: ${API_BASE%/api/v1}/admin/releases"
 echo ""
 if [[ "$HAS_TOKEN" != "true" ]]; then

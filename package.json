@@ -176,7 +176,7 @@
     },
     "publish": {
       "provider": "generic",
-      "url": "https://your-cdn.example.com/releases"
+      "url": "https://voicebrain-dl.enmooy.com/releases"
     },
     "extraResources": [
       {

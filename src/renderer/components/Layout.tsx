@@ -130,6 +130,15 @@ export default function Layout() {
     return () => cleanups.forEach((fn) => fn());
   }, [api]);
 
+  const handleDownloadUpdate = useCallback(async () => {
+    setUpdateState('downloading');
+    const result = await api.downloadUpdate();
+    if (!result.success) {
+      setUpdateState('failed');
+      setUpdateDismissed(false);
+    }
+  }, [api]);
+
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     dragCounter.current++;
@@ -254,7 +263,7 @@ export default function Layout() {
             <span className="flex items-center gap-2">
               {updateState === 'available' && (
                 <button
-                  onClick={() => { api.downloadUpdate(); setUpdateState('downloading'); }}
+                  onClick={handleDownloadUpdate}
                   className="px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700"
                 >
                   {(t.update as any).download}

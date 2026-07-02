@@ -29,7 +29,7 @@ jobs:
   # ────────────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -101,6 +101,7 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" build.keychain
           # Prepend the build keychain so codesign finds it first
           EXISTING=$(security list-keychains -d user | sed 's/"//g')
+          # shellcheck disable=SC2086
           security list-keychains -d user -s build.keychain $EXISTING
           echo "CSC_LINK=$CERT_PATH" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
@@ -114,7 +115,7 @@ jobs:
           echo "sherpa-onnx-node: ${SHERPA_VER}, sqlite-vec: ${SQLITE_VEC_VER}"
 
           TMPDIR=$(mktemp -d)
-          trap "rm -rf $TMPDIR" EXIT
+          trap 'rm -rf "$TMPDIR"' EXIT
 
           # sherpa-onnx-darwin-x64
           if [ ! -d node_modules/sherpa-onnx-darwin-x64 ]; then
@@ -172,13 +173,23 @@ jobs:
         run: |
           cd out
           VER="${{ inputs.version }}"
-          for f in DeepSeno-${VER}.dmg DeepSeno-${VER}-mac.zip; do
-            if [ -f "$f" ]; then
-              new=$(echo "$f" | sed "s/DeepSeno-${VER}/DeepSeno-${VER}-x64/")
-              mv "$f" "$new"
-              echo "Renamed $f → $new"
+          rename_and_rewrite_manifest() {
+            local old="$1"
+            local new="$2"
+            if [ -f "$old" ]; then
+              mv "$old" "$new"
+              echo "Renamed $old → $new"
+              if [ -f "$old.blockmap" ]; then
+                mv "$old.blockmap" "$new.blockmap"
+                echo "Renamed $old.blockmap → $new.blockmap"
+              fi
+              if [ -f latest-mac.yml ]; then
+                node -e 'const fs=require("fs"); const [file, oldName, newName]=process.argv.slice(1); const text=fs.readFileSync(file,"utf8"); fs.writeFileSync(file, text.split(oldName).join(newName));' latest-mac.yml "$old" "$new"
+              fi
             fi
-          done
+          }
+          rename_and_rewrite_manifest "DeepSeno-${VER}.dmg" "DeepSeno-${VER}-x64.dmg"
+          rename_and_rewrite_manifest "DeepSeno-${VER}-mac.zip" "DeepSeno-${VER}-x64-mac.zip"
         shell: bash
 
       # ── Upload artifacts ───────────────────────────────────
@@ -189,6 +200,7 @@ jobs:
           path: |
             out/*.dmg
             out/*.zip
+            out/*.blockmap
             out/latest-mac.yml
           if-no-files-found: error
 
@@ -202,7 +214,7 @@ jobs:
   # ────────────────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -301,6 +313,13 @@ jobs:
                 new="DeepSeno-${VER}-win-x64.exe"
                 mv "$f" "$new"
                 echo "Renamed $f → $new"
+                if [ -f "$f.blockmap" ]; then
+                  mv "$f.blockmap" "$new.blockmap"
+                  echo "Renamed $f.blockmap → $new.blockmap"
+                fi
+                if [ -f latest.yml ]; then
+                  node -e 'const fs=require("fs"); const [file, oldName, newName]=process.argv.slice(1); const text=fs.readFileSync(file,"utf8"); fs.writeFileSync(file, text.split(oldName).join(newName));' latest.yml "$f" "$new"
+                fi
                 break 2
               fi
             done
@@ -313,6 +332,7 @@ jobs:
           name: deepseno-windows
           path: |
             out/*.exe
+            out/*.blockmap
             out/latest.yml
           if-no-files-found: error
 
@@ -322,7 +342,7 @@ jobs:
   create-release:
     needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 90
 
     permissions:
       contents: write
@@ -372,6 +392,7 @@ jobs:
 
       # ── Push to release server (auto-updater) ──────────────
       - name: Push to release server
+        timeout-minutes: 75
         env:
           API_BASE: ${{ secrets.API_BASE_URL }}
           ADMIN_EMAIL: ${{ secrets.RELEASE_ADMIN_EMAIL }}
@@ -386,35 +407,56 @@ jobs:
             python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
           [ -z "$TOKEN" ] && echo "Login failed" && exit 1
 
-          # Upload all files and capture CDN URLs
+          # Upload updater/install files and capture CDN URLs.
+          # latest*.yml is intentionally uploaded last so clients never see a
+          # manifest before all referenced ZIP/EXE/blockmap assets are ready.
           rm -f /tmp/confirm.json
           echo '{"files":[' > /tmp/confirm.json
           first=true
 
           upload_file() {
             local f="$1"
-            local fname fsize resp cdn_url
+            local fname fsize resp_file cdn_url presigned target_name first_cdn
             fname=$(basename "$f")
             fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
             echo "[Release] Uploading $fname (${fsize} bytes)..."
-            
-            resp=$(curl -sf "$API_BASE/admin/releases/upload-url" \
+
+            resp_file=$(mktemp)
+            curl -sf "$API_BASE/admin/releases/upload-url" \
               -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$fsize}]}")
-            
-            cdn_url=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0].get('cdn_url',''))")
-            presigned=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0].get('presigned_url',''))")
-            
-            curl -sf -X PUT -T "$f" "$presigned"
-            echo "[Release] OK, CDN: $cdn_url"
-            
+              -d "{\"files\":[{\"filename\":\"$fname\",\"content_type\":\"application/octet-stream\",\"size\":$fsize}]}" \
+              > "$resp_file"
+
+            first_cdn=""
+            while IFS=$'\t' read -r target_name presigned cdn_url; do
+              [ -n "$presigned" ] || continue
+              echo "[Release]   -> $target_name"
+              curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 1800 \
+                -sf -X PUT -T "$f" "$presigned"
+              [ -n "$first_cdn" ] || first_cdn="$cdn_url"
+            done < <(python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); [print("{}\t{}\t{}".format(item.get("filename",""), item.get("presigned_url",""), item.get("cdn_url",""))) for item in data.get("data", [])]' "$resp_file")
+            rm -f "$resp_file"
+
+            [ -n "$first_cdn" ] || { echo "[Release] No upload URL returned for $fname"; exit 1; }
+            echo "[Release] OK, CDN: $first_cdn"
+
             [ "$first" = true ] && first=false || echo "," >> /tmp/confirm.json
-            echo -n "{\"filename\":\"$fname\",\"cdn_url\":\"$cdn_url\",\"size\":$fsize,\"checksum\":\"\"}" >> /tmp/confirm.json
+            echo -n "{\"filename\":\"$fname\",\"cdn_url\":\"$first_cdn\",\"size\":$fsize,\"checksum\":\"\"}" >> /tmp/confirm.json
           }
 
-          # 发布服务器只需要可安装包。macOS ZIP 仍保留在 GitHub Release 产物中，
-          # 但不再上传到发布服务器，避免 ZIP 上传失败阻断发布。
           for f in artifacts/macos/*.dmg artifacts/windows/*.exe; do
+            [ -f "$f" ] || continue
+            upload_file "$f"
+          done
+          for f in artifacts/macos/*.zip; do
+            [ -f "$f" ] || continue
+            upload_file "$f"
+          done
+          for f in artifacts/macos/*.blockmap artifacts/windows/*.blockmap; do
+            [ -f "$f" ] || continue
+            upload_file "$f"
+          done
+          for f in artifacts/macos/latest-mac.yml artifacts/windows/latest.yml; do
             [ -f "$f" ] || continue
             upload_file "$f"
           done
