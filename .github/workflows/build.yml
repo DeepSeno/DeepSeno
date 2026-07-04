@@ -448,12 +448,11 @@ jobs:
           CDN_BASE="https://${CDN_DOMAIN%/}"
           VERSION="${{ inputs.version }}"
 
-          echo "[Release] Configuring coscmd for bucket ${COS_BUCKET} (${COS_REGION})..."
+          echo "[Release] Configuring coscmd for bucket ${COS_BUCKET} via accelerate endpoint..."
           coscmd config \
             -a "$COS_SECRET_ID" \
             -s "$COS_SECRET_KEY" \
             -b "$COS_BUCKET" \
-            -r "$COS_REGION" \
             -e cos.accelerate.myqcloud.com \
             -m 16 \
             -p 8 \
