@@ -454,6 +454,7 @@ jobs:
             -s "$COS_SECRET_KEY" \
             -b "$COS_BUCKET" \
             -r "$COS_REGION" \
+            -e cos.accelerate.myqcloud.com \
             -m 16 \
             -p 8 \
             --retry 5 \
