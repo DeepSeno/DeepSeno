@@ -39,6 +39,7 @@ if (process.platform === 'win32') {
   // from showing visible console windows to the user.
   const cp = require('child_process');
   const _origSpawn = cp.spawn;
+  (globalThis as any).__deepsenoOriginalSpawn = _origSpawn;
   cp.spawn = function patchedSpawn(cmd: string, args?: any, opts?: any) {
     if (args && !Array.isArray(args)) { opts = args; args = undefined; }
     opts = { ...opts, windowsHide: true };
@@ -263,6 +264,204 @@ let currentRecordingScene: RecordingScene = 'dictation';
 let previousAppBundleId: string | null = null; // frontmost app before recording started (macOS)
 let previousWindowHandle: string | null = null; // foreground window handle before recording started (Windows)
 let isStopping = false; // true while stop + post-stop async work is in progress
+let pendingUpdateInstallerPath: string | null = null;
+
+function getUpdateDownloadUrl(): string {
+  return typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__.replace(/\/api\/v1$/, '') : '';
+}
+
+function serializeUpdaterLogDetails(details?: unknown): string {
+  if (details == null) return '';
+  try {
+    return ` ${JSON.stringify(details, (_key, value) => {
+      if (value instanceof Error) {
+        return { name: value.name, message: value.message, stack: value.stack };
+      }
+      return value;
+    })}`;
+  } catch {
+    return ` ${String(details)}`;
+  }
+}
+
+function appendUpdaterInstallLog(level: 'info' | 'warn' | 'error', message: string, details?: unknown): void {
+  const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${message}${serializeUpdaterLogDetails(details)}\n`;
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, 'updater-install.log'), line, 'utf8');
+  } catch {
+    // Logging must never block update flow.
+  }
+  const log = level === 'error' ? console.warn : level === 'warn' ? console.warn : console.log;
+  log(`[AutoUpdater] ${message}`, details ?? '');
+}
+
+function notifyUpdateInstallFailed(error?: unknown): void {
+  const message = error instanceof Error ? error.message : error ? String(error) : undefined;
+  appendUpdaterInstallLog('error', 'Update install failed', { error: message });
+  const win = getMainWindow();
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('update-install-failed', {
+      downloadUrl: getUpdateDownloadUrl(),
+      error: message,
+    });
+  }
+}
+
+function getPendingUpdateInstallerPath(): string | null {
+  const updaterAny = autoUpdater as any;
+  return pendingUpdateInstallerPath
+    || updaterAny.downloadedUpdateHelper?.file
+    || updaterAny.installerPath
+    || null;
+}
+
+function getDownloadedUpdateFileInfo(): { isAdminRightsRequired?: boolean } | null {
+  return ((autoUpdater as any).downloadedUpdateHelper?.downloadedFileInfo ?? null) as { isAdminRightsRequired?: boolean } | null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForInstallerFileReady(filePath: string): Promise<{ size: number }> {
+  let previousSize = -1;
+  let stableReads = 0;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) throw new Error('Downloaded update is not a file');
+      if (stat.size <= 0) throw new Error('Downloaded update is empty');
+
+      const handle = await fs.promises.open(filePath, 'r');
+      await handle.close();
+
+      if (stat.size === previousSize) {
+        stableReads++;
+      } else {
+        previousSize = stat.size;
+        stableReads = 0;
+      }
+
+      if (stableReads >= 2) return { size: stat.size };
+    } catch (err) {
+      lastError = err;
+    }
+    await delay(500);
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : String(lastError ?? 'timed out');
+  throw new Error(`Update installer is not ready: ${reason}`);
+}
+
+function getOriginalChildProcessSpawn(): typeof import('child_process').spawn {
+  return ((globalThis as any).__deepsenoOriginalSpawn || require('child_process').spawn) as typeof import('child_process').spawn;
+}
+
+function spawnDetachedInstaller(command: string, args: string[], graceMs: number): Promise<{ pid: number }> {
+  return new Promise((resolve, reject) => {
+    const spawnImpl = getOriginalChildProcessSpawn();
+    let child: ReturnType<typeof spawnImpl>;
+    let settled = false;
+    let timeout: NodeJS.Timeout | null = null;
+    let graceTimer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      if (graceTimer) clearTimeout(graceTimer);
+    };
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    try {
+      child = spawnImpl(command, args, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      });
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    timeout = setTimeout(() => fail(new Error('Timed out waiting for installer process to spawn')), 10_000);
+
+    child.once('error', (err) => fail(err));
+    child.once('spawn', () => {
+      const pid = child.pid;
+      if (!pid) {
+        fail(new Error('Installer process spawned without a pid'));
+        return;
+      }
+
+      appendUpdaterInstallLog('info', 'Installer process spawned', { command, args, pid });
+
+      const complete = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        child.unref();
+        resolve({ pid });
+      };
+
+      child.once('exit', (code, signal) => {
+        fail(new Error(`Installer process exited immediately (code=${code}, signal=${signal})`));
+      });
+
+      if (graceMs <= 0) complete();
+      else graceTimer = setTimeout(complete, graceMs);
+    });
+  });
+}
+
+async function installWindowsUpdate(): Promise<{ success: boolean }> {
+  const installerPath = getPendingUpdateInstallerPath();
+  appendUpdaterInstallLog('info', 'Windows update install requested', { installerPath });
+
+  if (!installerPath) {
+    throw new Error('No downloaded update installer path is available');
+  }
+  if (path.extname(installerPath).toLowerCase() !== '.exe') {
+    throw new Error(`Downloaded update is not a Windows installer: ${installerPath}`);
+  }
+
+  const fileInfo = await waitForInstallerFileReady(installerPath);
+  const installerArgs = ['--updated', '--force-run'];
+  const downloadedInfo = getDownloadedUpdateFileInfo();
+  const requiresElevation = downloadedInfo?.isAdminRightsRequired === true;
+  const command = requiresElevation ? path.join(process.resourcesPath, 'elevate.exe') : installerPath;
+  const args = requiresElevation ? [installerPath, ...installerArgs] : installerArgs;
+
+  if (!fs.existsSync(command)) {
+    throw new Error(`Update launcher is missing: ${command}`);
+  }
+
+  appendUpdaterInstallLog('info', 'Launching Windows update installer', {
+    command,
+    args,
+    installerPath,
+    size: fileInfo.size,
+    requiresElevation,
+  });
+
+  await spawnDetachedInstaller(command, args, requiresElevation ? 0 : 1200);
+
+  isQuitting = true;
+  isUpdating = true;
+
+  await cleanupRuntimeServices();
+  appendUpdaterInstallLog('info', 'Runtime cleanup finished, quitting for update');
+  app.quit();
+  return { success: true };
+}
 
 // Fix userData path: in dev mode Electron uses "Electron" as app name, making
 // userData point to ~/Library/Application Support/Electron. Force it to the
@@ -1234,8 +1433,15 @@ app.whenReady().then(async () => {
   if (app.isPackaged) {
     let installRequested = false;
 
+    if (process.platform === 'win32') {
+      autoUpdater.logger = {
+        info: (message?: any) => appendUpdaterInstallLog('info', 'electron-updater', message),
+        warn: (message?: any) => appendUpdaterInstallLog('warn', 'electron-updater', message),
+        error: (message?: any) => appendUpdaterInstallLog('error', 'electron-updater', message),
+      };
+    }
     autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoInstallOnAppQuit = process.platform !== 'win32';
     autoUpdater.autoRunAppAfterInstall = true;
     nativeAutoUpdater.on('before-quit-for-update', () => {
       console.log('[AutoUpdater] before-quit-for-update');
@@ -1253,19 +1459,33 @@ app.whenReady().then(async () => {
       const win = getMainWindow();
       if (win) win.webContents.send('update-download-progress', { percent: progress.percent });
     });
-    autoUpdater.on('update-downloaded', () => {
-      console.log('[AutoUpdater] Update downloaded, will install on quit');
+    autoUpdater.on('update-downloaded', (event: any) => {
+      pendingUpdateInstallerPath = event?.downloadedFile || getPendingUpdateInstallerPath();
+      if (process.platform === 'win32') {
+        appendUpdaterInstallLog('info', 'Update downloaded', {
+          downloadedFile: pendingUpdateInstallerPath,
+          platform: process.platform,
+        });
+      } else {
+        console.log('[AutoUpdater] Update downloaded, will install on quit');
+      }
       const win = getMainWindow();
       if (win) win.webContents.send('update-downloaded');
     });
     autoUpdater.on('error', (err) => {
-      console.warn('[AutoUpdater] Error:', err.message);
+      if (process.platform === 'win32') {
+        appendUpdaterInstallLog('error', 'electron-updater error', { error: err.message });
+      } else {
+        console.warn('[AutoUpdater] Error:', err.message);
+      }
       if (installRequested) {
         installRequested = false;
         isUpdating = false;
         isQuitting = false;
         const win = getMainWindow();
-        if (win) win.webContents.send('update-install-failed', { downloadUrl: typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__.replace(/\/api\/v1$/, '') : '' });
+        if (win) win.webContents.send('update-install-failed', process.platform === 'win32'
+          ? { downloadUrl: getUpdateDownloadUrl(), error: err.message }
+          : { downloadUrl: getUpdateDownloadUrl() });
       }
     });
     autoUpdater.checkForUpdates().catch(() => {});
@@ -1288,13 +1508,17 @@ app.whenReady().then(async () => {
       if (installRequested) return { success: true };
       installRequested = true;
 
-      // Let quitAndInstall close windows instead of our tray-close handler hiding them.
-      // Electron emits before-quit after closing windows for updates, so the native
-      // before-quit-for-update listener above keeps this flag set at the right moment.
-      isQuitting = true;
-      isUpdating = true;
-
       try {
+        if (process.platform === 'win32') {
+          return await installWindowsUpdate();
+        }
+
+        // Let quitAndInstall close windows instead of our tray-close handler hiding them.
+        // Electron emits before-quit after closing windows for updates, so the native
+        // before-quit-for-update listener above keeps this flag set at the right moment.
+        isQuitting = true;
+        isUpdating = true;
+
         await cleanupRuntimeServices();
         autoUpdater.quitAndInstall(false, true);
         return { success: true };
@@ -1302,9 +1526,13 @@ app.whenReady().then(async () => {
         isUpdating = false;
         isQuitting = false;
         installRequested = false;
-        console.warn('[AutoUpdater] quitAndInstall threw:', err?.message);
-        const win = getMainWindow();
-        if (win) win.webContents.send('update-install-failed', { downloadUrl: typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__.replace(/\/api\/v1$/, '') : '' });
+        if (process.platform === 'win32') {
+          notifyUpdateInstallFailed(err);
+        } else {
+          console.warn('[AutoUpdater] quitAndInstall threw:', err?.message);
+          const win = getMainWindow();
+          if (win) win.webContents.send('update-install-failed', { downloadUrl: getUpdateDownloadUrl() });
+        }
         return { success: false, error: err?.message };
       }
     });
