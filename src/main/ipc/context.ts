@@ -5,6 +5,7 @@ import path from 'path';
 
 import { DatabaseSync } from 'node:sqlite';
 import { VoiceBrainDB } from '../db/database';
+import { quarantineSqliteFiles, type StorageRepairResult } from '../db/sqlite-recovery';
 import type { LLMClient } from '../llm/llm-client';
 import { createLLMClient, createEmbedClient, getLLMModel, getEmbedModel } from '../llm/create-client';
 import { TextOptimizer } from '../llm/text-optimizer';
@@ -41,6 +42,7 @@ export interface IpcContext {
   setDownloadManager: (mgr: BackgroundDownloadManager) => void;
   getMemoryManager: () => MemoryManager | null;
   reinitSingletons: () => void;
+  repairStorageAfterSqliteCorruption: (err?: unknown) => Promise<StorageRepairResult>;
   resetLLMClient: () => void;
   spawnCheck: (cmd: string, args: string[], timeout?: number) => Promise<string>;
   spawnPipShow: (pipPackage: string) => Promise<void>;
@@ -152,6 +154,9 @@ function getQueryEngine(): QueryEngine {
       getEmbedLLM(),
       analyzer,
     );
+    if (memoryManagerInstance) {
+      queryEngine.setMemoryManager(memoryManagerInstance);
+    }
     // Fire-and-forget upgrade to paste-clean tier when available.
     resolvePasteCleanModel(settings)
       .then(({ model }) => {
@@ -161,6 +166,8 @@ function getQueryEngine(): QueryEngine {
         }
       })
       .catch(() => { /* keep main model */ });
+  } else if (memoryManagerInstance) {
+    queryEngine.setMemoryManager(memoryManagerInstance);
   }
   return queryEngine;
 }
@@ -299,6 +306,97 @@ function reinitSingletons(): void {
   licenseManager = null;
   eventsWired = false;
   console.log('[ipc] Singletons re-initialized for new paths');
+}
+
+
+function closeVectorDbHandle(): void {
+  if (vecDb) {
+    try { vecDb.close(); } catch { /* already closed */ }
+    vecDb = null;
+  }
+  vectorStore = null;
+  queryEngine = null;
+  insightEngineInstance = null;
+}
+
+function rewireVectorDependents(): void {
+  const freshVectorStore = getVectorStore();
+  if (processor) {
+    processor.setQueryEngine(getQueryEngine());
+  }
+  if (knowledgeCompilerInstance) {
+    knowledgeCompilerInstance.updateVectorStore(freshVectorStore);
+  }
+}
+
+async function repairStorageAfterSqliteCorruption(err?: unknown): Promise<StorageRepairResult> {
+  const actions: string[] = [];
+  const errors: string[] = [];
+  let backupDir: string | undefined;
+
+  console.warn('[SQLiteRepair] Storage corruption detected, attempting automatic repair:', err);
+
+  try {
+    getDb().repairSegmentsFts();
+    actions.push('segments_fts rebuilt');
+  } catch (ftsErr: any) {
+    errors.push(`FTS repair failed: ${ftsErr?.message || String(ftsErr)}`);
+  }
+
+  try {
+    const check = getDb().quickCheck();
+    if (!check.ok) {
+      errors.push(`main database quick_check failed: ${check.details.join('; ')}`);
+    } else {
+      actions.push('main database quick_check passed');
+    }
+  } catch (checkErr: any) {
+    errors.push(`main database check failed: ${checkErr?.message || String(checkErr)}`);
+  }
+
+  if (errors.length === 0) {
+    try {
+      getVectorStore().healthCheck();
+      actions.push('vector database health_check passed');
+    } catch (vecErr: any) {
+      console.warn('[SQLiteRepair] Vector database health check failed, rebuilding:', vecErr);
+      closeVectorDbHandle();
+      const quarantine = quarantineSqliteFiles(getVecDbPath(), 'vector');
+      if (quarantine.backupDir) {
+        backupDir = quarantine.backupDir;
+        actions.push(`vector database quarantined: ${path.basename(quarantine.backupDir)}`);
+      }
+      if (quarantine.errors.length > 0) {
+        errors.push(...quarantine.errors.map((item) => `vector quarantine failed: ${item}`));
+      }
+
+      if (errors.length === 0) {
+        try {
+          const freshVectorStore = getVectorStore();
+          freshVectorStore.healthCheck();
+          rewireVectorDependents();
+          actions.push('vector database rebuilt');
+        } catch (rebuildErr: any) {
+          closeVectorDbHandle();
+          errors.push(`vector database rebuild failed: ${rebuildErr?.message || String(rebuildErr)}`);
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    console.warn('[SQLiteRepair] Automatic repair failed:', { actions, errors, backupDir });
+  } else {
+    console.log('[SQLiteRepair] Automatic repair completed:', { actions, backupDir });
+  }
+
+  return {
+    attempted: true,
+    repaired: errors.length === 0,
+    actions,
+    errors,
+    backupDir,
+  };
 }
 
 // Wire syncManager callbacks
@@ -443,6 +541,7 @@ export function createIpcContext(windowGetter: () => BrowserWindow | null): IpcC
     setDownloadManager: (mgr: BackgroundDownloadManager) => { downloadManager = mgr; },
     getMemoryManager: () => { getProcessor(); return memoryManagerInstance; },
     reinitSingletons,
+    repairStorageAfterSqliteCorruption,
     resetLLMClient,
     spawnCheck,
     spawnPipShow,

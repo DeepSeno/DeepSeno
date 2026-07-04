@@ -228,7 +228,12 @@ export default function Recordings() {
   }
 
   async function handleRetry(taskId: string) {
-    try { await api.retryTask(taskId); } catch (err) { toast('error', r.pipeline_failed, String(err)); }
+    try {
+      const result = await api.retryTask(taskId);
+      if (typeof result === 'object' && result && !result.ok) {
+        toast('error', r.pipeline_failed, result.error || r.unknown_error);
+      }
+    } catch (err) { toast('error', r.pipeline_failed, String(err)); }
     loadQueue();
   }
 

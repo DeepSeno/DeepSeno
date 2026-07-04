@@ -6,6 +6,7 @@ import { FileWatcher } from '../watcher';
 import { loadSettings } from '../settings';
 import { getOutputDir, getLocalDataDir, getTempDir } from '../paths';
 import { requireString, requireId, ValidationError } from './validate';
+import { isSqliteCorruptionError, makeRepairFailureMessage } from '../db/sqlite-recovery';
 
 let fileWatcher: FileWatcher | null = null;
 
@@ -81,12 +82,26 @@ export function registerPipelineHandlers(ctx: IpcContext): void {
     }
   });
 
-  ipcMain.handle('pipeline:retry', (_event, taskId: string) => {
+  ipcMain.handle('pipeline:retry', async (_event, taskId: string) => {
     try {
       const validId = requireString(taskId, 'taskId', 100);
-      return ctx.getProcessor().getTaskQueue().retry(validId);
-    } catch {
-      return false;
+      const queue = ctx.getProcessor().getTaskQueue();
+      const task = queue.getById(validId);
+
+      if (task?.error && isSqliteCorruptionError(task.error)) {
+        const repair = await ctx.repairStorageAfterSqliteCorruption(task.error);
+        if (!repair.repaired) {
+          return {
+            ok: false,
+            error: makeRepairFailureMessage(repair, false),
+            recovery: repair,
+          };
+        }
+      }
+
+      return { ok: queue.retry(validId) };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || String(err) };
     }
   });
 
@@ -127,14 +142,50 @@ export function registerPipelineHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('pipeline:reprocess', async (_event, recordingId: number) => {
+    let originalStatus: string | null = null;
     try {
       const validId = requireId(recordingId, 'recordingId');
       const rec = ctx.getDb().getRecording(validId);
       if (!rec) return { ok: false, error: 'Recording not found' };
+      originalStatus = rec.status;
       // Clean old data and reuse recording ID
       const task = ctx.getProcessor().enqueueReprocess(rec.file_path, validId);
       return { ok: true, taskId: task.id };
     } catch (err: any) {
+      if (isSqliteCorruptionError(err)) {
+        const validId = Number(recordingId);
+        const repair = await ctx.repairStorageAfterSqliteCorruption(err);
+        if (repair.repaired) {
+          try {
+            const rec = ctx.getDb().getRecording(validId);
+            if (!rec) return { ok: false, error: 'Recording not found after repair', recovery: repair };
+            const task = ctx.getProcessor().enqueueReprocess(rec.file_path, validId);
+            return { ok: true, taskId: task.id, recovery: repair };
+          } catch (retryErr: any) {
+            console.error('[pipeline:reprocess] Retry after repair failed:', retryErr);
+            if (!isSqliteCorruptionError(retryErr)) {
+              return { ok: false, error: retryErr?.message || String(retryErr), recovery: repair };
+            }
+            repair.repaired = false;
+            repair.errors.push(`repair retry still failed: ${retryErr?.message || String(retryErr)}`);
+          }
+        }
+
+        let rolledBack = false;
+        if (Number.isFinite(validId) && originalStatus) {
+          try {
+            ctx.getDb().updateRecording(validId, { status: originalStatus });
+            rolledBack = true;
+          } catch (rollbackErr) {
+            console.warn('[pipeline:reprocess] Failed to rollback recording status:', rollbackErr);
+          }
+        }
+        return {
+          ok: false,
+          error: makeRepairFailureMessage(repair, rolledBack),
+          recovery: { ...repair, rolledBack },
+        };
+      }
       console.error('[pipeline:reprocess] Error:', err);
       return { ok: false, error: err.message };
     }

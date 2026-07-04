@@ -70,6 +70,10 @@ export class KnowledgeCompiler {
     if (embedClient) this.embedClient = embedClient;
   }
 
+  updateVectorStore(vectorStore: VectorStore): void {
+    this.vectorStore = vectorStore;
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────
 
   setOnCompiled(cb: (pageIds: number[]) => void): void {

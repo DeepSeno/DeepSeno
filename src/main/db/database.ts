@@ -437,6 +437,57 @@ export class VoiceBrainDB {
     }
   }
 
+  private isDatabaseMalformedError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /database disk image is malformed|SQLITE_CORRUPT|corruption found/i.test(message);
+  }
+
+  private rebuildSegmentsFts(): void {
+    console.warn('[DB] Rebuilding segments_fts index...');
+    try {
+      this.db.exec("INSERT INTO segments_fts(segments_fts) VALUES('rebuild')");
+      console.log('[DB] segments_fts index rebuilt successfully');
+    } catch (err) {
+      console.warn('[DB] segments_fts rebuild failed, recreating table...', err);
+      this.db.exec('DROP TABLE IF EXISTS segments_fts');
+      this.db.exec(`CREATE VIRTUAL TABLE segments_fts USING fts5(
+        raw_text, clean_text, content=segments, content_rowid=id
+      )`);
+      this.db.exec("INSERT INTO segments_fts(segments_fts) VALUES('rebuild')");
+      console.log('[DB] segments_fts table recreated and rebuilt');
+    }
+  }
+
+  private deleteSegmentsFtsRows(segmentIds: number[]): void {
+    if (segmentIds.length === 0) return;
+
+    const ph = segmentIds.map(() => '?').join(',');
+    const sql = `DELETE FROM segments_fts WHERE rowid IN (${ph})`;
+
+    try {
+      this.db.prepare(sql).run(...segmentIds);
+    } catch (err) {
+      if (!this.isDatabaseMalformedError(err)) {
+        throw err;
+      }
+      this.rebuildSegmentsFts();
+      this.db.prepare(sql).run(...segmentIds);
+    }
+  }
+
+  repairSegmentsFts(): void {
+    this.rebuildSegmentsFts();
+  }
+
+  quickCheck(): { ok: boolean; details: string[] } {
+    const rows = this.db.prepare('PRAGMA quick_check').all() as Array<Record<string, string>>;
+    const details = rows.map((row) => String(Object.values(row)[0] ?? ''));
+    return {
+      ok: details.length > 0 && details.every((item) => item === 'ok'),
+      details,
+    };
+  }
+
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
@@ -478,18 +529,7 @@ export class VoiceBrainDB {
         this.db.exec("INSERT INTO segments_fts(segments_fts) VALUES('integrity-check')");
       } catch (err: any) {
         console.warn('[DB] FTS5 index corrupted, rebuilding...', err.message);
-        try {
-          this.db.exec("INSERT INTO segments_fts(segments_fts) VALUES('rebuild')");
-          console.log('[DB] FTS5 index rebuilt successfully');
-        } catch {
-          console.warn('[DB] FTS5 rebuild failed, recreating table...');
-          this.db.exec('DROP TABLE IF EXISTS segments_fts');
-          this.db.exec(`CREATE VIRTUAL TABLE segments_fts USING fts5(
-            raw_text, clean_text, content=segments, content_rowid=id
-          )`);
-          this.db.exec("INSERT INTO segments_fts(segments_fts) VALUES('rebuild')");
-          console.log('[DB] FTS5 table recreated and rebuilt');
-        }
+        this.rebuildSegmentsFts();
       }
     }
 
@@ -1998,7 +2038,7 @@ export class VoiceBrainDB {
         // Delete extracted items
         this.db.prepare(`DELETE FROM extracted_items WHERE segment_id IN (${ph})`).run(...ids);
         // Delete FTS entries
-        this.db.prepare(`DELETE FROM segments_fts WHERE rowid IN (${ph})`).run(...ids);
+        this.deleteSegmentsFtsRows(ids);
       }
       // Delete match suggestions for speakers in this recording
       const spkIds = this.db.prepare(

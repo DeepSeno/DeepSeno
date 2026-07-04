@@ -503,6 +503,28 @@ export interface ParsedSchedule {
   nextRunAt: string | null;
 }
 
+export interface PipelineRecoveryResult {
+  attempted: boolean;
+  repaired: boolean;
+  actions: string[];
+  errors: string[];
+  backupDir?: string;
+  rolledBack?: boolean;
+}
+
+export type PipelineRetryResult = boolean | {
+  ok: boolean;
+  error?: string;
+  recovery?: PipelineRecoveryResult;
+};
+
+export interface PipelineReprocessResult {
+  ok: boolean;
+  taskId?: string;
+  error?: string;
+  recovery?: PipelineRecoveryResult;
+}
+
 // ─── API Interface ───────────────────────────────────────
 
 export interface VoiceBrainApi {
@@ -524,12 +546,12 @@ export interface VoiceBrainApi {
     createdAt: string;
   }>>;
   cancelTask: (taskId: string) => Promise<boolean>;
-  retryTask: (taskId: string) => Promise<boolean>;
+  retryTask: (taskId: string) => Promise<PipelineRetryResult>;
   pauseQueue: () => Promise<void>;
   resumeQueue: () => Promise<void>;
   isQueuePaused: () => Promise<boolean>;
   resetStuckTasks: () => Promise<{ queueCount: number; dbCount: number }>;
-  reprocessRecording: (recordingId: number) => Promise<{ ok: boolean; taskId?: string; error?: string }>;
+  reprocessRecording: (recordingId: number) => Promise<PipelineReprocessResult>;
 
   // Database - Recordings
   getRecordings: () => Promise<RecordingRow[]>;

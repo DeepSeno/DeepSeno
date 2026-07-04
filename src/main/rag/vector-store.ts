@@ -111,6 +111,12 @@ export class VectorStore {
     return this.dimensions;
   }
 
+  healthCheck(): void {
+    this.db.prepare('SELECT COUNT(*) AS count FROM segment_vectors').get();
+    this.db.prepare('SELECT COUNT(*) AS count FROM knowledge_page_vectors').get();
+    this.db.prepare('SELECT COUNT(*) AS count FROM external_chunk_vectors').get();
+  }
+
   private assertDim(embedding: number[]): void {
     if (embedding.length !== this.dimensions) {
       throw new Error(
