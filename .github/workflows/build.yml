@@ -465,7 +465,6 @@ jobs:
           # latest*.yml is intentionally uploaded last so clients never see a
           # manifest before all referenced ZIP/EXE/blockmap assets are ready.
           CONFIRM_DIR=$(mktemp -d)
-          UPLOAD_CONCURRENCY=3
 
           add_confirm_item() {
             local filename="$1"
@@ -598,19 +597,10 @@ jobs:
           upload_group() {
             local uploader="$1"
             shift
-            local pids=()
-            local f pid
+            local f
             for f in "$@"; do
               [ -f "$f" ] || continue
-              "$uploader" "$f" &
-              pids+=("$!")
-              if [ "${#pids[@]}" -ge "$UPLOAD_CONCURRENCY" ]; then
-                wait "${pids[0]}"
-                pids=("${pids[@]:1}")
-              fi
-            done
-            for pid in "${pids[@]}"; do
-              wait "$pid"
+              "$uploader" "$f"
             done
           }
 
