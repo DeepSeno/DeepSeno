@@ -1,6 +1,6 @@
 {
   "name": "deepseno",
-  "version": "2.24.3",
+  "version": "2.24.4",
   "description": "DeepSeno build your brain",
   "main": "./dist/main/index.js",
   "scripts": {
