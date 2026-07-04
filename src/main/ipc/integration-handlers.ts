@@ -28,8 +28,7 @@ import { createLLMClient, createEmbedClient, getLLMModel } from '../llm/create-c
 import { TextOptimizer } from '../llm/text-optimizer';
 import { getOutputDir } from '../paths';
 import { MemoryManager } from '../agent/memory-manager';
-import { requirePro } from '../licensing/require-pro';
-import { requireId, requireString, requireEnum, requireDate, requirePort, sanitizePath, ValidationError } from './validate';
+import { requireId, requireString, requireEnum, requireDate, requirePort, sanitizePath } from './validate';
 
 // ─── Feishu Bot State ───────────────────────────────────────
 
@@ -126,7 +125,7 @@ export async function resetAgentInfrastructure(): Promise<void> {
   agentExecutor = null;
   toolRegistry = null;
   pluginEngine = null;
-  await initMessageInfrastructure(_ctx, existingPluginEngine);
+  await initMessageInfrastructure(_ctx, existingPluginEngine ?? undefined);
 
   // Restart feishu bot so it picks up the new LLM client
   if (feishuBot && feishuBot.status !== 'disconnected') {
@@ -319,7 +318,7 @@ async function initMessageInfrastructure(ctx: IpcContext, existingPluginEngine?:
             if (!rec) rec = db.getRecordingByPath(task.filePath);
             if (!rec) {
               const fileName = require('path').basename(task.filePath);
-              rec = db.db.prepare('SELECT * FROM recordings WHERE file_name = ? ORDER BY id DESC LIMIT 1').get(fileName) as any;
+              rec = db.getRawDb().prepare('SELECT * FROM recordings WHERE file_name = ? ORDER BY id DESC LIMIT 1').get(fileName) as any;
             }
             if (rec) {
               const segments = db.getSegmentsByRecording(rec.id);
@@ -433,7 +432,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('feishu:restart', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     const settings = loadSettings();
     if (!settings.feishuAppId || !settings.feishuAppSecret) {
       stopFeishuBot();
@@ -526,7 +524,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   const feishuCli = FeishuCliService.getInstance();
 
   ipcMain.handle('externalSources:listProviders', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return listExternalSourceProviders().map((provider) => ({
       id: provider.id,
       displayName: provider.displayName,
@@ -547,7 +544,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('externalSources:syncNow', async (_event, source: string, domains?: string[]) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     try {
       const syncService = new ExternalSourceSyncService(ctx.getDb(), ctx.getVectorStore(), createEmbedClient(loadSettings()));
       return await syncService.sync(source, domains);
@@ -567,32 +563,26 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('feishuCli:install', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return feishuCli.install();
   });
 
   ipcMain.handle('feishuCli:initConfig', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return feishuCli.initConfig();
   });
 
   ipcMain.handle('feishuCli:login', async (_event, scopes?: string[]) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return feishuCli.login(scopes);
   });
 
   ipcMain.handle('feishuCli:pollLogin', async (_event, deviceCode: string) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return feishuCli.pollLogin(deviceCode);
   });
 
   ipcMain.handle('feishuCli:logout', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return feishuCli.logout();
   });
 
   ipcMain.handle('feishuCli:syncNow', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     try {
       const raw = (loadSettings() as any).feishuCliSyncScopes || 'calendar,task,doc';
       const domains = raw.split(',').map((s: string) => s.trim()).filter(Boolean);
@@ -605,25 +595,21 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
 
   // ─── WeChat ─────────────────────────────────────────────────
   ipcMain.handle('wechat:testConnection', async (_event, corpId: string, secret: string) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return WeChatChannel.testConnection(corpId, secret);
   });
 
   // ─── DingTalk ─────────────────────────────────────────────
   ipcMain.handle('dingtalk:testConnection', async (_event, appKey: string, appSecret: string) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return DingTalkChannel.testConnection(appKey, appSecret);
   });
 
   // ─── Telegram ──────────────────────────────────────────────
   ipcMain.handle('telegram:testConnection', async (_event, botToken: string) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return TelegramChannel.testConnection(botToken);
   });
 
   // ─── Email ────────────────────────────────────────────────
   ipcMain.handle('email:testConnection', async (_event, host: string, port: number, user: string, pass: string) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     requireString(host, 'host', 500);
     requirePort(port, 'port');
     requireString(user, 'user', 500);
@@ -635,7 +621,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   // ─── OpenClaw WeChat (Personal) ─────────────────────────────
   ipcMain.handle('openclawWechat:getQRCode', async () => {
     console.log('[IPC] openclawWechat:getQRCode called');
-    requirePro(ctx.getLicenseManager(), 'channels');
     const ch = openclawWechatChannel || new OpenClawWeChatChannel();
     try {
       const result = await ch.getClient().getQRCode();
@@ -649,7 +634,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('openclawWechat:getQRCodeStatus', async (_event, qrcodeId: string) => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     requireString(qrcodeId, 'qrcodeId', 500);
     const ch = openclawWechatChannel || new OpenClawWeChatChannel();
     const result = await ch.getClient().getQRCodeStatus(qrcodeId);
@@ -713,7 +697,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('openclawWechat:testConnection', async () => {
-    requirePro(ctx.getLicenseManager(), 'channels');
     return OpenClawWeChatChannel.testConnection();
   });
 
@@ -745,12 +728,10 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('sync:enable', async (_event, syncDir: string) => {
-    requirePro(ctx.getLicenseManager(), 'mobile_sync');
     return ctx.syncManager.enableSync(syncDir);
   });
 
   ipcMain.handle('sync:disable', async () => {
-    requirePro(ctx.getLicenseManager(), 'mobile_sync');
     return ctx.syncManager.disableSync();
   });
 
@@ -765,17 +746,14 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
 
   // ─── Agent Memory ──────────────────────────────────────
   ipcMain.handle('memory:getAll', async () => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     return ctx.getDb().getAllMemories();
   });
 
   ipcMain.handle('memory:getStats', async () => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     return ctx.getDb().getMemoryStats();
   });
 
   ipcMain.handle('memory:promote', async (_event, id: number, layer: string) => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     const validId = requireId(id, 'id');
     const validLayer = requireEnum(layer, ['core', 'active', 'archive'], 'layer');
     ctx.getDb().promoteMemory(validId, validLayer);
@@ -783,13 +761,11 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('memory:delete', async (_event, id: number) => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     ctx.getDb().deleteMemory(id);
     return { success: true };
   });
 
   ipcMain.handle('memory:update', async (_event, id: number, fact: string) => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     const validId = requireId(id, 'id');
     const validFact = requireString(fact, 'fact', 5000);
     ctx.getDb().updateMemoryFact(validId, validFact);
@@ -799,7 +775,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   // ─── Memory Documents ──────────────────────────────────
 
   ipcMain.handle('memory:getDocumentDates', async () => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     const db = ctx.getDb();
     const docDates = db.getMemoryDocumentDates();
     const recDates = db.getDatesWithRecordings(90);
@@ -821,12 +796,10 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('memory:getDocument', async (_event, date: string) => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     return ctx.getDb().getMemoryDocument(date) || null;
   });
 
   ipcMain.handle('memory:saveDocument', async (_event, date: string, content: string) => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     const validDate = requireDate(date, 'date');
     const validContent = requireString(content, 'content', 100000);
     ctx.getDb().saveMemoryDocument(validDate, validContent, false);
@@ -834,7 +807,6 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('memory:generateDocument', async (_event, date: string) => {
-    requirePro(ctx.getLicenseManager(), 'memory');
     try {
       const settings = loadSettings();
       const llm = createLLMClient(settings);

@@ -67,7 +67,6 @@ export default function MobileSync() {
         if (hasRelay) {
           const u = new URL((status as any).relayUrl.replace('deepseno://pair', 'https://dummy'));
           payload.relay = {
-            key: u.searchParams.get('key') || '',
             mid: u.searchParams.get('mid') || '',
             pub: u.searchParams.get('pub') || '',
             nonce: u.searchParams.get('nonce') || '',

@@ -38,7 +38,7 @@ contextBridge.exposeInMainWorld('api', {
   resetStuckTasks: () =>
     ipcRenderer.invoke('pipeline:resetStuck') as Promise<{ queueCount: number; dbCount: number }>,
   reprocessRecording: (recordingId: number) =>
-    ipcRenderer.invoke('pipeline:reprocess', recordingId) as Promise<{ ok: boolean; taskId?: string; error?: string }>,
+    ipcRenderer.invoke('pipeline:reprocess', recordingId) as Promise<{ ok: boolean; taskId?: string; error?: string; recovery?: any }>,
   reoptimizeRecording: (recordingId: number) =>
     ipcRenderer.invoke('pipeline:reoptimize', recordingId) as Promise<{ ok: boolean; error?: string }>,
   // #endregion
@@ -308,8 +308,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   getStatus: () =>
     ipcRenderer.invoke('system:getStatus'),
-  checkCloudApi: (url: string, apiKey: string) =>
-    ipcRenderer.invoke('cloud:check', url, apiKey),
+  checkCloudApi: (url: string, apiKey: string, model?: string) =>
+    ipcRenderer.invoke('cloud:check', url, apiKey, model),
   listCloudModels: (url: string, apiKey: string) =>
     ipcRenderer.invoke('cloud:listModels', url, apiKey),
   checkScreenPermission: () =>
@@ -411,6 +411,10 @@ contextBridge.exposeInMainWorld('api', {
   onTaskCompleted: (cb: (_event: any, task: any) => void) => {
     ipcRenderer.on('pipeline:task:completed', cb);
     return () => { ipcRenderer.removeListener('pipeline:task:completed', cb); };
+  },
+  onTaskCancelled: (cb: (_event: any, task: any) => void) => {
+    ipcRenderer.on('pipeline:task:cancelled', cb);
+    return () => { ipcRenderer.removeListener('pipeline:task:cancelled', cb); };
   },
   onTextNoteNew: (cb: (_event: any, note: any) => void) => {
     ipcRenderer.on('text-note:new', cb);
@@ -619,7 +623,6 @@ contextBridge.exposeInMainWorld('api', {
   relayEnable: (enabled: boolean) => ipcRenderer.invoke('relay:enable', enabled),
   relayGetPairingQR: () => ipcRenderer.invoke('relay:getPairingQR'),
   relayUnpair: () => ipcRenderer.invoke('relay:unpair'),
-  relayGetSubscription: () => ipcRenderer.invoke('relay:getSubscription'),
   // #endregion
 
   // #region License APIs

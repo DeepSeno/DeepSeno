@@ -1,4 +1,4 @@
-import { getLLMModel } from './create-client';
+import { createLLMClient, getLLMModel } from './create-client';
 import type { AppSettings } from '../settings';
 
 const LIGHT_MODEL = 'qwen3.5:4b';
@@ -29,6 +29,7 @@ export async function resolvePasteCleanModel(
   settings: AppSettings,
 ): Promise<{ model: string; keepAlive?: string }> {
   const mainModel = getLLMModel(settings);
+  const client = createLLMClient(settings);
 
   // User explicitly set pasteCleanModel → use it directly
   if (settings.pasteCleanModel) {
@@ -80,16 +81,7 @@ export async function resolvePasteCleanModel(
     }
 
     if (!models.includes(LIGHT_MODEL)) {
-      console.log(`[paste-clean] ${LIGHT_MODEL} not installed, pulling silently...`);
-      fetch(`${baseUrl}/api/pull`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: LIGHT_MODEL, stream: false }),
-      }).then(() => {
-        console.log(`[paste-clean] ${LIGHT_MODEL} pulled successfully`);
-      }).catch((err) => {
-        console.warn(`[paste-clean] Failed to pull ${LIGHT_MODEL}:`, err);
-      });
+      console.log(`[paste-clean] ${LIGHT_MODEL} not installed, falling back to ${mainModel}`);
       return { model: mainModel };
     }
 

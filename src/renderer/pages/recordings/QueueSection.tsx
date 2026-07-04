@@ -1,4 +1,4 @@
-import { Pause, Play, X, RotateCcw, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { X, RotateCcw, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { Translations } from '../../i18n';
 import type { QueueItem, HistoryItem } from './types';
 import { getStepsForMediaType } from './types';
@@ -14,6 +14,24 @@ interface QueueSectionProps {
   onRetry: (taskId: string) => void;
   onResetStuck: () => void;
   onToggleError: (itemId: string) => void;
+}
+
+export function getQueueSummaryLabel(queueItems: QueueItem[], r: Translations['rec']): string {
+  const processing = queueItems.filter((item) => item.status === 'processing').length;
+  const queued = queueItems.filter((item) => item.status === 'pending').length;
+  const parts: string[] = [];
+
+  if (processing > 0) {
+    parts.push(`${processing} ${(r as any).queue_in_progress || ''}`.trim());
+  }
+  if (queued > 0) {
+    parts.push(`${queued} ${r.status_queued || ''}`.trim());
+  }
+  if (parts.length === 0 && queueItems.length > 0) {
+    parts.push(`${queueItems.length} ${(r as any).queue_in_progress || ''}`.trim());
+  }
+
+  return parts.join(' / ');
 }
 
 export default function QueueSection({
@@ -33,7 +51,7 @@ export default function QueueSection({
       <h3 className="kz-section-title">
         <span>{r.active_queue}</span>
         <span className="kz-section-title__count">
-          {queueItems.length} {(r as any).queue_in_progress || ''}
+          {getQueueSummaryLabel(queueItems, r)}
         </span>
         {paused && (
           <span className="kz-badge kz-badge--warn" style={{ marginLeft: 4 }}>{r.paused}</span>

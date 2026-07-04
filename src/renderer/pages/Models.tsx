@@ -139,7 +139,7 @@ export default function Models() {
     if (settings?.llmProvider === 'openai' && settings?.cloudApiUrl && settings?.cloudApiKey) {
       checkCloud();
     }
-  }, [settings?.llmProvider, settings?.cloudApiUrl, settings?.cloudApiKey]);
+  }, [settings?.llmProvider, settings?.cloudApiUrl, settings?.cloudApiKey, settings?.cloudModel]);
 
   useEffect(() => {
     setSvModelStatus('checking');
@@ -233,7 +233,7 @@ export default function Models() {
     setCloudStatus('checking');
     setCloudError(null);
     try {
-      const result = await api.checkCloudApi(settings.cloudApiUrl, settings.cloudApiKey);
+      const result = await api.checkCloudApi(settings.cloudApiUrl, settings.cloudApiKey, settings.cloudModel);
       setCloudStatus(result.ok ? 'connected' : 'error');
       setCloudError(result.ok ? null : (result.error || 'Connection failed'));
       if (result.ok) {
@@ -250,7 +250,7 @@ export default function Models() {
       setCloudStatus('error');
       setCloudError('Connection failed');
     }
-  }, [api, settings?.cloudApiUrl, settings?.cloudApiKey]);
+  }, [api, settings?.cloudApiUrl, settings?.cloudApiKey, settings?.cloudModel]);
 
   const handleDownloadSenseVoice = useCallback(async () => {
     const force = svModelStatus === 'ready';
@@ -431,7 +431,7 @@ export default function Models() {
   const localReady = localStatus === 'connected';
   const llmModel = settings?.llmModel || 'qwen3.5:4b';
   const llmReady = settings?.llmProvider === 'openai'
-    ? cloudStatus === 'connected'
+    ? Boolean(settings?.cloudModel?.trim()) && cloudStatus === 'connected'
     : settings?.llmProvider === 'local'
       ? localModelStatuses[llmModel] === 'done' || isModelInstalled(localModels, llmModel)
       : isModelInstalled(localModels, llmModel);

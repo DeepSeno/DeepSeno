@@ -3,20 +3,17 @@ import {
   RefreshCw,
   ExternalLink,
   CheckCircle2,
-  Key,
   Download,
 } from 'lucide-react';
-import type { AppSettings, EnvCheckResult, LicenseStatus } from '../../hooks/useApi';
+import type { AppSettings, EnvCheckResult } from '../../hooks/useApi';
 import { useApi } from '../../hooks/useApi';
 import { useI18n } from '../../i18n';
 import { useNotifications } from '../../components/NotificationCenter';
-import { SITE_BASE_URL } from '../../config';
 
 interface SystemSectionProps {
   settings: AppSettings;
   s: any;
   updateField: (partial: Partial<AppSettings>) => void;
-  onOpenExternal: (url: string) => void;
 }
 
 // V2.0: python/whisper/pyannote/hfToken removed — sherpa-onnx runs in-process
@@ -133,8 +130,8 @@ function FFmpegDownloadButton({ s }: { s: any }) {
 }
 
 export default function SystemSection({
+  settings,
   s,
-  onOpenExternal,
 }: SystemSectionProps) {
   const { lang } = useI18n();
   const api = useApi();
@@ -148,17 +145,9 @@ export default function SystemSection({
   const [dbStats, setDbStats] = useState({ recordingCount: 0, segmentCount: 0, dbSize: 0 });
   const [clearConfirm, setClearConfirm] = useState(false);
 
-  // ─── License state (local) ─────────────────────────────────
-  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
-  const [licenseKeyInput, setLicenseKeyInput] = useState('');
-  const [licenseActivating, setLicenseActivating] = useState(false);
-  const [licenseError, setLicenseError] = useState<string | null>(null);
-  const [deactivateConfirm, setDeactivateConfirm] = useState(false);
-
   // ─── Load on mount ─────────────────────────────────────────
   useEffect(() => {
     api.getDbStats().then(setDbStats);
-    api.licenseGetStatus().then(setLicenseStatus).catch(() => {});
   }, []);
 
   // ─── Callbacks ─────────────────────────────────────────────
@@ -194,34 +183,6 @@ export default function SystemSection({
       console.error('[SystemSection] handleOpenDataDir failed:', err);
     }
   }, [api]);
-
-  const handleLicenseActivate = useCallback(async () => {
-    if (!licenseKeyInput.trim()) return;
-    setLicenseActivating(true);
-    setLicenseError(null);
-    try {
-      const result = await api.licenseActivate(licenseKeyInput.trim());
-      if (result.success) {
-        const updated = await api.licenseGetStatus();
-        setLicenseStatus(updated);
-        setLicenseKeyInput('');
-        toast('success', s.license_activated);
-      } else {
-        setLicenseError(result.error || s.license_error);
-      }
-    } catch {
-      setLicenseError(s.license_error);
-    }
-    setLicenseActivating(false);
-  }, [api, licenseKeyInput, s, toast]);
-
-  const handleLicenseDeactivate = useCallback(async () => {
-    await api.licenseDeactivate();
-    const updated = await api.licenseGetStatus();
-    setLicenseStatus(updated);
-    setDeactivateConfirm(false);
-    toast('info', s.license_deactivated);
-  }, [api, s, toast]);
 
   // ─── Helpers ────────────────────────────────────────────────
   const envStatusBadge = (status: string, version?: string) => {
@@ -355,130 +316,6 @@ export default function SystemSection({
         </div>
       </div>
 
-      {/* ── License ─────────────────────────────────────── */}
-      <h3 className="kz-section-title">
-        <span>{s.section_license || 'License'}</span>
-        {licenseStatus?.licensed && (
-          <span className="kz-section-title__count">{s.license_licensed}</span>
-        )}
-      </h3>
-      <div className="kz-card" style={{ padding: '6px 18px', marginBottom: 22 }}>
-        {/* Status row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 6px', borderBottom: '1px solid var(--line-soft)' }}>
-          <div style={{ flex: 1, fontSize: 13, color: 'var(--ink)' }}>{s.license_status}</div>
-          <div style={{ flexShrink: 0 }}>
-            {licenseStatus ? (
-              licenseStatus.licensed ? (
-                <span className="kz-badge kz-badge--success kz-badge--dot">{s.license_licensed}</span>
-              ) : licenseStatus.trial.active ? (
-                <span className="kz-badge kz-badge--warn kz-badge--dot">
-                  {s.license_trial_active} — {licenseStatus.trial.daysRemaining} {s.license_trial_days}
-                </span>
-              ) : (
-                <span className="kz-badge kz-badge--danger kz-badge--dot">{s.license_trial_expired}</span>
-              )
-            ) : (
-              <span className="kz-mono kz-text-mute" style={{ fontSize: 11 }}>...</span>
-            )}
-          </div>
-        </div>
-
-        {/* Tier row */}
-        {licenseStatus && licenseStatus.licensed && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 6px', borderBottom: '1px solid var(--line-soft)' }}>
-            <div style={{ flex: 1, fontSize: 13, color: 'var(--ink)' }}>{s.license_tier}</div>
-            <div style={{ flexShrink: 0 }}>
-              <span className="kz-badge kz-badge--accent">
-                {(s[`license_tier_${licenseStatus.tier}` as keyof typeof s] as string) || licenseStatus.tier.toUpperCase()}
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Key row + deactivate */}
-        {licenseStatus?.licensed && licenseStatus.licenseKey && (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 6px', borderBottom: '1px solid var(--line-soft)' }}>
-              <div style={{ flex: 1, fontSize: 13, color: 'var(--ink)' }}>{s.license_key}</div>
-              <span className="kz-mono" style={{ fontSize: 12, color: 'var(--ink-soft)', letterSpacing: '0.05em' }}>
-                {licenseStatus.licenseKey.slice(0, 7)}****-****
-              </span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '12px 6px' }}>
-              {deactivateConfirm ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span className="kz-text-mute" style={{ fontSize: 12 }}>{s.license_deactivate_confirm}</span>
-                  <button onClick={handleLicenseDeactivate} className="kz-btn kz-btn--sm kz-btn--danger">
-                    {s.license_deactivate}
-                  </button>
-                  <button onClick={() => setDeactivateConfirm(false)} className="kz-btn kz-btn--sm">
-                    {s.clear_db_cancel}
-                  </button>
-                </div>
-              ) : (
-                <button onClick={() => setDeactivateConfirm(true)} className="kz-btn kz-btn--sm kz-btn--danger">
-                  {s.license_deactivate}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-
-        {/* Activate form */}
-        {licenseStatus && !licenseStatus.licensed && (
-          <div style={{ padding: '14px 6px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ position: 'relative', flex: 1 }}>
-                <Key
-                  size={12}
-                  style={{
-                    position: 'absolute',
-                    left: 10,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    color: 'var(--ink-mute)',
-                    pointerEvents: 'none',
-                  }}
-                />
-                <input
-                  type="text"
-                  value={licenseKeyInput}
-                  onChange={(e) => setLicenseKeyInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleLicenseActivate(); }}
-                  placeholder={s.license_key_placeholder}
-                  className="kz-input kz-mono"
-                  style={{ width: '100%', paddingLeft: 28, fontSize: 12 }}
-                  disabled={licenseActivating}
-                />
-              </div>
-              <button
-                onClick={handleLicenseActivate}
-                disabled={licenseActivating || !licenseKeyInput.trim()}
-                className="kz-btn kz-btn--primary kz-btn--sm"
-                style={{ whiteSpace: 'nowrap', opacity: (licenseActivating || !licenseKeyInput.trim()) ? 0.4 : 1 }}
-              >
-                {licenseActivating ? s.license_activating : s.license_activate}
-              </button>
-            </div>
-            {licenseError && (
-              <div className="kz-mono" style={{ fontSize: 11, color: 'var(--c-danger)', background: 'var(--c-danger-bg)', padding: '6px 10px', borderRadius: 6 }}>
-                {licenseError}
-              </div>
-            )}
-            <div className="kz-text-mute" style={{ fontSize: 11.5, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <span>{s.license_gate_purchase}</span>
-              <button
-                onClick={() => onOpenExternal(SITE_BASE_URL + '/')}
-                className="kz-text-accent"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: 'transparent', border: 0, cursor: 'pointer' }}
-              >
-                deepseno.enmooy.com <ExternalLink size={9} />
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* ── Diagnostics ─────────────────────────────────── */}
       <h3 className="kz-section-title">
         <span>{s.section_about || 'Diagnostics'}</span>
@@ -513,7 +350,7 @@ export default function SystemSection({
             </div>
           </div>
           <button
-            onClick={() => onOpenExternal('https://github.com/deepseno/deepseno')}
+            onClick={() => api.openExternal('https://github.com/deepseno/deepseno')}
             className="kz-btn kz-btn--sm kz-btn--ghost"
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >

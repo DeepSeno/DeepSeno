@@ -11,7 +11,6 @@ import {
 } from 'lucide-react';
 import { CollapsibleCard, FieldRow, ToggleSwitch } from '../../components/settings';
 import type { AppSettings } from '../../hooks/useApi';
-import { ProGate } from '../../components/ProGate';
 import MobileSync from '../../components/MobileSync';
 
 interface OutputSectionProps {
@@ -111,10 +110,9 @@ export default function OutputSection({
     <div className="space-y-4">
 
       {/* ── Messaging Channels ── */}
-      <ProGate feature="channels">
-        <CollapsibleCard title={s.messaging_channels} icon={MessageSquare}>
-          {/* Compact channel list with inline accordion detail forms */}
-          <div className="kz-card overflow-hidden">
+      <CollapsibleCard title={s.messaging_channels} icon={MessageSquare}>
+        {/* Compact channel list with inline accordion detail forms */}
+        <div className="kz-card overflow-hidden">
             {channels.map((ch, idx) => {
               const isActive = ch.enabled && ch.configured;
               const isExpanded = expandedChannel === ch.key;
@@ -460,32 +458,29 @@ export default function OutputSection({
                 </div>
               );
             })}
-          </div>
+        </div>
 
-          {/* Auto-push rules (merged from standalone Workflow card) */}
-          <div className="pt-4 mt-4" style={{ borderTop: '1px solid var(--line-soft)' }}>
-            <h3 className="kz-section-title">
-              <span>{s.auto_push_title}</span>
-            </h3>
-            <FieldRow label={s.workflow_todo_push} hint={s.workflow_todo_push_desc}>
-              <ToggleSwitch checked={settings.workflowTodoPush !== false} onChange={(checked) => updateField({ workflowTodoPush: checked })} />
-            </FieldRow>
-            <FieldRow label={s.workflow_decision_push} hint={s.workflow_decision_push_desc}>
-              <ToggleSwitch checked={settings.workflowDecisionPush !== false} onChange={(checked) => updateField({ workflowDecisionPush: checked })} />
-            </FieldRow>
-            <FieldRow label={s.workflow_urgent_push} hint={s.workflow_urgent_push_desc}>
-              <ToggleSwitch checked={settings.workflowUrgentPush !== false} onChange={(checked) => updateField({ workflowUrgentPush: checked })} />
-            </FieldRow>
-          </div>
-        </CollapsibleCard>
-      </ProGate>
+        {/* Auto-push rules (merged from standalone Workflow card) */}
+        <div className="pt-4 mt-4" style={{ borderTop: '1px solid var(--line-soft)' }}>
+          <h3 className="kz-section-title">
+            <span>{s.auto_push_title}</span>
+          </h3>
+          <FieldRow label={s.workflow_todo_push} hint={s.workflow_todo_push_desc}>
+            <ToggleSwitch checked={settings.workflowTodoPush !== false} onChange={(checked) => updateField({ workflowTodoPush: checked })} />
+          </FieldRow>
+          <FieldRow label={s.workflow_decision_push} hint={s.workflow_decision_push_desc}>
+            <ToggleSwitch checked={settings.workflowDecisionPush !== false} onChange={(checked) => updateField({ workflowDecisionPush: checked })} />
+          </FieldRow>
+          <FieldRow label={s.workflow_urgent_push} hint={s.workflow_urgent_push_desc}>
+            <ToggleSwitch checked={settings.workflowUrgentPush !== false} onChange={(checked) => updateField({ workflowUrgentPush: checked })} />
+          </FieldRow>
+        </div>
+      </CollapsibleCard>
 
       {/* ── Mobile Companion ── */}
-      <ProGate feature="mobile_sync">
-        <CollapsibleCard title={s.mobile_companion} icon={Smartphone}>
-          <MobileSync />
-        </CollapsibleCard>
-      </ProGate>
+      <CollapsibleCard title={s.mobile_companion} icon={Smartphone}>
+        <MobileSync />
+      </CollapsibleCard>
 
       {/* ── Email (SMTP) ── */}
       <CollapsibleCard title={s.email_title || 'Email (SMTP)'} icon={Mail}>

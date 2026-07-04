@@ -42,6 +42,7 @@ let systemAudioContext: AudioContext | null = null;
 let systemWorkletNode: AudioWorkletNode | null = null;
 let systemMediaStream: MediaStream | null = null;
 let currentScene: string = 'dictation';
+let micDeviceChangeHandler: (() => void) | null = null;
 
 // --- Timer ---
 function formatTime(ms: number): string {
@@ -98,31 +99,62 @@ function setExpanded(value: boolean) {
 }
 
 // --- Mic capture ---
+function mapMicCaptureError(err: unknown): string {
+  if (err instanceof Error && [
+    'microphone_denied',
+    'microphone_not_found',
+    'microphone_unavailable',
+    'microphone_not_supported',
+  ].includes(err.message)) {
+    return err.message;
+  }
+  if (err instanceof DOMException) {
+    if (err.name === 'NotAllowedError' || err.name === 'SecurityError') return 'microphone_denied';
+    if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') return 'microphone_not_found';
+    if (err.name === 'NotReadableError' || err.name === 'TrackStartError') return 'microphone_unavailable';
+  }
+  return String(err || 'microphone_unavailable');
+}
+
 async function startMicCapture(): Promise<void> {
   // Try with ideal constraints first; fall back to plain audio:true for
   // devices/drivers that can't satisfy the full constraint set (common on Windows).
   let stream: MediaStream;
   console.log('[mic-diag] Requesting getUserMedia...');
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('microphone_not_supported');
+  }
   try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
     const audioInputs = devices.filter(d => d.kind === 'audioinput');
     console.log(`[mic-diag] Audio input devices: ${audioInputs.length}`, audioInputs.map(d => `${d.label}|${d.deviceId}`));
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-    });
+    if (audioInputs.length === 0) {
+      throw new Error('microphone_not_found');
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+    } catch (err) {
+      console.log(`[mic-diag] getUserMedia ideal constraints failed: ${err instanceof DOMException ? `${err.name}: ${err.message}` : err}`);
+      if (err instanceof DOMException && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } else {
+        throw new Error(mapMicCaptureError(err));
+      }
+    }
   } catch (err) {
     console.log(`[mic-diag] getUserMedia error: ${err instanceof DOMException ? `${err.name}: ${err.message}` : err}`);
-    if (err instanceof DOMException && err.name === 'NotFoundError') {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } else {
-      throw err;
-    }
+    throw new Error(mapMicCaptureError(err));
   }
   mediaStream = stream;
 
   // Diagnose audio track
   const tracks = stream.getAudioTracks();
   console.log(`[mic-diag] Audio tracks: ${tracks.length}`);
+  if (tracks.length === 0) {
+    throw new Error('microphone_not_found');
+  }
   if (tracks.length > 0) {
     const t = tracks[0];
     const s = t.getSettings();
@@ -148,6 +180,7 @@ async function startMicCapture(): Promise<void> {
       window.recorderApi.reportError('mic_disconnected');
     }
   };
+  micDeviceChangeHandler = onDeviceChange;
   navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
 
   audioContext = new AudioContext();
@@ -182,6 +215,10 @@ async function startMicCapture(): Promise<void> {
 }
 
 function stopMicCapture(): void {
+  if (micDeviceChangeHandler) {
+    navigator.mediaDevices?.removeEventListener?.('devicechange', micDeviceChangeHandler);
+    micDeviceChangeHandler = null;
+  }
   if (workletNode) { workletNode.disconnect(); workletNode = null; }
   if (audioContext) { audioContext.close().catch(() => {}); audioContext = null; }
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
@@ -313,11 +350,7 @@ async function startRecording(scene: string = 'dictation') {
     stopMicCapture();
     stopSystemAudio();
 
-    window.recorderApi.reportError(
-      err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'NotFoundError')
-        ? 'microphone_denied'
-        : String(err),
-    );
+    window.recorderApi.reportError(mapMicCaptureError(err));
     window.recorderApi.notifyStopped();
   }
 }

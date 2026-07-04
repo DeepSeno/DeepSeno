@@ -79,6 +79,10 @@ export class MessageRouter {
       return;
     }
     console.log(`[Router] sendImage → ${channelId} chatId=${chatId} size=${imageData.length}`);
+    if (!ch.sendImage) {
+      console.warn(`[Router] sendImage: channel "${channelId}" does not support images`);
+      return;
+    }
     await ch.sendImage(chatId, imageData, mimeType);
   }
 }

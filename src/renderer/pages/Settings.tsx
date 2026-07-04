@@ -149,7 +149,6 @@ export default function SettingsPage() {
             settings={settings}
             s={s}
             updateField={updateField}
-            onOpenExternal={handleOpenExternal}
           />
         )}
 

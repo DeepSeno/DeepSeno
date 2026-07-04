@@ -344,8 +344,8 @@ export function registerBuiltinTools(registry: ToolRegistry, ctx: ToolContext): 
             return ok({ message: getStr('tool.generate_report.no_data')(date) });
           }
           const mapped = segments.map((s) => ({
-            start: s.start_time,
-            end: s.end_time,
+            start: s.start_time ?? 0,
+            end: s.end_time ?? s.start_time ?? 0,
             speaker: s.speaker_name || 'Unknown',
             text: s.clean_text || s.raw_text || '',
           }));

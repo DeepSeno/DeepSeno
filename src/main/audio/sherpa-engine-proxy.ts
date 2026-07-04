@@ -7,7 +7,7 @@
  */
 
 import { Worker } from 'worker_threads';
-import { fork, ChildProcess } from 'child_process';
+import { fork } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { SherpaModelManager } from './sherpa-model-manager';
@@ -46,6 +46,12 @@ interface ManagedWorker {
   busy: boolean;
 }
 
+function createCancelledError(): Error {
+  const err = new Error('Task cancelled by user');
+  err.name = 'TaskCancelledError';
+  return err;
+}
+
 // ─── SherpaEngineProxy ──────────────────────────────────────
 
 export class SherpaEngineProxy {
@@ -57,7 +63,6 @@ export class SherpaEngineProxy {
   private modelManager: SherpaModelManager;
   private disposed = false;
   private localEngine: SherpaEngine; // for readWave (pure JS, no worker needed)
-  private currentLanguage: string = 'auto';
 
   constructor(modelManager?: SherpaModelManager) {
     this.modelManager = modelManager || new SherpaModelManager();
@@ -89,7 +94,6 @@ export class SherpaEngineProxy {
       console.log('[SherpaProxy] Already initialized, skipping');
       return;
     }
-    this.currentLanguage = language;
     const modelsDir = this.modelManager.getModelsDir();
     const workerScript = this.resolveWorkerScript();
 
@@ -126,7 +130,7 @@ export class SherpaEngineProxy {
     const buffer = samples.buffer.slice(
       samples.byteOffset,
       samples.byteOffset + samples.byteLength
-    );
+    ) as ArrayBuffer;
     return this.callBatch('transcribeSamples', { samplesBuffer: buffer, sampleRate }, [buffer]);
   }
 
@@ -158,8 +162,9 @@ export class SherpaEngineProxy {
    * Native crashes (Eigen assertion failures) in the diarization model
    * will only kill the child process, not the main Electron process.
    */
-  async diarize(audioPath: string, clusteringThreshold?: number): Promise<SherpaDiarSegment[]> {
+  async diarize(audioPath: string, clusteringThreshold?: number, signal?: AbortSignal): Promise<SherpaDiarSegment[]> {
     if (this.disposed) throw new Error('SherpaEngineProxy disposed');
+    if (signal?.aborted) throw createCancelledError();
 
     const modelsDir = this.modelManager.getModelsDir();
     const scriptPath = this.resolveDiarizeScript();
@@ -172,14 +177,23 @@ export class SherpaEngineProxy {
       });
 
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
       const settle = (fn: () => void) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         fn();
       };
+      const onAbort = () => {
+        settle(() => {
+          try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+          reject(createCancelledError());
+        });
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
 
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         settle(() => {
           child.kill('SIGKILL');
           reject(new Error(`Diarization timed out after ${TIMEOUT_MS / 1000}s`));
@@ -188,6 +202,7 @@ export class SherpaEngineProxy {
 
       child.on('message', (msg: any) => {
         if (msg?.type === 'ready') {
+          if (signal?.aborted) return;
           // Child is ready, send the diarize request
           child.send({ type: 'diarize', audioPath, modelsDir, clusteringThreshold });
         } else if (msg?.type === 'result') {
@@ -205,11 +220,11 @@ export class SherpaEngineProxy {
         }
       });
 
-      child.on('error', (err) => {
+      child.on('error', (err: Error) => {
         settle(() => reject(new Error(`Diarize subprocess error: ${err.message}`)));
       });
 
-      child.on('exit', (code, signal) => {
+      child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
         settle(() => {
           if (signal) {
             reject(new Error(`Diarize subprocess killed by signal ${signal} (native crash in sherpa-onnx)`));
@@ -246,7 +261,7 @@ export class SherpaEngineProxy {
     const buffer = samples.buffer.slice(
       samples.byteOffset,
       samples.byteOffset + samples.byteLength
-    );
+    ) as ArrayBuffer;
     return this.callRealtime('vadFeedAndDrain', { sessionId, samplesBuffer: buffer }, [buffer]);
   }
 
@@ -260,7 +275,6 @@ export class SherpaEngineProxy {
 
   /** Update ASR language on all workers (hot-reload, no restart needed). */
   async setLanguage(language: string): Promise<void> {
-    this.currentLanguage = language;
     this.localEngine.setLanguage(language);
     const allWorkers = [...this.batchWorkers];
     if (this.realtimeWorker) allWorkers.push(this.realtimeWorker);
@@ -334,81 +348,6 @@ export class SherpaEngineProxy {
       if (fs.existsSync(p)) return p;
     }
     return path.join(__dirname, 'diarize-subprocess.js');
-  }
-
-  private resolveEmbedScript(): string {
-    const candidates = [
-      path.join(__dirname, 'embed-subprocess.js'),
-      path.join(__dirname, '../main/embed-subprocess.js'),
-    ];
-    for (const p of candidates) {
-      if (fs.existsSync(p)) return p;
-    }
-    return path.join(__dirname, 'embed-subprocess.js');
-  }
-
-  /**
-   * Run embedding extraction in an isolated child process.
-   * Same pattern as diarize() — native crashes only kill the child.
-   */
-  private callEmbedSubprocess(request: any): Promise<number[]> {
-    const scriptPath = this.resolveEmbedScript();
-    const TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes max for embedding
-
-    return new Promise<number[]>((resolve, reject) => {
-      const child = fork(scriptPath, [], {
-        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-        env: { ...process.env },
-      });
-
-      let settled = false;
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        fn();
-      };
-
-      const timer = setTimeout(() => {
-        settle(() => {
-          child.kill('SIGKILL');
-          reject(new Error(`Embedding extraction timed out after ${TIMEOUT_MS / 1000}s`));
-        });
-      }, TIMEOUT_MS);
-
-      child.on('message', (msg: any) => {
-        if (msg?.type === 'ready') {
-          child.send(request);
-        } else if (msg?.type === 'result') {
-          settle(() => {
-            child.send({ type: 'dispose' });
-            resolve(msg.embedding || []);
-          });
-        } else if (msg?.type === 'error') {
-          settle(() => {
-            child.kill();
-            reject(new Error(msg.message || 'Embedding extraction failed'));
-          });
-        }
-      });
-
-      child.on('error', (err) => {
-        settle(() => reject(new Error(`Embed subprocess error: ${err.message}`)));
-      });
-
-      child.on('exit', (code, signal) => {
-        settle(() => {
-          if (signal) {
-            reject(new Error(`Embed subprocess killed by signal ${signal} (native crash in sherpa-onnx)`));
-          } else if (code !== 0) {
-            reject(new Error(`Embed subprocess exited with code ${code} (native crash in sherpa-onnx)`));
-          } else {
-            // Normal exit after dispose — resolve already called, this is fine
-            resolve([]);
-          }
-        });
-      });
-    });
   }
 
   private spawnWorker(

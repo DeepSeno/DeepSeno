@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import crypto from 'crypto';
 import { LanServer } from './lan-server';
 import { PairingManager } from './relay-pairing';
 import { RelayWebRTC } from './relay-webrtc';

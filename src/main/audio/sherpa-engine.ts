@@ -164,8 +164,6 @@ export class SherpaEngine {
   private modelManager: SherpaModelManager;
   private recognizer: any = null;
   private speakerDiarization: any = null;
-  private embeddingExtractor: any = null;
-  private initialized = false;
   private language: string = 'auto';
 
   constructor(modelManager?: SherpaModelManager) {
@@ -272,21 +270,6 @@ export class SherpaEngine {
       console.log('[SherpaEngine] OfflineSpeakerDiarization initialized');
     }
     return this.speakerDiarization;
-  }
-
-  /** Initialize speaker embedding extractor (lazy). */
-  private getEmbeddingExtractor(): any {
-    if (!this.embeddingExtractor) {
-      const sherpa = getSherpa();
-      const config = {
-        model: this.resolveEmbeddingModel(),
-        numThreads: 1,
-        debug: 0,
-      };
-      this.embeddingExtractor = new sherpa.SpeakerEmbeddingExtractor(config);
-      console.log('[SherpaEngine] SpeakerEmbeddingExtractor initialized');
-    }
-    return this.embeddingExtractor;
   }
 
   /** Read a WAV file. Uses pure JS parser to avoid native addon external buffer issues. */
@@ -488,8 +471,6 @@ export class SherpaEngine {
   dispose(): void {
     this.recognizer = null;
     this.speakerDiarization = null;
-    this.embeddingExtractor = null;
-    this.initialized = false;
     if (typeof global.gc === 'function') global.gc();
   }
 }

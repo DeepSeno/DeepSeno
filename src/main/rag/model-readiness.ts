@@ -3,9 +3,16 @@ import path from 'path';
 import type { AppSettings } from '../settings';
 import { getLLMModelsDir } from '../paths';
 import { getDownloadedGGUFModelIds } from '../llm/gguf-model-files';
+import { looksLikeModelNotFound } from '../llm/openai-client';
 
 export const RAG_MODEL_SETUP_MESSAGE =
-  'AI 模型尚未配置完成。请前往「模型」页面，下载并选择本地模型，或配置云端 API、对话模型和嵌入模型后再试。';
+  'AI 模型尚未配置完成。请前往「模型」页面，下载并选择本地模型，或配置云端 API、对话模型后再试。';
+
+export const RAG_LOCAL_SERVICE_MESSAGE =
+  '本地 AI 模型服务未就绪。请前往「模型」页面确认对话模型已下载并启动，必要时重新启动模型服务后再试。';
+
+export const RAG_CLOUD_SERVICE_MESSAGE =
+  '云端 AI 服务连接失败。请检查 API 地址、密钥、模型名称和网络连接后再试。';
 
 export class RagModelConfigurationError extends Error {
   constructor(message = RAG_MODEL_SETUP_MESSAGE) {
@@ -54,12 +61,11 @@ function defaultLocalModelFileExists(modelName: string): boolean {
   return false;
 }
 
-function isCloudConfigured(settings: AppSettings): boolean {
+function isCloudChatConfigured(settings: AppSettings): boolean {
   return Boolean(
     settings.cloudApiUrl &&
     settings.cloudApiKey &&
-    settings.cloudModel &&
-    settings.cloudEmbedModel,
+    settings.cloudModel,
   );
 }
 
@@ -68,7 +74,7 @@ export function getRagModelSetupError(
   options: ReadinessOptions = {},
 ): string | null {
   if (settings.llmProvider === 'openai') {
-    return isCloudConfigured(settings) ? null : RAG_MODEL_SETUP_MESSAGE;
+    return isCloudChatConfigured(settings) ? null : RAG_MODEL_SETUP_MESSAGE;
   }
 
   const downloadedLocalModelIds = options.downloadedLocalModelIds ?? defaultDownloadedLocalModelIds();
@@ -93,13 +99,33 @@ export function assertRagModelConfigured(settings: AppSettings): void {
   }
 }
 
-export function formatRagModelError(err: unknown): string {
+export function formatRagModelError(err: unknown, settings?: AppSettings): string {
   if (err instanceof RagModelConfigurationError) return err.message;
 
   const message = err instanceof Error ? err.message : String(err || '');
-  const looksLikeModel404 =
-    /\b404\b/.test(message) &&
-    /(model|OpenAI (stream|generate|embed) failed|not found)/i.test(message);
+  const causeMessage =
+    err instanceof Error && err.cause instanceof Error ? err.cause.message : '';
+  const combined = `${message}\n${causeMessage}`.trim();
+  const openAiHttpFailure = /\bOpenAI (stream|generate|embed|chat) failed:\s*(\d{3})/i.exec(combined);
+  const looksLikeMissingModel =
+    looksLikeModelNotFound(combined) ||
+    /model\s+['"][^'"]+['"]\s+not found/i.test(combined) ||
+    /not found[^{}]*(model|模型)/i.test(combined);
+  const looksLikeServiceUnavailable =
+    /(fetch failed|failed to fetch|econnrefused|econnreset|socket hang up|epipe|network|AbortError|aborted|timeout|timed out|llama-server did not become ready|did not become ready)/i
+      .test(combined);
 
-  return looksLikeModel404 ? RAG_MODEL_SETUP_MESSAGE : (message || 'Unknown error');
+  if (looksLikeMissingModel) return RAG_MODEL_SETUP_MESSAGE;
+  if (openAiHttpFailure?.[2] === '404') {
+    return settings?.llmProvider === 'openai'
+      ? RAG_CLOUD_SERVICE_MESSAGE
+      : RAG_LOCAL_SERVICE_MESSAGE;
+  }
+  if (looksLikeServiceUnavailable) {
+    return settings?.llmProvider === 'openai'
+      ? RAG_CLOUD_SERVICE_MESSAGE
+      : RAG_LOCAL_SERVICE_MESSAGE;
+  }
+
+  return message || 'Unknown error';
 }

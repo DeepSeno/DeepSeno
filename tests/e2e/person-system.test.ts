@@ -215,24 +215,29 @@ describe('Person System E2E', () => {
     // Voiceprint matching tests removed — voiceprint matching was removed in the
     // PersonMatcher simplification (matchByVoiceprint, matchOrCreateFromVoiceprint removed)
 
-    it('should match or create from exact identifier', () => {
-      // New phone — should create
-      const result1 = matcher.matchOrCreateFromIdentifier({
+    it('should match from exact identifier without auto-creating persons', () => {
+      const missing = matcher.matchFromIdentifier({
         type: 'phone',
         value: '00000000001',
-        name: '王五',
       });
-      expect(result1.isNew).toBe(true);
-      expect(db.getPerson(result1.personId)!.name).toBe('王五');
+      expect(missing).toBeNull();
 
-      // Same phone — should match existing
-      const result2 = matcher.matchOrCreateFromIdentifier({
+      const wangwuId = db.insertPerson({ name: '王五', source: 'manual' });
+      db.insertPersonIdentifier({
+        person_id: wangwuId,
         type: 'phone',
         value: '00000000001',
-        name: '王五',
+        source: 'manual',
       });
-      expect(result2.isNew).toBe(false);
-      expect(result2.personId).toBe(result1.personId);
+
+      const result = matcher.matchFromIdentifier({
+        type: 'phone',
+        value: '00000000001',
+      });
+      expect(result).not.toBeNull();
+      expect(result!.isNew).toBe(false);
+      expect(result!.personId).toBe(wangwuId);
+      expect(result!.confidence).toBe(1.0);
     });
   });
 

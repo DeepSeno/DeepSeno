@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, KeyboardEvent } from 'react';
-import { Send, Sparkles, MessageCircle, Trash2, Copy, Check, Pencil } from 'lucide-react';
+import { Send, Sparkles, Trash2, Copy, Check, Pencil } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { MeetingNotes } from '../../hooks/useApi';
@@ -19,7 +19,7 @@ interface SummaryQAPanelProps {
   lang: string;
 }
 
-function getContentLabels(mediaType: string | undefined, lang: string, tr: Record<string, any>) {
+function getContentLabels(mediaType: string | undefined, _lang: string, tr: Record<string, any>) {
   const isDoc = ['pdf', 'docx', 'text'].includes(mediaType || '');
   const isImage = mediaType === 'image';
   const isVideo = mediaType === 'video';

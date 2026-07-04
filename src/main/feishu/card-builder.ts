@@ -129,7 +129,10 @@ export function buildProcessingCard(context: string, step?: ProcessingStep): str
 export function buildDailySummaryCard(result: {
   date: string;
   summaryText: string;
-  keyEvents?: { todos?: string[]; decisions?: string[] };
+  keyEvents?: {
+    todos?: Array<string | { content: string; due_date?: string; person?: string }>;
+    decisions?: string[];
+  };
 }): string {
   const elements: any[] = [
     { tag: 'markdown', content: result.summaryText },
@@ -140,7 +143,14 @@ export function buildDailySummaryCard(result: {
 
   if (todos && todos.length > 0) {
     elements.push({ tag: 'hr' });
-    elements.push({ tag: 'markdown', content: `📝 **待办事项:**\n${todos.map((t) => `• ${t}`).join('\n')}` });
+    elements.push({
+      tag: 'markdown',
+      content: `📝 **待办事项:**\n${todos.map((t) => {
+        if (typeof t === 'string') return `• ${t}`;
+        const meta = [t.person, t.due_date].filter(Boolean).join(' / ');
+        return `• ${t.content}${meta ? ` (${meta})` : ''}`;
+      }).join('\n')}`,
+    });
   }
 
   if (decisions && decisions.length > 0) {

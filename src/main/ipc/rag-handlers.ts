@@ -3,7 +3,7 @@ import type { IpcContext } from './context';
 import { MemoryExtractor } from '../agent/memory-extractor';
 import { loadSettings } from '../settings';
 import { getLLMModel } from '../llm/create-client';
-import { requireId, requireString, ValidationError } from './validate';
+import { requireId, requireString } from './validate';
 import { RagStreamRegistry } from '../rag/stream-state';
 import { assertRagModelConfigured, formatRagModelError } from '../rag/model-readiness';
 
@@ -144,7 +144,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
       assertRagModelConfigured(loadSettings());
       return await ctx.getQueryEngine().query(validQuestion);
     } catch (err: any) {
-      const message = formatRagModelError(err);
+      const message = formatRagModelError(err, loadSettings());
       return {
         answer: `查询失败: ${message}`,
         sources: [],
@@ -243,7 +243,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
       return { success: true };
     } catch (err: any) {
       streamRegistry.cancelGlobal();
-      const message = formatRagModelError(err);
+      const message = formatRagModelError(err, loadSettings());
       const win = ctx.getWindow();
       if (win && !win.isDestroyed()) {
         win.webContents.send('rag:stream:error', message);
@@ -335,7 +335,7 @@ export function registerRagHandlers(ctx: IpcContext): void {
       return { success: true };
     } catch (err: any) {
       streamRegistry.cancelScoped();
-      const message = formatRagModelError(err);
+      const message = formatRagModelError(err, loadSettings());
       const win = ctx.getWindow();
       if (win && !win.isDestroyed()) {
         win.webContents.send('rag:scoped:error', message);

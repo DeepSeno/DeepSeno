@@ -53,7 +53,7 @@ describe('VoiceBrainDB', () => {
 
     expect(id).toBe(1);
 
-    const rec = db.getRecording(id);
+    const rec = db.getRecording(id)!;
     expect(rec).toBeDefined();
     expect(rec.file_path).toBe('/audio/meeting.wav');
     expect(rec.file_name).toBe('meeting.wav');
@@ -68,8 +68,108 @@ describe('VoiceBrainDB', () => {
     });
 
     db.updateRecordingStatus(id, 'completed');
-    const rec = db.getRecording(id);
+    const rec = db.getRecording(id)!;
     expect(rec.status).toBe('completed');
+  });
+
+  it('should delete a recording with all recording-scoped related rows', () => {
+    const recId = db.insertRecording({
+      file_path: '/audio/delete-me.wav',
+      file_name: 'delete-me.wav',
+    });
+    const segId = db.insertSegment({
+      recording_id: recId,
+      start_time: 0,
+      end_time: 1,
+      raw_text: 'delete me',
+      clean_text: 'delete me',
+    });
+    const personA = db.insertPerson({ name: 'Alice', source: 'manual' });
+    const personB = db.insertPerson({ name: 'Bob', source: 'manual' });
+    const speakerA = db.insertSpeaker({ name: 'Speaker A' });
+    const speakerB = db.insertSpeaker({ name: 'Speaker B' });
+
+    db.insertExtractedItem({ segment_id: segId, type: 'todo', content: 'cleanup' });
+    db.saveMeetingNotes(recId, {
+      title: 'Delete test',
+      participants: [],
+      decisions: [],
+      actionItems: [],
+      discussionSummary: '',
+      keyTopics: [],
+    });
+    db.insertPersonRelationship({
+      person_id: personA,
+      related_person_id: personB,
+      relationship: 'knows',
+      recording_id: recId,
+    });
+    db.insertCompilationQueueEntry(recId);
+
+    const raw = db.getRawDb();
+    raw.prepare(`
+      INSERT INTO content_person_links (segment_id, person_id, role, confidence, source)
+      VALUES (?, ?, 'mentioned', 1, 'test')
+    `).run(segId, personA);
+    raw.prepare(`
+      INSERT INTO speaker_match_suggestions (new_speaker_id, existing_speaker_id, similarity, recording_id)
+      VALUES (?, ?, 0.9, ?)
+    `).run(speakerA, speakerB, recId);
+    raw.prepare(`
+      INSERT INTO speaker_relationships (speaker_id, mentioned_name, relationship, recording_id)
+      VALUES (?, 'Bob', 'mentions', ?)
+    `).run(speakerA, recId);
+    raw.prepare(`
+      INSERT INTO person_match_suggestions (new_person_id, existing_person_id, match_type, similarity, recording_id)
+      VALUES (?, ?, 'name', 0.9, ?)
+    `).run(personA, personB, recId);
+    raw.prepare(`
+      INSERT INTO recording_chat_messages (recording_id, role, content)
+      VALUES (?, 'user', 'question')
+    `).run(recId);
+    raw.prepare(`
+      INSERT INTO task_queue (id, file_path, recording_id, status, progress, created_at, updated_at)
+      VALUES ('task_delete_me', '/audio/delete-me.wav', ?, 'failed', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    `).run(recId);
+
+    db.deleteRecording(recId);
+
+    expect(db.getRecording(recId)).toBeUndefined();
+    expect(db.getSegmentsByRecording(recId)).toHaveLength(0);
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM person_relationships WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM speaker_match_suggestions WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM speaker_relationships WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM person_match_suggestions WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM recording_chat_messages WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM compilation_queue WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM task_queue WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM content_person_links WHERE segment_id = ?').get(segId)).toEqual({ count: 0 });
+  });
+
+  it('should rebuild malformed segment FTS data during recording deletion', () => {
+    const recId = db.insertRecording({
+      file_path: '/audio/delete-corrupt-fts.wav',
+      file_name: 'delete-corrupt-fts.wav',
+    });
+    db.insertSegment({
+      recording_id: recId,
+      start_time: 0,
+      end_time: 1,
+      raw_text: 'delete corrupt fts',
+      clean_text: 'delete corrupt fts',
+    });
+
+    const raw = db.getRawDb();
+    raw.enableDefensive(false);
+    try {
+      raw.prepare('DELETE FROM segments_fts_data').run();
+    } finally {
+      raw.enableDefensive(true);
+    }
+
+    expect(() => db.deleteRecording(recId)).not.toThrow();
+    expect(db.getRecording(recId)).toBeUndefined();
+    expect(raw.prepare('SELECT COUNT(*) AS count FROM segments WHERE recording_id = ?').get(recId)).toEqual({ count: 0 });
   });
 
   // ─── Speakers ──────────────────────────────────────────────
@@ -139,7 +239,7 @@ describe('VoiceBrainDB', () => {
 
     expect(segId).toBe(1);
 
-    const seg = db.getSegment(segId);
+    const seg = db.getSegment(segId)!;
     expect(seg.raw_text).toBe('Hello world');
     expect(seg.start_time).toBe(0.0);
     expect(seg.end_time).toBe(5.5);
@@ -260,14 +360,14 @@ describe('VoiceBrainDB', () => {
 
     expect(id).toBe(1);
 
-    const summary = db.getDailySummary('2025-06-15');
+    const summary = db.getDailySummary('2025-06-15')!;
     expect(summary).toBeDefined();
     expect(summary.summary_text).toBe('Productive day with 3 meetings.');
 
-    const timeline = JSON.parse(summary.timeline_json);
+    const timeline = JSON.parse(summary.timeline_json ?? '[]');
     expect(timeline).toHaveLength(2);
 
-    const keyEvents = JSON.parse(summary.key_events_json);
+    const keyEvents = JSON.parse(summary.key_events_json ?? '[]');
     expect(keyEvents).toContain('Budget approved');
   });
 

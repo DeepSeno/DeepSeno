@@ -1,10 +1,19 @@
-import type { LLMClient } from './llm-client';
+import type { ChatWithToolsOptions, ChatWithToolsResult, LLMClient, LocalGenerateOptions } from './llm-client';
 
 const DEFAULT_TIMEOUT = 300_000;
 
 /** Strip <think>...</think> blocks from thinking model output (Doubao-Seed, DeepSeek-R1, etc.). */
 function stripThinkTags(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+export function looksLikeModelNotFound(text: string): boolean {
+  return /(model|模型)/i.test(text) &&
+    /(not found|does not exist|not exist|no such|unknown model|invalid model|不存在|未找到)/i.test(text);
+}
+
+export function isExplicitModelNotFoundResponse(status: number, body: string): boolean {
+  return (status === 400 || status === 404) && looksLikeModelNotFound(body);
 }
 
 /**
@@ -34,7 +43,7 @@ export class OpenAIClient implements LLMClient {
       if (options.images && options.images.length > 0) {
         const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
           { type: 'text', text: options.prompt },
-          ...options.images.map(img => ({
+          ...options.images.map((img: string) => ({
             type: 'image_url' as const,
             image_url: { url: `data:image/jpeg;base64,${img}` },
           })),
@@ -66,7 +75,7 @@ export class OpenAIClient implements LLMClient {
       if (!res.ok) {
         throw new Error(`OpenAI generate failed: ${res.status} ${await res.text()}`);
       }
-      const data = await res.json();
+      const data: any = await res.json();
       // Strip reasoning_content (Volcengine) or <think> tags from thinking models
       const raw = data.choices?.[0]?.message?.content || '';
       const content = stripThinkTags(raw);
@@ -97,7 +106,7 @@ export class OpenAIClient implements LLMClient {
       if (options.images && options.images.length > 0) {
         const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
           { type: 'text', text: options.prompt },
-          ...options.images.map(img => ({
+          ...options.images.map((img: string) => ({
             type: 'image_url' as const,
             image_url: { url: `data:image/jpeg;base64,${img}` },
           })),
@@ -146,7 +155,7 @@ export class OpenAIClient implements LLMClient {
           const payload = line.slice(6).trim();
           if (payload === '[DONE]') continue;
           try {
-            const data = JSON.parse(payload);
+            const data: any = JSON.parse(payload);
             const content = data.choices?.[0]?.delta?.content;
             if (content) {
               fullText += content;
@@ -198,14 +207,14 @@ export class OpenAIClient implements LLMClient {
     const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
     try {
       const { model, messages, tools, temperature, num_ctx } = options;
-      const openaiTools = tools.map(t => ({
+      const openaiTools = tools.map((t) => ({
         type: 'function' as const,
         function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
       }));
-      const openaiMessages = messages.map(m => {
+      const openaiMessages = messages.map((m) => {
         const msg: Record<string, unknown> = { role: m.role, content: m.content };
         if (m.tool_calls) {
-          msg.tool_calls = m.tool_calls.map(tc => ({
+          msg.tool_calls = m.tool_calls.map((tc) => ({
             id: tc.id || `call_${Math.random().toString(36).slice(2, 10)}`,
             type: 'function',
             function: {
@@ -235,7 +244,7 @@ export class OpenAIClient implements LLMClient {
       });
       if (!res.ok) throw new Error(`OpenAI chat failed: ${res.status} ${await res.text()}`);
 
-      const data = await res.json();
+      const data: any = await res.json();
       const choice = data.choices?.[0]?.message;
       const content = stripThinkTags(choice?.content || '');
       const toolCalls: ChatWithToolsResult['toolCalls'] = [];
@@ -274,17 +283,17 @@ export class OpenAIClient implements LLMClient {
     if (!res.ok) {
       throw new Error(`OpenAI embed failed: ${res.status} ${await res.text()}`);
     }
-    const data = await res.json();
+    const data: any = await res.json();
     return data.data?.[0]?.embedding || [];
   }
 
-  async isAvailable(): Promise<boolean> {
+  async isAvailable(model?: string): Promise<boolean> {
     try {
       const res = await fetch(`${this.baseUrl}/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
         signal: AbortSignal.timeout(10_000),
       });
-      if (res.ok) return true;
+      if (res.ok && !model) return true;
       if (res.status === 401 || res.status === 403) return false;
 
       const chatRes = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -294,7 +303,7 @@ export class OpenAIClient implements LLMClient {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: 'test',
+          model: model || 'test',
           messages: [{ role: 'user', content: 'hi' }],
           max_tokens: 1,
         }),
@@ -302,7 +311,8 @@ export class OpenAIClient implements LLMClient {
       });
 
       if (chatRes.ok) return true;
-      return chatRes.status === 400 || chatRes.status === 404;
+      const text = await chatRes.text().catch(() => '');
+      return !model && isExplicitModelNotFoundResponse(chatRes.status, text);
     } catch {
       return false;
     }
@@ -315,7 +325,7 @@ export class OpenAIClient implements LLMClient {
     if (!res.ok) {
       throw new Error(`OpenAI listModels failed: ${res.status} ${await res.text()}`);
     }
-    const data = await res.json();
+    const data: any = await res.json();
     return data.data?.map((m: { id: string }) => m.id).filter(Boolean) || [];
   }
 }

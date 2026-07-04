@@ -13,10 +13,11 @@ vi.mock('sherpa-onnx-node', () => ({
 import { StreamingTranscriber } from '../streaming-transcriber';
 import { SherpaEngine } from '../sherpa-engine';
 import { SherpaModelManager } from '../sherpa-model-manager';
+import type { SherpaEngineProxy } from '../sherpa-engine-proxy';
 
 describe('StreamingTranscriber', () => {
   const TMP_DIR = os.tmpdir().replace(/\\/g, '/');
-  const engine = new SherpaEngine(new SherpaModelManager(`${TMP_DIR}/fake-models`));
+  const engine = new SherpaEngine(new SherpaModelManager(`${TMP_DIR}/fake-models`)) as unknown as SherpaEngineProxy;
 
   it('should instantiate with SherpaEngine', () => {
     const st = new StreamingTranscriber(engine);

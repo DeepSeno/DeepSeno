@@ -7,9 +7,8 @@ import { MarkdownGenerator } from '../output/markdown-generator';
 import { loadSettings } from '../settings';
 import { getLLMModel } from '../llm/create-client';
 import { getDbPath, getOutputDir } from '../paths';
-import { requirePro } from '../licensing/require-pro';
 import type { PersonData } from '../db/database';
-import { requireId, requireString, requireEnum, requireDate, ValidationError } from './validate';
+import { requireId, requireString, requireEnum, requireDate } from './validate';
 import { formatLocalDate } from '../utils/date';
 
 export function registerDbHandlers(ctx: IpcContext): void {
@@ -50,7 +49,6 @@ export function registerDbHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('db:regenerateMeetingNotes', async (_event, recordingId: number) => {
-    requirePro(ctx.getLicenseManager(), 'meeting_notes');
     try {
       const database = ctx.getDb();
       const segments = database.getSegmentsByRecording(recordingId);
@@ -500,7 +498,6 @@ export function registerDbHandlers(ctx: IpcContext): void {
 
   // ─── Summary Generation ──────────────────────────────────
   ipcMain.handle('summary:generateDaily', async (_event, date: string) => {
-    requirePro(ctx.getLicenseManager(), 'auto_reports');
     const segments = ctx.getDb().getSegmentsByDate(date);
     const textNotes = ctx.getDb().getTextNotesByDate(date);
 
@@ -544,7 +541,6 @@ export function registerDbHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('summary:generateWeekly', async (_event, startDate: string, endDate: string) => {
-    requirePro(ctx.getLicenseManager(), 'auto_reports');
     const dailySummaries = ctx.getDb().getDailySummariesInRange(startDate, endDate);
     if (dailySummaries.length === 0) return { error: 'no_data' };
 
@@ -567,7 +563,6 @@ export function registerDbHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('summary:generateMonthly', async (_event, startDate: string, endDate: string) => {
-    requirePro(ctx.getLicenseManager(), 'auto_reports');
     // Monthly aggregates the month's daily summaries directly (not weekly),
     // so it works even when the weekly report is disabled.
     const dailySummaries = ctx.getDb().getDailySummariesInRange(startDate, endDate);

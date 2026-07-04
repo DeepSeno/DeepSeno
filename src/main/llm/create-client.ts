@@ -14,6 +14,12 @@ const MODEL_NAME_MAP: Record<string, string> = {
   'bge-m3': 'bge-m3-Q8_0',
 };
 
+function normalizeLocalModelName(model: string): string {
+  const trimmed = model.trim();
+  const basename = trimmed.split(/[\\/]/).filter(Boolean).pop() || trimmed;
+  return basename.replace(/\.gguf$/i, '');
+}
+
 /**
  * Create the right LLM client based on current settings.
  */
@@ -41,7 +47,7 @@ export function getLLMModel(settings: AppSettings): string {
   }
   if (settings.llmProvider === 'local') {
     const model = settings.localLlmModel || '';
-    if (model) return model.replace(/\.gguf$/i, '');
+    if (model) return normalizeLocalModelName(model);
     const llmModel = settings.llmModel || 'qwen3.5:4b';
     return MODEL_NAME_MAP[llmModel] || llmModel;
   }
@@ -53,12 +59,12 @@ export function getLLMModel(settings: AppSettings): string {
  * For local mode: returns 'bge-m3-Q8_0' (must exist in models directory).
  */
 export function getEmbedModel(settings: AppSettings): string {
-  if (settings.llmProvider === 'openai' && settings.cloudEmbedModel) {
-    return settings.cloudEmbedModel;
+  if (settings.llmProvider === 'openai') {
+    return settings.cloudEmbedModel || settings.cloudModel || settings.embedModel || 'bge-m3';
   }
   if (settings.llmProvider === 'local') {
     const model = settings.localEmbedModel || '';
-    if (model) return model.replace(/\.gguf$/i, '');
+    if (model) return normalizeLocalModelName(model);
     return MODEL_NAME_MAP['bge-m3'] || 'bge-m3-Q8_0';
   }
   return settings.embedModel || 'bge-m3';

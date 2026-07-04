@@ -1,6 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { Star, Pencil, Check, X } from 'lucide-react';
-import { ProGate } from '../../../components/ProGate';
 import type { Message } from '../types';
 
 interface ConversationRendererProps {
@@ -149,11 +148,9 @@ export default function ConversationRenderer({
                 {msg.time}
               </span>
               {msg.sentiment && (
-                <ProGate feature="emotion_analysis" fallback={null}>
-                  <span className={`kz-badge kz-badge--${sentimentTone(msg.sentiment)}`}>
-                    {(t.sentiment as Record<string, string>)[msg.sentiment] || msg.sentiment}
-                  </span>
-                </ProGate>
+                <span className={`kz-badge kz-badge--${sentimentTone(msg.sentiment)}`}>
+                  {(t.sentiment as Record<string, string>)[msg.sentiment] || msg.sentiment}
+                </span>
               )}
               {isSaving && (
                 <span className="kz-mono kz-text-mute" style={{ fontSize: 10, marginLeft: 'auto', marginRight: 4, animation: 'kz-fade-up 0.6s ease-in-out infinite alternate' }}>

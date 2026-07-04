@@ -1,6 +1,6 @@
 import { Notification, BrowserWindow } from 'electron';
 import { createHash } from 'node:crypto';
-import { loadSettings } from '../settings';
+import { loadSettings, type AppSettings } from '../settings';
 import { VoiceBrainDB } from '../db/database';
 import { TextOptimizer } from '../llm/text-optimizer';
 import { createLLMClient, getLLMModel, getEmbedModel } from '../llm/create-client';
@@ -23,6 +23,7 @@ export interface ActionDeps {
   todoTracker?: TodoTracker;
   feishuNotifier?: (cardJson: string) => Promise<void>;
   knowledgeCompiler?: KnowledgeCompiler;
+  settings?: AppSettings;
 }
 
 export interface ActionResult {
@@ -739,7 +740,7 @@ export async function actionKnowledgeAudit(
 // ---------------------------------------------------------------------------
 
 export async function actionMemoryCompact(
-  deps: ActionDeps,
+  _deps: ActionDeps,
 ): Promise<ActionResult> {
   let db: VoiceBrainDB | null = null;
   try {

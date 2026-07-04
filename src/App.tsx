@@ -21,11 +21,8 @@ import Scheduler from './renderer/pages/Scheduler';
 import KnowledgePage from './renderer/pages/KnowledgePage';
 import SetupWizard from './renderer/components/wizard/SetupWizard';
 import CommandPalette from './renderer/components/CommandPalette';
-import LicenseGate from './renderer/components/LicenseGate';
-import { ProGate } from './renderer/components/ProGate';
 import { PageErrorBoundary } from './renderer/components/PageErrorBoundary';
 import { NotificationProvider } from './renderer/components/NotificationCenter';
-import { LicenseProvider, useLicense } from './renderer/hooks/useLicense';
 import { RecordingProvider } from './renderer/contexts/RecordingContext';
 
 // Error boundary to prevent white screen on component crashes
@@ -70,22 +67,18 @@ function RedirectKeepQuery({ to }: { to: string }) {
 }
 
 function AppRoutes() {
-  const { status } = useLicense();
-  const showLicenseGate = status !== null && !status.licensed && !status.trial.active;
-
   return (
     <>
-      {showLicenseGate && <LicenseGate />}
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<PageErrorBoundary pageName="Dashboard"><Dashboard /></PageErrorBoundary>} />
           <Route path="/sources" element={<PageErrorBoundary pageName="Sources"><Sources /></PageErrorBoundary>} />
           <Route path="/library" element={<PageErrorBoundary pageName="Library"><Library /></PageErrorBoundary>} />
           <Route path="/assistant" element={<PageErrorBoundary pageName="Assistant"><Assistant /></PageErrorBoundary>} />
-          <Route path="/reports" element={<PageErrorBoundary pageName="Reports"><ProGate feature="auto_reports" variant="page"><Reports /></ProGate></PageErrorBoundary>} />
-          <Route path="/soul" element={<PageErrorBoundary pageName="Soul"><ProGate feature="memory" variant="page"><SoulPage /></ProGate></PageErrorBoundary>} />
-          <Route path="/memories" element={<PageErrorBoundary pageName="Memories"><ProGate feature="memory" variant="page"><div className="overflow-auto -m-6" style={{ height: 'calc(100% + 3rem)' }}><MemoryManager /></div></ProGate></PageErrorBoundary>} />
-          <Route path="/scheduler" element={<PageErrorBoundary pageName="Scheduler"><ProGate feature="memory" variant="page"><div className="overflow-auto -m-6" style={{ height: 'calc(100% + 3rem)' }}><Scheduler /></div></ProGate></PageErrorBoundary>} />
+          <Route path="/reports" element={<PageErrorBoundary pageName="Reports"><Reports /></PageErrorBoundary>} />
+          <Route path="/soul" element={<PageErrorBoundary pageName="Soul"><SoulPage /></PageErrorBoundary>} />
+          <Route path="/memories" element={<PageErrorBoundary pageName="Memories"><div className="overflow-auto -m-6" style={{ height: 'calc(100% + 3rem)' }}><MemoryManager /></div></PageErrorBoundary>} />
+          <Route path="/scheduler" element={<PageErrorBoundary pageName="Scheduler"><div className="overflow-auto -m-6" style={{ height: 'calc(100% + 3rem)' }}><Scheduler /></div></PageErrorBoundary>} />
           <Route path="/agent" element={<Navigate to="/soul" replace />} />
           {/* Backward compat redirects (preserve query + hash so deep links survive) */}
           <Route path="/recordings" element={<RedirectKeepQuery to="/sources" />} />
@@ -100,8 +93,8 @@ function AppRoutes() {
           <Route path="/skill/:skillId" element={<Navigate to="/plugins" replace />} />
           <Route path="/settings" element={<PageErrorBoundary pageName="Settings"><SettingsPage /></PageErrorBoundary>} />
           <Route path="/models" element={<PageErrorBoundary pageName="Models"><Models /></PageErrorBoundary>} />
-          <Route path="/channels" element={<PageErrorBoundary pageName="Channels"><ProGate feature="channels" variant="page"><Channels /></ProGate></PageErrorBoundary>} />
-          <Route path="/feishu-cli-source" element={<PageErrorBoundary pageName="FeishuCliSource"><ProGate feature="channels" variant="page"><FeishuCliSource /></ProGate></PageErrorBoundary>} />
+          <Route path="/channels" element={<PageErrorBoundary pageName="Channels"><Channels /></PageErrorBoundary>} />
+          <Route path="/feishu-cli-source" element={<PageErrorBoundary pageName="FeishuCliSource"><FeishuCliSource /></PageErrorBoundary>} />
           <Route path="/help" element={<PageErrorBoundary pageName="Help"><Help /></PageErrorBoundary>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
@@ -155,12 +148,10 @@ function AppContent() {
 
   return (
     <HashRouter>
-      <LicenseProvider>
-        <RecordingProvider>
-          <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
-          <AppRoutes />
-        </RecordingProvider>
-      </LicenseProvider>
+      <RecordingProvider>
+        <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+        <AppRoutes />
+      </RecordingProvider>
     </HashRouter>
   );
 }

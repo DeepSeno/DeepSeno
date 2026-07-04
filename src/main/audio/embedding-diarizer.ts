@@ -29,7 +29,7 @@ export interface EmbeddingDiarizeOptions {
   boundaryExpansion?: number;   // 0.15 default
   maxGapToFill?: number;        // 2.0 default
   totalDuration?: number;       // for boundary clipping
-  llmCorrect?: (input: SpeakerCorrectionInput) => Promise<DiarizeSegment[]>;
+  signal?: AbortSignal;
 }
 
 // ─── Clustering helpers ─────────────────────────────────────
@@ -203,7 +203,15 @@ export function postProcess(
 
 // ─── EmbeddingDiarizer ──────────────────────────────────────
 
-const MAX_SEGMENT_SAMPLES_SECONDS = 30; // cap embedding extraction at 30s per segment
+function createCancelledError(): Error {
+  const err = new Error('Task cancelled by user');
+  err.name = 'TaskCancelledError';
+  return err;
+}
+
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw createCancelledError();
+}
 
 export class EmbeddingDiarizer {
   private engine: SherpaEngineProxy;
@@ -234,9 +242,10 @@ export class EmbeddingDiarizer {
       boundaryExpansion = 0.15,
       maxGapToFill = 2.0,
       totalDuration,
-      llmCorrect,
+      signal,
     } = options;
 
+    throwIfCancelled(signal);
     console.log(
       `[EmbeddingDiarizer] Starting subprocess for: ${audioPath}, ` +
       `numSpeakers=${numSpeakers}, threshold=${clusteringThreshold}`
@@ -244,7 +253,8 @@ export class EmbeddingDiarizer {
 
     // 1. Run VAD + embedding in subprocess (avoids Worker external buffer issues)
     const modelsDir = this.engine.getModelsDir();
-    const subprocessResult = await this.runVadEmbedSubprocess(audioPath, modelsDir, clusteringThreshold);
+    const subprocessResult = await this.runVadEmbedSubprocess(audioPath, modelsDir, clusteringThreshold, signal);
+    throwIfCancelled(signal);
 
     if (!subprocessResult || subprocessResult.segments.length === 0) {
       console.log('[EmbeddingDiarizer] No segments detected');
@@ -293,8 +303,10 @@ export class EmbeddingDiarizer {
     audioPath: string,
     modelsDir: string,
     clusteringThreshold = 0.45,
+    signal?: AbortSignal,
   ): Promise<{ segments: Array<{ start: number; end: number; speaker: number }>; duration: number } | null> {
-    return new Promise((resolve) => {
+    throwIfCancelled(signal);
+    return new Promise((resolve, reject) => {
       const TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
       // Resolve subprocess path (works in both dev and packaged builds)
@@ -302,6 +314,24 @@ export class EmbeddingDiarizer {
       const subprocessPath = path.resolve(__dirname, 'vad-embed-subprocess.js');
 
       let child: ChildProcess;
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn();
+      };
+      const onAbort = () => {
+        try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+        settle(() => reject(createCancelledError()));
+      };
+
       try {
         child = fork(subprocessPath, [], {
           stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
@@ -313,14 +343,18 @@ export class EmbeddingDiarizer {
         return;
       }
 
-      const timer = setTimeout(() => {
-        console.warn('[EmbeddingDiarizer] Subprocess timed out');
-        child.kill('SIGKILL');
-        resolve(null);
+      timer = setTimeout(() => {
+        settle(() => {
+          console.warn('[EmbeddingDiarizer] Subprocess timed out');
+          child.kill('SIGKILL');
+          resolve(null);
+        });
       }, TIMEOUT);
+      signal?.addEventListener('abort', onAbort, { once: true });
 
       child.on('message', (msg: any) => {
         if (msg?.type === 'ready') {
+          if (signal?.aborted) return;
           // Send work request
           child.send({
             type: 'vadEmbed',
@@ -329,32 +363,42 @@ export class EmbeddingDiarizer {
             clusteringThreshold,
           });
         } else if (msg?.type === 'result') {
-          clearTimeout(timer);
-          child.kill();
-          resolve({
-            segments: msg.segments,
-            duration: msg.duration,
+          settle(() => {
+            child.kill();
+            resolve({
+              segments: msg.segments,
+              duration: msg.duration,
+            });
           });
         } else if (msg?.type === 'error') {
-          clearTimeout(timer);
-          console.warn(`[EmbeddingDiarizer] Subprocess error: ${msg.message}`);
-          child.kill();
-          resolve(null);
+          settle(() => {
+            console.warn(`[EmbeddingDiarizer] Subprocess error: ${msg.message}`);
+            child.kill();
+            resolve(null);
+          });
         }
       });
 
       child.on('error', (err) => {
-        clearTimeout(timer);
-        console.warn(`[EmbeddingDiarizer] Subprocess error: ${err.message}`);
-        resolve(null);
+        settle(() => {
+          console.warn(`[EmbeddingDiarizer] Subprocess error: ${err.message}`);
+          resolve(null);
+        });
       });
 
       child.on('exit', (code) => {
-        clearTimeout(timer);
-        if (code !== 0 && code !== null) {
-          console.warn(`[EmbeddingDiarizer] Subprocess exited with code ${code}`);
-          resolve(null);
-        }
+        settle(() => {
+          if (signal?.aborted) {
+            reject(createCancelledError());
+            return;
+          }
+          if (code !== 0 && code !== null) {
+            console.warn(`[EmbeddingDiarizer] Subprocess exited with code ${code}`);
+            resolve(null);
+          } else {
+            resolve(null);
+          }
+        });
       });
     });
   }

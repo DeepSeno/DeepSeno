@@ -79,7 +79,6 @@ vi.mock('../feishu/card-builder', () => ({
 }));
 
 import { ReportScheduler } from '../scheduler/report-scheduler';
-import { loadSettings } from '../settings';
 import type { InsightEngine, Insight } from '../agent/insight-engine';
 import type { MessageRouter } from '../channels/router';
 

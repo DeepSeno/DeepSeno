@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { VoiceBrainDB } from '../db/database';
 import { AudioPreprocessor } from '../audio/preprocessor';
@@ -8,7 +8,6 @@ import { Transcriber } from '../audio/transcriber';
 import { Diarizer } from '../audio/diarizer';
 import { EmbeddingDiarizer } from '../audio/embedding-diarizer';
 import { postProcessDiarization } from '../audio/diarization-postprocess';
-import { mergeTranscriptWithDiarization } from '../audio/merge-transcript';
 import { TextOptimizer } from '../llm/text-optimizer';
 import { MarkdownGenerator } from '../output/markdown-generator';
 import { QueryEngine } from '../rag/query-engine';
@@ -33,13 +32,23 @@ import type { KnowledgeCompiler } from '../agent/knowledge-compiler';
 import type { AgentEventBus } from '../agent/event-bus';
 import type { TodoTracker } from '../agent/todo-tracker';
 import type { SherpaEngineProxy } from '../audio/sherpa-engine-proxy';
-import type { LicenseManager } from '../licensing/license-manager';
 
 /** Maximum allowed audio file size: 500 MB */
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
 
 /** Maximum pixel count for cloud LLM image input (Volcengine limit: 36M pixels). */
 const MAX_IMAGE_PIXELS = 33_000_000; // Leave some margin below 36M
+
+class TaskCancelledError extends Error {
+  constructor() {
+    super('Task cancelled by user');
+    this.name = 'TaskCancelledError';
+  }
+}
+
+function isTaskCancelledError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TaskCancelledError';
+}
 
 /**
  * Read an image file and return a base64-encoded JPEG string suitable for LLM input.
@@ -103,7 +112,6 @@ export interface ProcessorConfig {
   whisperModel: string; // Whisper model size
   llmModel: string; // Local LLM model name
   sherpaEngine?: SherpaEngineProxy; // sherpa-onnx engine instance
-  licenseManager?: LicenseManager;
 }
 
 export class Processor {
@@ -113,7 +121,6 @@ export class Processor {
   private diarizer: Diarizer;
   private embeddingDiarizer: EmbeddingDiarizer;
   private optimizer: TextOptimizer;
-  private markdown: MarkdownGenerator;
   private queryEngine: QueryEngine | null = null;
   private taskQueue: TaskQueue;
   private memoryManager: MemoryManager | null = null;
@@ -121,14 +128,12 @@ export class Processor {
   private eventBus: AgentEventBus | null = null;
   private todoTracker: TodoTracker | null = null;
   private sherpaEngine: SherpaEngineProxy | null;
-  private licenseManager: LicenseManager | null;
   private llmClient: import('../llm/llm-client').LLMClient;
   private llmModel: string;
 
   constructor(private config: ProcessorConfig) {
     this.db = config.db || new VoiceBrainDB(config.dbPath);
     this.sherpaEngine = config.sherpaEngine || null;
-    this.licenseManager = config.licenseManager || null;
     this.preprocessor = new AudioPreprocessor(this.sherpaEngine || undefined);
     this.transcriber = new Transcriber(this.sherpaEngine!);
     this.diarizer = new Diarizer(this.sherpaEngine!);
@@ -139,12 +144,11 @@ export class Processor {
     this.llmModel = config.llmModel;
     this.optimizer = new TextOptimizer(llmClient, config.llmModel);
     this.optimizer.setVocabularyBlock(this.db.buildVocabularyPromptBlock(settings.vocabularyContext));
-    this.markdown = new MarkdownGenerator(config.outputDir);
     this.taskQueue = new TaskQueue();
 
     // All file/recording processing is background work — de-prioritise its LLM
     // calls so an interactive RAG/chat query can jump ahead (see llm-scheduler).
-    this.taskQueue.setProcessor((task) => runWithPriority('background', () => this.processFile(task)));
+    this.taskQueue.setProcessor((task, signal) => runWithPriority('background', () => this.processFile(task, signal)));
   }
 
   getTaskQueue(): TaskQueue {
@@ -184,6 +188,85 @@ export class Processor {
     this.optimizer = new TextOptimizer(client, model);
     const settings = loadSettings();
     this.optimizer.setVocabularyBlock(this.db.buildVocabularyPromptBlock(settings.vocabularyContext));
+  }
+
+  private throwIfCancelled(signal?: AbortSignal, recordingId?: number): void {
+    if (!signal?.aborted) return;
+    if (recordingId) {
+      try { this.db.updateRecordingStatus(recordingId, 'cancelled'); } catch { /* best-effort */ }
+    }
+    throw new TaskCancelledError();
+  }
+
+  private async sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    this.throwIfCancelled(signal);
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timeout);
+        cleanup();
+        reject(new TaskCancelledError());
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private runFfmpeg(command: ReturnType<typeof ffmpeg>, signal?: AbortSignal): Promise<void> {
+    this.throwIfCancelled(signal);
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        err ? reject(err) : resolve();
+      };
+      const onAbort = () => {
+        try { command.kill('SIGKILL'); } catch { /* already stopped */ }
+        finish(new TaskCancelledError());
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      command
+        .on('end', () => finish())
+        .on('error', (err: Error) => finish(signal?.aborted ? new TaskCancelledError() : err))
+        .run();
+    });
+  }
+
+  private runExecFile(
+    command: string,
+    args: string[],
+    options: { timeout?: number; maxBuffer?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<string> {
+    this.throwIfCancelled(signal);
+    return new Promise<string>((resolve, reject) => {
+      let settled = false;
+      let child: ReturnType<typeof execFile>;
+
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      const finish = (err?: Error | null, stdout = '') => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        err ? reject(err) : resolve(stdout);
+      };
+      const onAbort = () => {
+        try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+        finish(new TaskCancelledError());
+      };
+
+      child = execFile(command, args, options, (err, stdout) => {
+        finish(signal?.aborted ? new TaskCancelledError() : err || undefined, stdout);
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /** Validate file size before enqueuing. Throws if file exceeds MAX_FILE_SIZE (500 MB). */
@@ -228,10 +311,11 @@ export class Processor {
   }
 
   /** Wait until a file's size stops changing (file copy complete). */
-  private async waitForFileStable(filePath: string, timeoutMs = 30000): Promise<void> {
+  private async waitForFileStable(filePath: string, timeoutMs = 30000, signal?: AbortSignal): Promise<void> {
     const start = Date.now();
     let lastSize = -1;
     while (Date.now() - start < timeoutMs) {
+      this.throwIfCancelled(signal);
       try {
         const stat = fs.statSync(filePath);
         if (stat.size === lastSize && stat.size > 0) return; // Size stable
@@ -239,7 +323,7 @@ export class Processor {
       } catch {
         throw new Error(`File not found: ${filePath}`);
       }
-      await new Promise((r) => setTimeout(r, 1000));
+      await this.sleep(1000, signal);
     }
     // Timed out but file exists — proceed anyway (user might be waiting)
     console.warn(`[Processor] File stability check timed out for ${path.basename(filePath)}, proceeding anyway`);
@@ -273,37 +357,87 @@ export class Processor {
     }
   }
 
+  private collectSegmentText(segmentIds: number[], separator = '\n'): string {
+    return segmentIds
+      .map((id) => {
+        const seg = this.db.getSegment(id);
+        return seg?.clean_text || seg?.raw_text || '';
+      })
+      .filter(Boolean)
+      .join(separator);
+  }
+
+  private runPostCompletionEnrichment(recordingId: number, segmentIds: number[], label: string): void {
+    void runWithPriority('background', async () => {
+      const allText = this.collectSegmentText(segmentIds, '\n');
+
+      try {
+        if (allText.trim().length > 10) {
+          const settings = loadSettings();
+          const llmClient = createLLMClient(settings);
+          const memoryExtractor = new MemoryExtractor(llmClient, getLLMModel(settings));
+          const facts = await memoryExtractor.extract(allText);
+
+          if (facts.length > 0 && this.memoryManager) {
+            for (const fact of facts) {
+              await this.memoryManager.addFact(fact.fact, fact.category, fact.confidence, [recordingId]);
+            }
+            console.log(`[Processor] ${label} enrichment: extracted ${facts.length} memories`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[Processor] ${label} memory extraction failed (non-critical):`, err);
+      }
+
+      try {
+        const combinedText = allText.replace(/\s+/g, ' ').trim();
+        if (combinedText.length > 20) {
+          const tags = await this.optimizer.classifyRecording(combinedText);
+          if (tags.length > 0) {
+            this.db.setRecordingTags(recordingId, tags);
+            console.log(`[Processor] ${label} enrichment: auto-tagged recording ${recordingId}: [${tags.join(', ')}]`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[Processor] ${label} auto-classification failed (non-critical):`, err);
+      }
+    });
+  }
+
   /** Core processing pipeline. */
-  private async processFile(task: QueueTask): Promise<void> {
+  private async processFile(task: QueueTask, signal?: AbortSignal): Promise<void> {
     const { filePath } = task;
     const fileName = path.basename(filePath);
+    this.throwIfCancelled(signal, task.recordingId);
     console.log(`[Processor] Starting pipeline for: ${fileName}${task.recordingId ? ` (reprocess #${task.recordingId})` : ''}`);
 
     // Route bulk cleanup (per-segment clean/sentiment) to a lighter model when
     // the main model is heavy — picks up settings changes between tasks.
     await this.applyCleanupModel();
+    this.throwIfCancelled(signal, task.recordingId);
 
     // Check if this is a multi-image group (directory)
     try {
       if (fs.statSync(filePath).isDirectory()) {
-        return this.processImageGroup(task);
+        return this.processImageGroup(task, signal);
       }
     } catch {}
 
     // Route by media type — each handler has its own try/catch for graceful failure
     const mediaType = detectMediaType(filePath);
     if (mediaType && isDocumentType(mediaType)) {
-      return this.processDocument(task, mediaType);
+      return this.processDocument(task, mediaType, signal);
     }
     if (mediaType && isVideoType(mediaType)) {
-      return this.processVideo(task);
+      return this.processVideo(task, signal);
     }
     if (mediaType && isImageType(mediaType)) {
-      return this.processImage(task);
+      return this.processImage(task, signal);
     }
 
     // 0. Wait for file to stabilize (in case it's still being copied)
-    await this.waitForFileStable(filePath);
+    await this.waitForFileStable(filePath, 30000, signal);
+    this.throwIfCancelled(signal, task.recordingId);
 
     // 1. Insert recording into database (or reuse existing for reprocess)
     let recordingId: number;
@@ -339,9 +473,11 @@ export class Processor {
         });
       }
     }
+    task.recordingId = recordingId;
     this.db.updateRecordingStatus(recordingId, 'processing');
 
     try {
+      this.throwIfCancelled(signal, recordingId);
       // 2. Preprocessing: format conversion
       this.taskQueue.updateTask(task.id, {
         status: 'preprocessing',
@@ -355,7 +491,9 @@ export class Processor {
           filePath,
           this.config.tempDir
         );
+        this.throwIfCancelled(signal, recordingId);
       } catch (err: any) {
+        if (isTaskCancelledError(err)) throw err;
         throw new Error(`Preprocessing failed: ${err.message}. Check that FFmpeg is installed and the audio file is valid.`);
       }
 
@@ -363,6 +501,7 @@ export class Processor {
       let duration = 0;
       try {
         duration = await this.preprocessor.getDuration(filePath);
+        this.throwIfCancelled(signal, recordingId);
         if (duration > 0) {
           this.db.updateRecordingDuration(recordingId, duration);
           console.log(`[Processor] Duration: ${duration.toFixed(1)}s`);
@@ -399,19 +538,22 @@ export class Processor {
             pipelineHotwords,
             pipelineLang
           );
+          this.throwIfCancelled(signal, recordingId);
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           throw new Error(`Transcription failed: ${err.message}. Check that the ASR model is available and Python environment is configured.`);
         }
 
         if (transcript.segments.length === 0 || !transcript.full_text?.trim()) {
           console.log('[Processor] No speech detected, marking as completed');
+          this.throwIfCancelled(signal, recordingId);
           this.db.updateRecordingStatus(recordingId, 'completed');
           return;
         }
 
         // SenseVoice returns single segment with start:0, end:0 — use actual duration
         // Use SPEAKER_00 format so the localization logic (SPEAKER_00 → "说话人 1") works uniformly
-        allMergedSegments = transcript.segments.map((s) => ({
+        allMergedSegments = transcript.segments.map((s: { start: number; end?: number; text: string }) => ({
           start: s.start,
           end: s.end || duration || 0,
           text: s.text,
@@ -427,6 +569,7 @@ export class Processor {
         // 3. VAD segmentation
         const vadResult =
           await this.preprocessor.detectSpeechSegments(convertedPath);
+        this.throwIfCancelled(signal, recordingId);
         console.log(`[Processor] VAD found ${vadResult.segments.length} segments, ${vadResult.total_speech_seconds}s speech`);
         this.taskQueue.updateTask(task.id, {
           progress: 20,
@@ -436,6 +579,7 @@ export class Processor {
         // 4. If speech segments exist, split and process each one
         if (vadResult.segments.length === 0) {
           // No speech detected, mark as completed
+          this.throwIfCancelled(signal, recordingId);
           this.db.updateRecordingStatus(recordingId, 'completed');
           return;
         }
@@ -446,6 +590,7 @@ export class Processor {
           vadResult.segments,
           path.join(this.config.tempDir, `recording_${recordingId}`)
         );
+        this.throwIfCancelled(signal, recordingId);
 
         // 5. Per-segment transcription + speaker diarization
         this.taskQueue.updateTask(task.id, {
@@ -453,8 +598,6 @@ export class Processor {
           progress: 30,
         });
         console.log(`[Processor] Step 5: Transcribing ${segmentFiles.length} segments...`);
-        const totalSegments = segmentFiles.length;
-
         // Parallel batch transcription via worker pool
         console.log(`[Processor] Transcribing ${segmentFiles.length} segments in parallel via worker pool...`);
         const engine = this.sherpaEngine as import('../audio/sherpa-engine-proxy').SherpaEngineProxy;
@@ -470,7 +613,9 @@ export class Processor {
         let transcriptResults: any[];
         try {
           transcriptResults = await engine.transcribeAudioBatch(segmentFiles, () => asrReporter.advance());
+          this.throwIfCancelled(signal, recordingId);
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           throw new Error(`Batch transcription failed: ${err.message}. Check that the ASR model is available.`);
         }
 
@@ -500,12 +645,10 @@ export class Processor {
                 numSpeakers: -1,
                 clusteringThreshold: 0.45,
                 totalDuration: duration,
-                llmCorrect: async (input) => {
-                  const { correctSpeakersWithLLM } = await import('../audio/llm-speaker-corrector');
-                  return correctSpeakersWithLLM(this.llmClient, this.llmModel, input);
-                },
+                signal,
               },
             );
+            this.throwIfCancelled(signal, recordingId);
             const uniqueSpeakerIds = [...new Set(globalDiarResult.segments.map(s => s.speaker))];
             console.log(`[Processor] Embedding diarization: ${globalDiarResult.segments.length} segments, ${uniqueSpeakerIds.length} speakers: ${uniqueSpeakerIds.join(', ')}`);
             // Light post-processing: only merge adjacent same-speaker segments
@@ -514,20 +657,25 @@ export class Processor {
               globalDiarResult.segments = postProcessDiarization(globalDiarResult.segments, { light: true });
             }
           } catch (diarErr: any) {
+            if (isTaskCancelledError(diarErr)) throw diarErr;
             console.warn(`[Processor] Embedding diarization failed, falling back to legacy: ${diarErr.message}`);
             try {
-              globalDiarResult = await this.diarizer.diarize(convertedPath);
+              globalDiarResult = await this.diarizer.diarize(convertedPath, undefined, signal);
+              this.throwIfCancelled(signal, recordingId);
               console.log(`[Processor] Legacy diarization (fallback): ${globalDiarResult.segments.length} segments`);
             } catch (legacyErr: any) {
+              if (isTaskCancelledError(legacyErr)) throw legacyErr;
               console.warn(`[Processor] Legacy diarization also failed: ${legacyErr.message}`);
             }
           }
         } else {
           // Legacy OfflineSpeakerDiarization
           try {
-            globalDiarResult = await this.diarizer.diarize(convertedPath);
+            globalDiarResult = await this.diarizer.diarize(convertedPath, undefined, signal);
+            this.throwIfCancelled(signal, recordingId);
             console.log(`[Processor] Legacy diarization: ${globalDiarResult.segments.length} segments`);
           } catch (legacyErr: any) {
+            if (isTaskCancelledError(legacyErr)) throw legacyErr;
             console.warn(`[Processor] Legacy diarization failed: ${legacyErr.message}`);
           }
         }
@@ -590,10 +738,12 @@ export class Processor {
       // 5.5a. LLM speaker attribution correction
       if (allMergedSegments.length >= 3) {
         const correctionSpeakers = [...new Set(allMergedSegments.map(s => s.speaker))];
-        if (correctionSpeakers.length > 1) {
-          try {
-            console.log(`[Processor] Step 5.5a: LLM speaker attribution correction (${allMergedSegments.length} segments, ${correctionSpeakers.length} speakers)...`);
-            allMergedSegments = await this.optimizer.correctSpeakerAttribution(allMergedSegments);
+          if (correctionSpeakers.length > 1) {
+            try {
+            this.throwIfCancelled(signal, recordingId);
+              console.log(`[Processor] Step 5.5a: LLM speaker attribution correction (${allMergedSegments.length} segments, ${correctionSpeakers.length} speakers)...`);
+              allMergedSegments = await this.optimizer.correctSpeakerAttribution(allMergedSegments);
+            this.throwIfCancelled(signal, recordingId);
           } catch (err: any) {
             console.warn(`[Processor] Speaker correction skipped: ${err.message?.slice(0, 100)}`);
           }
@@ -623,18 +773,17 @@ export class Processor {
         }
         seg.speaker = spkLabelMap.get(seg.speaker) || seg.speaker;
       }
-      const uniqueSpeakers = [...new Set(allMergedSegments.map((s) => s.speaker).filter(Boolean))];
-
       // 5.6. Person auto-creation disabled — persons are now managed manually.
       // Speaker diarization labels (说话人 1/2/3) are preserved in segments but
       // no persons or content_person_links are created automatically.
 
       // Filter out segments with empty text before optimization
       allMergedSegments = allMergedSegments.filter(s => s.text?.trim());
-      if (allMergedSegments.length === 0) {
-        console.log('[Processor] All segments had empty text, marking as completed');
-        this.db.updateRecordingStatus(recordingId, 'completed');
-        return;
+        if (allMergedSegments.length === 0) {
+          console.log('[Processor] All segments had empty text, marking as completed');
+        this.throwIfCancelled(signal, recordingId);
+          this.db.updateRecordingStatus(recordingId, 'completed');
+          return;
       }
 
       // 6. LLM text optimization (batch mode for better context)
@@ -655,8 +804,10 @@ export class Processor {
           notes: `批量文本清洗中（${fullRawText.length} 字符）...`,
         });
         try {
+          this.throwIfCancelled(signal, recordingId);
           const batchCleanStart = Date.now();
           const batchCleaned = await this.optimizer.batchClean(fullRawText);
+          this.throwIfCancelled(signal, recordingId);
           console.log(`[Processor] batchClean done in ${Math.round((Date.now() - batchCleanStart) / 1000)}s`);
           const lines = batchCleaned.split('\n').filter(l => l.trim());
           const rawSegCount = allMergedSegments.filter(s => s.text?.trim()).length;
@@ -667,6 +818,7 @@ export class Processor {
             console.warn(`[Processor] Batch optimization line count mismatch: expected ${rawSegCount}, got ${lines.length}. Falling back to per-segment.`);
           }
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn(`[Processor] Batch optimization failed, falling back to per-segment: ${err.message?.slice(0, 100)}`);
           this.taskQueue.updateTask(task.id, {
             notes: `文本优化失败，将使用原始文本: ${err.message?.slice(0, 80)}`,
@@ -699,6 +851,7 @@ export class Processor {
           })
         : null;
       for (let si = 0; si < totalSegs; si++) {
+        this.throwIfCancelled(signal, recordingId);
         const seg = meaningfulSegments[si];
         let cleanText: string;
 
@@ -710,7 +863,9 @@ export class Processor {
           // Per-segment fallback
           try {
             cleanText = await this.optimizer.cleanText(seg.text);
+            this.throwIfCancelled(signal, recordingId);
           } catch (err: any) {
+            if (isTaskCancelledError(err)) throw err;
             console.warn(`[Processor] Text optimization failed, using raw text: ${err.message?.slice(0, 100)}`);
             this.taskQueue.updateTask(task.id, {
               notes: `段落优化失败，使用原始文本: ${err.message?.slice(0, 60)}`,
@@ -719,6 +874,7 @@ export class Processor {
           }
         }
 
+        this.throwIfCancelled(signal, recordingId);
         const segId = this.db.insertSegment({
           recording_id: recordingId,
           speaker_id: undefined,
@@ -738,37 +894,36 @@ export class Processor {
       }
 
       // 6.5. Sentiment analysis
-      if (this.licenseManager && !this.licenseManager.isPro()) {
-        console.log('[Processor] Step 6.5: Skipped (Pro feature: emotion_analysis)');
-      } else {
-        const SENTIMENT_CONCURRENCY = 4;
-        const sentimentSegs = allMergedSegments.filter(seg => (seg.clean_text || seg.text || '').length >= 10 && seg.segment_id);
-        console.log(`[Processor] Step 6.5: Analyzing sentiment for ${sentimentSegs.length} segments (concurrency=${SENTIMENT_CONCURRENCY})...`);
-        const sentReporter = sentimentSegs.length > 0
-          ? new ProgressReporter({
-              label: '情绪分析',
-              total: sentimentSegs.length,
-              onTick: (note) => {
-                console.log(`[Processor] ${note}`);
-                this.taskQueue.updateTask(task.id, { notes: note });
-              },
-              step: Math.max(1, Math.floor(sentimentSegs.length / 20)),
-            })
-          : null;
-        for (let i = 0; i < sentimentSegs.length; i += SENTIMENT_CONCURRENCY) {
-          const batch = sentimentSegs.slice(i, i + SENTIMENT_CONCURRENCY);
-          await Promise.all(batch.map(async (seg) => {
-            try {
-              const text = seg.clean_text || seg.text || '';
-              const sentimentResult = await this.optimizer.analyzeSentiment(text);
-              this.db.updateSegmentSentiment(seg.segment_id!, sentimentResult.sentiment);
-            } catch (err) {
-              console.warn(`[Processor] Sentiment analysis skipped for segment ${seg.segment_id}:`, err);
-            } finally {
-              sentReporter?.advance();
-            }
-          }));
-        }
+      const SENTIMENT_CONCURRENCY = 4;
+      const sentimentSegs = allMergedSegments.filter(seg => (seg.clean_text || seg.text || '').length >= 10 && seg.segment_id);
+      console.log(`[Processor] Step 6.5: Analyzing sentiment for ${sentimentSegs.length} segments (concurrency=${SENTIMENT_CONCURRENCY})...`);
+      const sentReporter = sentimentSegs.length > 0
+        ? new ProgressReporter({
+            label: '情绪分析',
+            total: sentimentSegs.length,
+            onTick: (note) => {
+              console.log(`[Processor] ${note}`);
+              this.taskQueue.updateTask(task.id, { notes: note });
+            },
+            step: Math.max(1, Math.floor(sentimentSegs.length / 20)),
+          })
+        : null;
+      for (let i = 0; i < sentimentSegs.length; i += SENTIMENT_CONCURRENCY) {
+        this.throwIfCancelled(signal, recordingId);
+        const batch = sentimentSegs.slice(i, i + SENTIMENT_CONCURRENCY);
+        await Promise.all(batch.map(async (seg) => {
+          try {
+            const text = seg.clean_text || seg.text || '';
+            const sentimentResult = await this.optimizer.analyzeSentiment(text);
+            if (signal?.aborted) return;
+            this.db.updateSegmentSentiment(seg.segment_id!, sentimentResult.sentiment);
+          } catch (err) {
+            console.warn(`[Processor] Sentiment analysis skipped for segment ${seg.segment_id}:`, err);
+          } finally {
+            sentReporter?.advance();
+          }
+        }));
+        this.throwIfCancelled(signal, recordingId);
       }
 
       // 7. Information extraction
@@ -785,7 +940,9 @@ export class Processor {
       if (this.todoTracker && fullCleanText) {
         try {
           await this.todoTracker.checkAutoComplete(fullCleanText);
+          this.throwIfCancelled(signal, recordingId);
         } catch (err) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn('[Processor] TodoTracker auto-complete check failed:', err);
         }
       }
@@ -797,12 +954,14 @@ export class Processor {
           notes: `信息抽取中（${fullCleanText.length} 字符，主模型 ${this.llmModel}）...`,
         });
         extracted = await this.optimizer.extractInfo(fullCleanText);
+        this.throwIfCancelled(signal, recordingId);
         const extractElapsed = Math.round((Date.now() - extractStart) / 1000);
         console.log(`[Processor] extractInfo done in ${extractElapsed}s`);
         this.taskQueue.updateTask(task.id, {
           notes: `信息抽取完成（用时 ${extractElapsed}s）`,
         });
       } catch (err: any) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn(`[Processor] Info extraction failed (non-fatal), skipping: ${err.message?.slice(0, 100)}`);
       }
 
@@ -810,32 +969,29 @@ export class Processor {
       // (relationships from extractInfo are still used below for relationship graph)
 
       // 7.1. Store extracted relationships (into person_relationships table)
-      if (this.licenseManager && !this.licenseManager.isPro()) {
-        console.log('[Processor] Step 7.1: Skipped (Pro feature: relationship_graph)');
-      } else {
-        if (extracted.relationships && extracted.relationships.length > 0) {
-          let stored = 0;
-          for (const rel of extracted.relationships) {
-            // Only link relationships to existing persons — no auto-creation
-            const person = this.db.getPersonByName(rel.person1 ?? rel.person2);
-            if (!person) continue;
+      if (extracted.relationships && extracted.relationships.length > 0) {
+        let stored = 0;
+        for (const rel of extracted.relationships) {
+          this.throwIfCancelled(signal, recordingId);
+          // Only link relationships to existing persons — no auto-creation
+          const person = this.db.getPersonByName(rel.person1 ?? rel.person2);
+          if (!person) continue;
 
-            const relatedPerson = rel.person2 && rel.person2 !== (rel.person1 ?? rel.person2)
-              ? this.db.getPersonByName(rel.person2)
-              : undefined;
+          const relatedPerson = rel.person2 && rel.person2 !== (rel.person1 ?? rel.person2)
+            ? this.db.getPersonByName(rel.person2)
+            : undefined;
 
-            this.db.insertPersonRelationship({
-              person_id: person.id,
-              related_person_id: relatedPerson?.id,
-              mentioned_name: rel.person2,
-              relationship: rel.relationship,
-              context: rel.context,
-              recording_id: recordingId,
-            });
-            stored++;
-          }
-          console.log(`[Processor] Step 7.1: Extracted ${extracted.relationships.length} relationship(s), stored ${stored} (only existing persons)`);
+          this.db.insertPersonRelationship({
+            person_id: person.id,
+            related_person_id: relatedPerson?.id,
+            mentioned_name: rel.person2,
+            relationship: rel.relationship,
+            context: rel.context,
+            recording_id: recordingId,
+          });
+          stored++;
         }
+        console.log(`[Processor] Step 7.1: Extracted ${extracted.relationships.length} relationship(s), stored ${stored} (only existing persons)`);
       }
 
       // 7.4. AI title generation — cheap single-call summarization for ALL
@@ -850,6 +1006,7 @@ export class Processor {
           if (fullText.length >= 8) {
             const titleStart = Date.now();
             const aiTitle = await this.optimizer.generateTitle(fullText);
+            this.throwIfCancelled(signal, recordingId);
             if (aiTitle) {
               this.db.updateRecordingAutoTitle(recordingId, aiTitle);
               console.log(
@@ -859,6 +1016,7 @@ export class Processor {
           }
         }
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Step 7.4: auto_title generation failed (non-fatal):', err);
       }
 
@@ -879,19 +1037,19 @@ export class Processor {
               speakerCount,
               mediaType: recording?.media_type || 'audio',
             });
+            this.throwIfCancelled(signal, recordingId);
             this.db.updateRecordingImportance(recordingId, score);
             console.log(`[Processor] Step 7.4.5: importance=${score} (${reason})`);
           }
         }
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Step 7.4.5: importance scoring failed (non-fatal):', err);
       }
 
       // 7.5. Meeting notes generation
       let meetingNotesResult: any = null;
-      if (this.licenseManager && !this.licenseManager.isPro()) {
-        console.log('[Processor] Step 7.5: Skipped (Pro feature: meeting_notes)');
-      } else if (allMergedSegments.length >= 2) {
+      if (allMergedSegments.length >= 2) {
         try {
           this.taskQueue.updateTask(task.id, {
             status: 'generating notes',
@@ -911,6 +1069,7 @@ export class Processor {
             date: formatLocalDate(recording?.recorded_at ? new Date(recording.recorded_at) : new Date()),
             duration: recording?.duration_seconds || 0,
           });
+          this.throwIfCancelled(signal, recordingId);
           this.db.saveMeetingNotes(recordingId, notes);
           meetingNotesResult = notes;
           const notesElapsed = Math.round((Date.now() - notesStart) / 1000);
@@ -919,6 +1078,7 @@ export class Processor {
             notes: `会议纪要完成（用时 ${notesElapsed}s，${notes.decisions.length} 项决策，${notes.actionItems.length} 项待办）`,
           });
         } catch (err) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn('[Processor] Meeting notes generation failed (non-fatal):', err);
           // Non-fatal — continue pipeline
         }
@@ -945,10 +1105,12 @@ export class Processor {
               recordedAt: recDate,
               mediaType: rec.media_type || 'audio',
             });
+            this.throwIfCancelled(signal, recordingId);
             console.log(`[Processor] Step 7.6: session assembly done for recording ${recordingId}`);
           }
         }
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Step 7.6: session assembly failed (non-fatal):', err);
       }
 
@@ -973,12 +1135,14 @@ export class Processor {
           });
           let indexed = 0;
           for (let vi = 0; vi < allMergedSegments.length; vi++) {
+            this.throwIfCancelled(signal, recordingId);
             const seg = allMergedSegments[vi];
             if (seg.segment_id && seg.clean_text) {
               await this.queryEngine.indexSegment(
                 seg.segment_id,
                 seg.clean_text
               );
+              this.throwIfCancelled(signal, recordingId);
               indexed++;
             }
             // Sub-step progress: 85 → 95 across segments
@@ -989,6 +1153,7 @@ export class Processor {
           }
           console.log(`[Processor] Step 8: Indexed ${indexed}/${allMergedSegments.length} segments into vector store`);
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn(`[Processor] Step 8: Vector indexing failed (non-fatal): ${err?.message || err}`);
           this.taskQueue.updateTask(task.id, {
             notes: `向量索引失败，已保留文本内容: ${String(err?.message || err).slice(0, 80)}`,
@@ -996,6 +1161,7 @@ export class Processor {
         }
       }
 
+      this.throwIfCancelled(signal, recordingId);
       // 9. Generate Markdown output + Obsidian sync
       const today = formatLocalDate();
       const baseName = fileName.replace(/\.[^.]+$/, '');
@@ -1010,6 +1176,7 @@ export class Processor {
         segments: allMergedSegments,
       });
       mdGen.writeTranscript(today, baseName, transcriptMd);
+      this.throwIfCancelled(signal, recordingId);
 
       // Auto-sync to Obsidian vault if configured
       if (settings.obsidianAutoExport && settings.obsidianVaultDir) {
@@ -1019,8 +1186,10 @@ export class Processor {
             settings.obsidianVaultDir,
             path.join('transcripts', today, `${baseName}.md`)
           );
+          this.throwIfCancelled(signal, recordingId);
           console.log(`[Processor] Synced transcript to Obsidian vault`);
         } catch (err) {
+          if (isTaskCancelledError(err)) throw err;
           console.error('[Processor] Failed to sync to Obsidian vault:', err);
         }
       }
@@ -1028,8 +1197,10 @@ export class Processor {
 
       // Enqueue knowledge compilation (async, non-blocking)
       try {
+        this.throwIfCancelled(signal, recordingId);
         this.knowledgeCompiler?.enqueue(recordingId);
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn(`[Processor] Knowledge compilation enqueue failed:`, err);
       }
 
@@ -1051,6 +1222,7 @@ export class Processor {
       // alone re-summarises every segment of the day (e.g. 18 LLM chunks), which
       // froze the progress bar at "向量索引 95%" for many minutes. Run them
       // detached so they never block the queue or stall the UI.
+      this.throwIfCancelled(signal, recordingId);
       this.db.updateRecordingStatus(recordingId, 'completed');
       this.taskQueue.updateTask(task.id, {
         status: 'completed',
@@ -1083,25 +1255,21 @@ export class Processor {
         // (action_params { today: true }, default 22:00). See seed-tasks.ts.
 
         // 12.5. Auto-classify recording tags
-        if (this.licenseManager && !this.licenseManager.isPro()) {
-          console.log('[Processor] Step 12.5: Skipped (Pro feature: insights)');
-        } else {
-          try {
-            const combinedText = allMergedSegments.map((s) => s.clean_text || s.raw_text || '').join(' ');
-            if (combinedText.length > 20) {
-              const tags = await this.optimizer.classifyRecording(combinedText);
-              if (tags.length > 0) {
-                this.db.setRecordingTags(recordingId, tags);
-                console.log(`[Processor] Step 12.5: Auto-tagged recording ${recordingId}: [${tags.join(', ')}]`);
-              }
+        try {
+          const combinedText = allMergedSegments.map((s) => s.clean_text || s.raw_text || '').join(' ');
+          if (combinedText.length > 20) {
+            const tags = await this.optimizer.classifyRecording(combinedText);
+            if (tags.length > 0) {
+              this.db.setRecordingTags(recordingId, tags);
+              console.log(`[Processor] Step 12.5: Auto-tagged recording ${recordingId}: [${tags.join(', ')}]`);
             }
-          } catch (err) {
-            console.warn('[Processor] Auto-classification failed (non-critical):', err);
           }
+        } catch (err) {
+          console.warn('[Processor] Auto-classification failed (non-critical):', err);
         }
       })();
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, 'failed');
+      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
       throw err;
     }
   }
@@ -1112,12 +1280,14 @@ export class Processor {
    * Process a document file (PDF, DOCX, or plain text).
    * Extracts text → chunks → LLM optimization → info extraction → vector indexing.
    */
-  private async processDocument(task: QueueTask, mediaType: 'pdf' | 'docx' | 'text'): Promise<void> {
+  private async processDocument(task: QueueTask, mediaType: 'pdf' | 'docx' | 'text', signal?: AbortSignal): Promise<void> {
     const filePath = task.filePath;
     const fileName = path.basename(filePath);
+    this.throwIfCancelled(signal, task.recordingId);
     console.log(`[Processor] Document pipeline for: ${fileName} (${mediaType})${task.recordingId ? ` (reprocess #${task.recordingId})` : ''}`);
 
-    await this.waitForFileStable(filePath);
+    await this.waitForFileStable(filePath, 30000, signal);
+    this.throwIfCancelled(signal, task.recordingId);
 
     // Validate document file size (50 MB limit)
     const MAX_DOC_SIZE = 50 * 1024 * 1024;
@@ -1147,13 +1317,16 @@ export class Processor {
         });
       }
     }
+    task.recordingId = recordingId;
     this.db.updateRecordingStatus(recordingId, 'processing');
 
     try {
+      this.throwIfCancelled(signal, recordingId);
       // 2. Extract text
       this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 15, notes: 'Extracting text...' });
       console.log(`[Processor] Doc step 2: Extracting text from ${mediaType}...`);
       const extracted = await extractText(filePath, mediaType);
+      this.throwIfCancelled(signal, recordingId);
       this.db.updateRecording(recordingId, {
         page_count: extracted.pageCount,
         word_count: extracted.wordCount,
@@ -1161,6 +1334,7 @@ export class Processor {
 
       if (!extracted.text.trim()) {
         console.log('[Processor] Empty document, marking completed');
+        this.throwIfCancelled(signal, recordingId);
         this.db.updateRecordingStatus(recordingId, 'completed');
         this.taskQueue.updateTask(task.id, { status: 'completed', progress: 100, notes: 'Empty document' });
         return;
@@ -1174,6 +1348,7 @@ export class Processor {
       // 4. Insert raw segments
       const segmentIds: number[] = [];
       for (const chunk of chunks) {
+        this.throwIfCancelled(signal, recordingId);
         const segId = this.db.insertSegment({
           recording_id: recordingId,
           raw_text: chunk.text,
@@ -1189,15 +1364,19 @@ export class Processor {
       try {
         const fullText = chunks.map((c) => c.text).join('\n');
         const cleanedFull = await this.optimizer.batchClean(fullText);
+        this.throwIfCancelled(signal, recordingId);
         const cleanedChunks = chunkText(cleanedFull, 512);
         for (let i = 0; i < segmentIds.length; i++) {
+          this.throwIfCancelled(signal, recordingId);
           const cleanText = i < cleanedChunks.length ? cleanedChunks[i].text : chunks[i].text;
           this.db.updateSegmentCleanText(segmentIds[i], cleanText);
         }
         console.log(`[Processor] Doc step 5: LLM text optimization done`);
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Document batchClean failed, using raw text:', err);
         for (let i = 0; i < segmentIds.length; i++) {
+          this.throwIfCancelled(signal, recordingId);
           this.db.updateSegmentCleanText(segmentIds[i], chunks[i].text);
         }
       }
@@ -1210,15 +1389,18 @@ export class Processor {
         try {
           let indexed = 0;
           for (const segId of segmentIds) {
+            this.throwIfCancelled(signal, recordingId);
             const seg = this.db.getSegment(segId);
             const text = seg?.clean_text || seg?.raw_text || '';
             if (text.length > 10) {
               await this.queryEngine.indexSegment(segId, text);
+              this.throwIfCancelled(signal, recordingId);
               indexed++;
             }
           }
           console.log(`[Processor] Doc step 7: Indexed ${indexed}/${segmentIds.length} chunks`);
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn(`[Processor] Doc step 7: Vector indexing failed (non-fatal): ${err?.message || err}`);
           this.taskQueue.updateTask(task.id, {
             notes: `向量索引失败，已保留文档文本: ${String(err?.message || err).slice(0, 80)}`,
@@ -1226,37 +1408,19 @@ export class Processor {
         }
       }
 
-      // 8. Memory extraction
-      this.taskQueue.updateTask(task.id, { status: 'extracting memories', progress: 85, notes: 'Extracting memories...' });
-      try {
-        const settings = loadSettings();
-        const llmClient = createLLMClient(settings);
-        const memoryExtractor = new MemoryExtractor(llmClient, getLLMModel(settings));
-        const allCleanText = segmentIds.map((id) => {
-          const seg = this.db.getSegment(id);
-          return seg?.clean_text || seg?.raw_text || '';
-        }).join('\n');
-        const facts = await memoryExtractor.extract(allCleanText);
-        if (facts.length > 0 && this.memoryManager) {
-          for (const fact of facts) {
-            await this.memoryManager.addFact(fact.fact, fact.category, fact.confidence, [recordingId]);
-          }
-          console.log(`[Processor] Doc step 8: Extracted ${facts.length} memories`);
-        }
-      } catch (err) {
-        console.warn('[Processor] Document memory extraction failed:', err);
-      }
-
       // Enqueue knowledge compilation (async, non-blocking)
       try {
+        this.throwIfCancelled(signal, recordingId);
         this.knowledgeCompiler?.enqueue(recordingId);
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn(`[Processor] Knowledge compilation enqueue failed:`, err);
       }
 
       // 9. Markdown output
       this.taskQueue.updateTask(task.id, { status: 'generating notes', progress: 92, notes: 'Generating markdown...' });
       try {
+        this.throwIfCancelled(signal, recordingId);
         const settings = loadSettings();
         const mdGen = new MarkdownGenerator(this.config.outputDir, settings.obsidianWikilinks);
         const today = formatLocalDate();
@@ -1276,6 +1440,7 @@ export class Processor {
           segments,
         });
         mdGen.writeTranscript(today, baseName, transcriptMd);
+        this.throwIfCancelled(signal, recordingId);
 
         if (settings.obsidianAutoExport && settings.obsidianVaultDir) {
           MarkdownGenerator.syncToVault(
@@ -1284,30 +1449,17 @@ export class Processor {
           );
         }
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Document markdown generation failed:', err);
       }
 
-      // 10. Auto-classify tags
-      if (!this.licenseManager || this.licenseManager.isPro()) {
-        try {
-          const combinedText = segmentIds.map((id) => {
-            const seg = this.db.getSegment(id);
-            return seg?.clean_text || seg?.raw_text || '';
-          }).join(' ');
-          if (combinedText.length > 20) {
-            const tags = await this.optimizer.classifyRecording(combinedText);
-            if (tags.length > 0) this.db.setRecordingTags(recordingId, tags);
-          }
-        } catch (err) {
-          console.warn('[Processor] Document auto-classification failed:', err);
-        }
-      }
-
+      this.throwIfCancelled(signal, recordingId);
       this.db.updateRecordingStatus(recordingId, 'completed');
       this.taskQueue.updateTask(task.id, { status: 'completed', progress: 100 });
+      this.runPostCompletionEnrichment(recordingId, segmentIds, 'Document');
       console.log(`[Processor] Document pipeline completed for: ${fileName}`);
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, 'failed');
+      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
       throw err;
     }
   }
@@ -1319,208 +1471,234 @@ export class Processor {
    * Pre-creates the recording with media_type='video', extracts audio to a temp .wav,
    * then delegates to processFile which handles it as normal audio.
    */
-  private async processVideo(task: QueueTask): Promise<void> {
+  private async processVideo(task: QueueTask, signal?: AbortSignal): Promise<void> {
     const originalPath = task.filePath;
     const fileName = path.basename(originalPath);
     let recordingId: number | undefined;
+    this.throwIfCancelled(signal, task.recordingId);
     console.log(`[Processor] Video pipeline for: ${fileName} — extracting audio + keyframes`);
 
     try {
-    await this.waitForFileStable(originalPath);
+      await this.waitForFileStable(originalPath, 30000, signal);
+      this.throwIfCancelled(signal, task.recordingId);
 
-    // 1. Extract audio track via ffmpeg
-    this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 2, notes: 'Extracting audio from video...' });
-    const audioPath = path.join(
-      this.config.tempDir,
-      `${path.basename(originalPath, path.extname(originalPath))}-audio.wav`,
-    );
+      // 1. Extract audio track via ffmpeg
+      this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 2, notes: 'Extracting audio from video...' });
+      const audioPath = path.join(
+        this.config.tempDir,
+        `${path.basename(originalPath, path.extname(originalPath))}-audio.wav`,
+      );
 
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(originalPath)
-        .noVideo()
-        .audioCodec('pcm_s16le')
-        .audioFrequency(16000)
-        .audioChannels(1)
-        .output(audioPath)
-        .on('end', () => resolve())
-        .on('error', (err: Error) => reject(err))
-        .run();
-    });
-    console.log(`[Processor] Audio extracted to: ${audioPath}`);
-
-    // 1.5. Transcode video to H.264 MP4 for web playback (Chromium doesn't support HEVC)
-    this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 3, notes: 'Transcoding video for playback...' });
-    const videoOutDir = path.join(this.config.outputDir, 'videos');
-    fs.mkdirSync(videoOutDir, { recursive: true });
-    const webVideoPath = path.join(videoOutDir, `${path.basename(originalPath, path.extname(originalPath))}.mp4`);
-
-    const needsTranscode = await this.videoNeedsTranscode(originalPath);
-    if (needsTranscode) {
-      console.log(`[Processor] Transcoding video to H.264 for web playback...`);
-      await new Promise<void>((resolve, reject) => {
+      await this.runFfmpeg(
         ffmpeg(originalPath)
-          .videoCodec('libx264')
-          .addOption('-preset', 'fast')
-          .addOption('-crf', '23')
-          .addOption('-movflags', '+faststart')
-          .audioCodec('aac')
-          .output(webVideoPath)
-          .on('end', () => resolve())
-          .on('error', (err: Error) => reject(err))
-          .run();
-      });
-      console.log(`[Processor] Video transcoded to: ${webVideoPath}`);
-    } else {
-      // Already H.264 — copy to output directory
-      if (originalPath !== webVideoPath) {
-        fs.copyFileSync(originalPath, webVideoPath);
-      }
-      console.log(`[Processor] Video already H.264, copied to: ${webVideoPath}`);
-    }
+          .noVideo()
+          .audioCodec('pcm_s16le')
+          .audioFrequency(16000)
+          .audioChannels(1)
+          .output(audioPath),
+        signal,
+      );
+      this.throwIfCancelled(signal, task.recordingId);
+      console.log(`[Processor] Audio extracted to: ${audioPath}`);
 
-    // 2. Pre-create recording with video media_type so audio pipeline reuses it
-    let recordedAt: string | undefined;
-    if (task.recordingId) {
-      recordingId = task.recordingId;
-      this.db.clearRecordingData(recordingId);
-    } else {
-      const existingRec = this.db.getRecordingByPath(originalPath);
-      if (existingRec) {
-        recordingId = existingRec.id;
+      // 1.5. Transcode video to H.264 MP4 for web playback (Chromium doesn't support HEVC)
+      this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 3, notes: 'Transcoding video for playback...' });
+      const videoOutDir = path.join(this.config.outputDir, 'videos');
+      fs.mkdirSync(videoOutDir, { recursive: true });
+      const webVideoPath = path.join(videoOutDir, `${path.basename(originalPath, path.extname(originalPath))}.mp4`);
+
+      const needsTranscode = await this.videoNeedsTranscode(originalPath);
+      this.throwIfCancelled(signal, task.recordingId);
+      if (needsTranscode) {
+        console.log(`[Processor] Transcoding video to H.264 for web playback...`);
+        await this.runFfmpeg(
+          ffmpeg(originalPath)
+            .videoCodec('libx264')
+            .addOption('-preset', 'fast')
+            .addOption('-crf', '23')
+            .addOption('-movflags', '+faststart')
+            .audioCodec('aac')
+            .output(webVideoPath),
+          signal,
+        );
+        this.throwIfCancelled(signal, task.recordingId);
+        console.log(`[Processor] Video transcoded to: ${webVideoPath}`);
+      } else {
+        // Already H.264 — copy to output directory
+        if (originalPath !== webVideoPath) {
+          fs.copyFileSync(originalPath, webVideoPath);
+        }
+        this.throwIfCancelled(signal, task.recordingId);
+        console.log(`[Processor] Video already H.264, copied to: ${webVideoPath}`);
+      }
+
+      // 2. Pre-create recording with video media_type so audio pipeline reuses it
+      let recordedAt: string | undefined;
+      if (task.recordingId) {
+        recordingId = task.recordingId;
         this.db.clearRecordingData(recordingId);
       } else {
-        try {
-          const stat = fs.statSync(originalPath);
-          recordedAt = stat.mtime.toISOString();
-        } catch { /* ignore */ }
-        recordingId = this.db.insertRecording({
-          file_path: webVideoPath,
-          file_name: fileName,
-          media_type: 'video',
-          recorded_at: recordedAt,
-        });
-      }
-    }
-    // Update file_path to transcoded version for playback
-    this.db.updateRecordingFilePath(recordingId, webVideoPath);
-    this.db.updateRecordingStatus(recordingId, 'processing');
-
-    // 3. Extract keyframes and analyze with multimodal LLM
-    const frameSegmentIds: number[] = [];
-    try {
-      this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 5, notes: 'Extracting keyframes...' });
-      const framePaths = await this.extractKeyframes(originalPath, this.config.tempDir);
-
-      if (framePaths.length > 0) {
-        this.taskQueue.updateTask(task.id, { status: 'transcribing', progress: 10, notes: 'Analyzing keyframes with AI...' });
-        // Limit to 5 frames max and cap each at 1MB base64 to prevent OOM
-        const MAX_FRAME_BASE64 = 1_000_000; // ~750KB raw
-        const base64Frames: string[] = [];
-        for (const fp of framePaths.slice(0, 5)) {
+        const existingRec = this.db.getRecordingByPath(originalPath);
+        if (existingRec) {
+          recordingId = existingRec.id;
+          this.db.clearRecordingData(recordingId);
+        } else {
           try {
-            const b64 = readImageAsBase64(fp);
-            if (b64.length <= MAX_FRAME_BASE64) {
-              base64Frames.push(b64);
-            } else {
-              console.log(`[Processor] Skipping oversized keyframe (${(b64.length / 1024).toFixed(0)}KB base64): ${path.basename(fp)}`);
-            }
-          } catch (err) {
-            console.warn(`[Processor] Failed to encode keyframe ${path.basename(fp)}:`, err);
-          }
-        }
-        console.log(`[Processor] Encoded ${base64Frames.length}/${framePaths.length} keyframes for LLM analysis`);
-
-        const settings = loadSettings();
-
-        interface VideoFrameAnalysis {
-          scene_description: string;
-          ocr_text: string;
-        }
-
-        let analysis: VideoFrameAnalysis = { scene_description: '', ocr_text: '' };
-        try {
-          const result = await this.llmClient.generateJSON<VideoFrameAnalysis>({
-            model: this.llmModel,
-            prompt: getPipelinePrompt('videoAnalysis', settings.language),
-            images: base64Frames,
-            temperature: 0.1,
-            num_ctx: 8192,
-            num_predict: 2048,
+            const stat = fs.statSync(originalPath);
+            recordedAt = stat.mtime.toISOString();
+          } catch { /* ignore */ }
+          recordingId = this.db.insertRecording({
+            file_path: webVideoPath,
+            file_name: fileName,
+            media_type: 'video',
+            recorded_at: recordedAt,
           });
-          analysis = {
-            scene_description: result.scene_description || '',
-            ocr_text: result.ocr_text || '',
-          };
-          console.log(`[Processor] Video keyframe analysis done — scene: ${analysis.scene_description.length} chars, OCR: ${analysis.ocr_text.length} chars`);
-        } catch (err) {
-          console.warn('[Processor] Video keyframe AI analysis failed:', err);
-        }
-
-        // Insert frame analysis segments
-        if (analysis.scene_description?.trim()) {
-          const descSegId = this.db.insertSegment({
-            recording_id: recordingId,
-            raw_text: analysis.scene_description.trim(),
-            clean_text: analysis.scene_description.trim(),
-            start_time: 0,
-            end_time: 0,
-            source: 'video_frame',
-          });
-          frameSegmentIds.push(descSegId);
-        }
-
-        if (analysis.ocr_text?.trim()) {
-          const ocrSegId = this.db.insertSegment({
-            recording_id: recordingId,
-            raw_text: analysis.ocr_text.trim(),
-            clean_text: analysis.ocr_text.trim(),
-            start_time: 0,
-            end_time: 0,
-            source: 'video_frame',
-          });
-          frameSegmentIds.push(ocrSegId);
-        }
-
-        // Items auto-extraction disabled — items are created on-demand via agent/manual
-
-        // Clean up temp frame files
-        for (const fp of framePaths) {
-          try { fs.unlinkSync(fp); } catch { /* ignore */ }
         }
       }
-    } catch (err) {
-      console.warn('[Processor] Video keyframe extraction/analysis failed, continuing with audio only:', err);
-    }
+      task.recordingId = recordingId;
+      // Update file_path to transcoded version for playback
+      this.db.updateRecordingFilePath(recordingId, webVideoPath);
+      this.db.updateRecordingStatus(recordingId, 'processing');
+      this.throwIfCancelled(signal, recordingId);
 
-    // 4. Delegate to audio pipeline
-    this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 15, notes: 'Processing audio track...' });
-    task.filePath = audioPath;
-    task.recordingId = recordingId;
-
-    // Run audio pipeline
-    await this.processFile(task);
-    task.filePath = originalPath;
-    task.recordingId = recordingId;
-
-    // 5. Index frame analysis segments (after audio pipeline, which sets up queryEngine indexing)
-    if (frameSegmentIds.length > 0 && this.queryEngine) {
+      // 3. Extract keyframes and analyze with multimodal LLM
+      const frameSegmentIds: number[] = [];
       try {
-        for (const segId of frameSegmentIds) {
-          const seg = this.db.getSegment(segId);
-          const text = seg?.clean_text || seg?.raw_text || '';
-          if (text.length > 10) {
-            await this.queryEngine.indexSegment(segId, text);
+        this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 5, notes: 'Extracting keyframes...' });
+        const framePaths = await this.extractKeyframes(originalPath, this.config.tempDir, signal);
+        this.throwIfCancelled(signal, recordingId);
+
+        if (framePaths.length > 0) {
+          this.taskQueue.updateTask(task.id, { status: 'transcribing', progress: 10, notes: 'Analyzing keyframes with AI...' });
+          // Limit to 5 frames max and cap each at 1MB base64 to prevent OOM
+          const MAX_FRAME_BASE64 = 1_000_000; // ~750KB raw
+          const base64Frames: string[] = [];
+          for (const fp of framePaths.slice(0, 5)) {
+            this.throwIfCancelled(signal, recordingId);
+            try {
+              const b64 = readImageAsBase64(fp);
+              if (b64.length <= MAX_FRAME_BASE64) {
+                base64Frames.push(b64);
+              } else {
+                console.log(`[Processor] Skipping oversized keyframe (${(b64.length / 1024).toFixed(0)}KB base64): ${path.basename(fp)}`);
+              }
+            } catch (err) {
+              console.warn(`[Processor] Failed to encode keyframe ${path.basename(fp)}:`, err);
+            }
+          }
+          console.log(`[Processor] Encoded ${base64Frames.length}/${framePaths.length} keyframes for LLM analysis`);
+
+          const settings = loadSettings();
+
+          interface VideoFrameAnalysis {
+            scene_description: string;
+            ocr_text: string;
+          }
+
+          let analysis: VideoFrameAnalysis = { scene_description: '', ocr_text: '' };
+          try {
+            const result = await this.llmClient.generateJSON<VideoFrameAnalysis>({
+              model: this.llmModel,
+              prompt: getPipelinePrompt('videoAnalysis', settings.language),
+              images: base64Frames,
+              temperature: 0.1,
+              num_ctx: 8192,
+              num_predict: 2048,
+            });
+            this.throwIfCancelled(signal, recordingId);
+            analysis = {
+              scene_description: result.scene_description || '',
+              ocr_text: result.ocr_text || '',
+            };
+            console.log(`[Processor] Video keyframe analysis done — scene: ${analysis.scene_description.length} chars, OCR: ${analysis.ocr_text.length} chars`);
+          } catch (err) {
+            if (isTaskCancelledError(err)) throw err;
+            console.warn('[Processor] Video keyframe AI analysis failed:', err);
+          }
+
+          // Insert frame analysis segments
+          if (analysis.scene_description?.trim()) {
+            this.throwIfCancelled(signal, recordingId);
+            const descSegId = this.db.insertSegment({
+              recording_id: recordingId,
+              raw_text: analysis.scene_description.trim(),
+              clean_text: analysis.scene_description.trim(),
+              start_time: 0,
+              end_time: 0,
+              source: 'video_frame',
+            });
+            frameSegmentIds.push(descSegId);
+          }
+
+          if (analysis.ocr_text?.trim()) {
+            this.throwIfCancelled(signal, recordingId);
+            const ocrSegId = this.db.insertSegment({
+              recording_id: recordingId,
+              raw_text: analysis.ocr_text.trim(),
+              clean_text: analysis.ocr_text.trim(),
+              start_time: 0,
+              end_time: 0,
+              source: 'video_frame',
+            });
+            frameSegmentIds.push(ocrSegId);
+          }
+
+          // Items auto-extraction disabled — items are created on-demand via agent/manual
+
+          // Clean up temp frame files
+          for (const fp of framePaths) {
+            try { fs.unlinkSync(fp); } catch { /* ignore */ }
           }
         }
-        console.log(`[Processor] Video: indexed ${frameSegmentIds.length} frame analysis segments`);
-      } catch (err: any) {
-        console.warn(`[Processor] Video frame vector indexing failed (non-fatal): ${err?.message || err}`);
+      } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
+        console.warn('[Processor] Video keyframe extraction/analysis failed, continuing with audio only:', err);
       }
-    }
+
+      // 4. Delegate to audio pipeline
+      this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 15, notes: 'Processing audio track...' });
+      task.recordingId = recordingId;
+
+      // Run audio pipeline
+      this.throwIfCancelled(signal, recordingId);
+      await this.processFile({
+        ...task,
+        filePath: audioPath,
+        mediaType: 'audio',
+        recordingId,
+      }, signal);
+      this.throwIfCancelled(signal, recordingId);
+      task.recordingId = recordingId;
+
+      // 5. Index frame analysis segments (after audio pipeline, which sets up queryEngine indexing)
+      if (frameSegmentIds.length > 0 && this.queryEngine) {
+        try {
+          for (const segId of frameSegmentIds) {
+            this.throwIfCancelled(signal, recordingId);
+            const seg = this.db.getSegment(segId);
+            const text = seg?.clean_text || seg?.raw_text || '';
+            if (text.length > 10) {
+              await this.queryEngine.indexSegment(segId, text);
+              this.throwIfCancelled(signal, recordingId);
+            }
+          }
+          console.log(`[Processor] Video: indexed ${frameSegmentIds.length} frame analysis segments`);
+        } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
+          console.warn(`[Processor] Video frame vector indexing failed (non-fatal): ${err?.message || err}`);
+        }
+      }
     } catch (err: any) {
       const message = err?.message || String(err);
       task.filePath = originalPath;
       if (recordingId) task.recordingId = recordingId;
+      if (isTaskCancelledError(err)) {
+        console.log(`[Processor] Video pipeline cancelled for ${fileName}`);
+        if (recordingId) {
+          try { this.db.updateRecordingStatus(recordingId, 'cancelled'); } catch { /* ignore */ }
+        }
+        throw err;
+      }
       console.error(`[Processor] Video pipeline fatal error for ${fileName}:`, err);
       this.taskQueue.updateTask(task.id, {
         status: 'failed',
@@ -1540,26 +1718,29 @@ export class Processor {
    * Extract keyframes from a video file using ffmpeg.
    * Returns an array of JPEG file paths in the output directory.
    */
-  private async extractKeyframes(videoPath: string, outputDir: string): Promise<string[]> {
+  private async extractKeyframes(videoPath: string, outputDir: string, signal?: AbortSignal): Promise<string[]> {
     const ffmpegPaths = getFFmpegManager().find();
     if (!ffmpegPaths) {
       console.warn('[Processor] ffmpeg/ffprobe not found, skipping keyframe extraction');
       return [];
     }
+    this.throwIfCancelled(signal);
 
     // Probe video duration
     let durationSec = 0;
     try {
-      const probeOut = execFileSync(ffmpegPaths.ffprobe, [
+      const probeOut = (await this.runExecFile(ffmpegPaths.ffprobe, [
         '-v', 'error',
         '-show_entries', 'format=duration',
         '-of', 'csv=p=0',
         videoPath,
-      ], { timeout: 15_000 }).toString().trim();
+      ], { timeout: 15_000 }, signal)).trim();
       durationSec = parseFloat(probeOut) || 0;
     } catch (err) {
+      if (isTaskCancelledError(err)) throw err;
       console.warn('[Processor] Could not probe video duration:', err);
     }
+    this.throwIfCancelled(signal);
 
     // Determine number of frames based on duration
     let maxFrames: number;
@@ -1580,18 +1761,20 @@ export class Processor {
     const interval = durationSec > 0 ? Math.max(1, Math.floor(durationSec / maxFrames)) : 10;
 
     try {
-      execFileSync(ffmpegPaths.ffmpeg, [
+      await this.runExecFile(ffmpegPaths.ffmpeg, [
         '-i', videoPath,
         '-vf', `fps=1/${interval}`,
         '-frames:v', String(maxFrames),
         '-q:v', '3',
         '-y',
         framePattern,
-      ], { timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+      ], { timeout: 60_000, maxBuffer: 10 * 1024 * 1024 }, signal);
     } catch (err: any) {
+      if (isTaskCancelledError(err)) throw err;
       console.warn('[Processor] Keyframe extraction failed:', err.message);
       return [];
     }
+    this.throwIfCancelled(signal);
 
     // Collect extracted frame files
     const framePaths: string[] = [];
@@ -1636,12 +1819,14 @@ export class Processor {
    * Full image processing pipeline: insert recording, copy file, multimodal LLM analysis
    * (description + OCR + key info extraction), vector indexing, memory extraction, markdown output.
    */
-  private async processImage(task: QueueTask): Promise<void> {
+  private async processImage(task: QueueTask, signal?: AbortSignal): Promise<void> {
     const originalPath = task.filePath;
     const fileName = path.basename(originalPath);
+    this.throwIfCancelled(signal, task.recordingId);
     console.log(`[Processor] Image pipeline for: ${fileName}${task.recordingId ? ` (reprocess #${task.recordingId})` : ''}`);
 
-    await this.waitForFileStable(originalPath);
+    await this.waitForFileStable(originalPath, 30000, signal);
+    this.throwIfCancelled(signal, task.recordingId);
 
     // Validate image file size (20 MB limit)
     const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
@@ -1671,9 +1856,11 @@ export class Processor {
         });
       }
     }
+    task.recordingId = recordingId;
     this.db.updateRecordingStatus(recordingId, 'processing');
 
     try {
+      this.throwIfCancelled(signal, recordingId);
       // 2. Copy file to output/images directory
       this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 10, notes: 'Copying image...' });
       const destDir = path.join(this.config.outputDir, 'images');
@@ -1682,6 +1869,7 @@ export class Processor {
       if (originalPath !== destPath) {
         fs.copyFileSync(originalPath, destPath);
       }
+      this.throwIfCancelled(signal, recordingId);
       console.log(`[Processor] Image copied to: ${destPath}`);
 
       // Update file_path to output location (original temp file may be cleaned up)
@@ -1690,6 +1878,7 @@ export class Processor {
       // 3. Read image, resize if needed, and encode to base64
       this.taskQueue.updateTask(task.id, { status: 'transcribing', progress: 20, notes: 'Analyzing image with AI...' });
       const base64Image = readImageAsBase64(originalPath);
+      this.throwIfCancelled(signal, recordingId);
       console.log(`[Processor] Image step 3: Encoded ${(base64Image.length / 1024).toFixed(0)} KB base64`);
 
       // 4. Multimodal LLM analysis (description + OCR + key info)
@@ -1709,12 +1898,14 @@ export class Processor {
           temperature: 0.1,
           num_ctx: 4096,
         });
+        this.throwIfCancelled(signal, recordingId);
         analysis = {
           description: result.description || '',
           ocr_text: result.ocr_text || '',
         };
         console.log(`[Processor] Image step 4: LLM analysis done — description: ${analysis.description.length} chars, OCR: ${analysis.ocr_text.length} chars`);
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Image AI analysis failed, continuing with empty results:', err);
       }
 
@@ -1723,6 +1914,7 @@ export class Processor {
       const segmentIds: number[] = [];
 
       if (analysis.description?.trim()) {
+        this.throwIfCancelled(signal, recordingId);
         const descSegId = this.db.insertSegment({
           recording_id: recordingId,
           raw_text: analysis.description.trim(),
@@ -1736,6 +1928,7 @@ export class Processor {
       }
 
       if (analysis.ocr_text?.trim()) {
+        this.throwIfCancelled(signal, recordingId);
         const ocrSegId = this.db.insertSegment({
           recording_id: recordingId,
           raw_text: analysis.ocr_text.trim(),
@@ -1756,15 +1949,18 @@ export class Processor {
         try {
           let indexed = 0;
           for (const segId of segmentIds) {
+            this.throwIfCancelled(signal, recordingId);
             const seg = this.db.getSegment(segId);
             const text = seg?.clean_text || seg?.raw_text || '';
             if (text.length > 10) {
               await this.queryEngine.indexSegment(segId, text);
+              this.throwIfCancelled(signal, recordingId);
               indexed++;
             }
           }
           console.log(`[Processor] Image step 7: Indexed ${indexed}/${segmentIds.length} segments`);
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn(`[Processor] Image step 7: Vector indexing failed (non-fatal): ${err?.message || err}`);
           this.taskQueue.updateTask(task.id, {
             notes: `向量索引失败，已保留图片分析文本: ${String(err?.message || err).slice(0, 80)}`,
@@ -1772,36 +1968,19 @@ export class Processor {
         }
       }
 
-      // 8. Memory extraction
-      this.taskQueue.updateTask(task.id, { status: 'extracting memories', progress: 80, notes: 'Extracting memories...' });
-      try {
-        const llmClient = createLLMClient(settings);
-        const memoryExtractor = new MemoryExtractor(llmClient, getLLMModel(settings));
-        const allText = segmentIds.map((id) => {
-          const seg = this.db.getSegment(id);
-          return seg?.clean_text || seg?.raw_text || '';
-        }).join('\n');
-        const facts = await memoryExtractor.extract(allText);
-        if (facts.length > 0 && this.memoryManager) {
-          for (const fact of facts) {
-            await this.memoryManager.addFact(fact.fact, fact.category, fact.confidence, [recordingId]);
-          }
-          console.log(`[Processor] Image step 8: Extracted ${facts.length} memories`);
-        }
-      } catch (err) {
-        console.warn('[Processor] Image memory extraction failed:', err);
-      }
-
       // Enqueue knowledge compilation (async, non-blocking)
       try {
+        this.throwIfCancelled(signal, recordingId);
         this.knowledgeCompiler?.enqueue(recordingId);
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn(`[Processor] Knowledge compilation enqueue failed:`, err);
       }
 
       // 9. Markdown output
       this.taskQueue.updateTask(task.id, { status: 'generating notes', progress: 90, notes: 'Generating markdown...' });
       try {
+        this.throwIfCancelled(signal, recordingId);
         const mdGen = new MarkdownGenerator(this.config.outputDir, settings.obsidianWikilinks);
         const today = formatLocalDate();
         const baseName = fileName.replace(/\.[^.]+$/, '');
@@ -1820,6 +1999,7 @@ export class Processor {
           segments,
         });
         mdGen.writeTranscript(today, baseName, transcriptMd);
+        this.throwIfCancelled(signal, recordingId);
 
         if (settings.obsidianAutoExport && settings.obsidianVaultDir) {
           MarkdownGenerator.syncToVault(
@@ -1828,31 +2008,18 @@ export class Processor {
           );
         }
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Image markdown generation failed:', err);
       }
 
-      // 10. Auto-classify tags (Pro feature)
-      if (!this.licenseManager || this.licenseManager.isPro()) {
-        try {
-          const combinedText = segmentIds.map((id) => {
-            const seg = this.db.getSegment(id);
-            return seg?.clean_text || seg?.raw_text || '';
-          }).join(' ');
-          if (combinedText.length > 20) {
-            const tags = await this.optimizer.classifyRecording(combinedText);
-            if (tags.length > 0) this.db.setRecordingTags(recordingId, tags);
-          }
-        } catch (err) {
-          console.warn('[Processor] Image auto-classification failed:', err);
-        }
-      }
-
       // 11. Mark completed
+      this.throwIfCancelled(signal, recordingId);
       this.db.updateRecordingStatus(recordingId, 'completed');
       this.taskQueue.updateTask(task.id, { status: 'completed', progress: 100 });
+      this.runPostCompletionEnrichment(recordingId, segmentIds, 'Image');
       console.log(`[Processor] Image pipeline completed for: ${fileName}`);
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, 'failed');
+      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
       throw err;
     }
   }
@@ -1862,9 +2029,10 @@ export class Processor {
    * Lists image files, creates one recording, analyzes each image via multimodal LLM,
    * inserts segments per image, vector indexes, memory extraction, and markdown output.
    */
-  private async processImageGroup(task: QueueTask): Promise<void> {
+  private async processImageGroup(task: QueueTask, signal?: AbortSignal): Promise<void> {
     const dirPath = task.filePath;
     const groupName = path.basename(dirPath);
+    this.throwIfCancelled(signal, task.recordingId);
     console.log(`[Processor] Image group pipeline for: ${groupName}${task.recordingId ? ` (reprocess #${task.recordingId})` : ''}`);
 
     // 1. List image files in the directory
@@ -1877,6 +2045,7 @@ export class Processor {
     if (imageFiles.length === 0) {
       throw new Error(`No image files found in directory: ${dirPath}`);
     }
+    this.throwIfCancelled(signal, task.recordingId);
     console.log(`[Processor] Image group: found ${imageFiles.length} images`);
 
     // 2. Insert or reuse recording
@@ -1900,14 +2069,17 @@ export class Processor {
         });
       }
     }
+    task.recordingId = recordingId;
     this.db.updateRecordingStatus(recordingId, 'processing');
 
     try {
+      this.throwIfCancelled(signal, recordingId);
       // 3. Copy images to output/images/{groupName}/
       this.taskQueue.updateTask(task.id, { status: 'preprocessing', progress: 8, notes: 'Copying images...' });
       const destDir = path.join(this.config.outputDir, 'images', groupName);
       fs.mkdirSync(destDir, { recursive: true });
       for (const imgFile of imageFiles) {
+        this.throwIfCancelled(signal, recordingId);
         const srcPath = path.join(dirPath, imgFile);
         const destPath = path.join(destDir, imgFile);
         if (srcPath !== destPath) {
@@ -1932,6 +2104,7 @@ export class Processor {
       const perImageResults: Array<{ file: string; description: string; ocr: string }> = [];
 
       for (let i = 0; i < totalImages; i++) {
+        this.throwIfCancelled(signal, recordingId);
         const imgFile = imageFiles[i];
         const imgPath = path.join(dirPath, imgFile);
         const imgLabel = `image ${i + 1}/${totalImages}`;
@@ -1954,6 +2127,7 @@ export class Processor {
 
         // Read, resize if needed, and base64 encode
         const base64Image = readImageAsBase64(imgPath);
+        this.throwIfCancelled(signal, recordingId);
 
         // Multimodal LLM analysis
         let analysis: ImageAnalysis = { description: '', ocr_text: '' };
@@ -1965,12 +2139,14 @@ export class Processor {
             temperature: 0.1,
             num_ctx: 4096,
           });
+          this.throwIfCancelled(signal, recordingId);
           analysis = {
             description: result.description || '',
             ocr_text: result.ocr_text || '',
           };
           console.log(`[Processor] Image group ${imgLabel}: LLM analysis done — desc: ${analysis.description.length} chars, OCR: ${analysis.ocr_text.length} chars`);
         } catch (err) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn(`[Processor] Image group ${imgLabel}: AI analysis failed, continuing:`, err);
         }
 
@@ -1982,6 +2158,7 @@ export class Processor {
 
         // Insert segments for this image
         if (analysis.description?.trim()) {
+          this.throwIfCancelled(signal, recordingId);
           const descSegId = this.db.insertSegment({
             recording_id: recordingId,
             raw_text: `[${imgLabel}] ${analysis.description.trim()}`,
@@ -1994,6 +2171,7 @@ export class Processor {
         }
 
         if (analysis.ocr_text?.trim()) {
+          this.throwIfCancelled(signal, recordingId);
           const ocrSegId = this.db.insertSegment({
             recording_id: recordingId,
             raw_text: `[${imgLabel}] ${analysis.ocr_text.trim()}`,
@@ -2015,15 +2193,18 @@ export class Processor {
         try {
           let indexed = 0;
           for (const segId of allSegmentIds) {
+            this.throwIfCancelled(signal, recordingId);
             const seg = this.db.getSegment(segId);
             const text = seg?.clean_text || seg?.raw_text || '';
             if (text.length > 10) {
               await this.queryEngine.indexSegment(segId, text);
+              this.throwIfCancelled(signal, recordingId);
               indexed++;
             }
           }
           console.log(`[Processor] Image group: indexed ${indexed}/${allSegmentIds.length} segments`);
         } catch (err: any) {
+          if (isTaskCancelledError(err)) throw err;
           console.warn(`[Processor] Image group vector indexing failed (non-fatal): ${err?.message || err}`);
           this.taskQueue.updateTask(task.id, {
             notes: `向量索引失败，已保留图片组分析文本: ${String(err?.message || err).slice(0, 80)}`,
@@ -2031,38 +2212,19 @@ export class Processor {
         }
       }
 
-      // 7. Memory extraction
-      this.taskQueue.updateTask(task.id, { status: 'extracting memories', progress: 88, notes: 'Extracting memories...' });
-      try {
-        const llmClient = createLLMClient(settings);
-        const memoryExtractor = new MemoryExtractor(llmClient, getLLMModel(settings));
-        const allText = allSegmentIds.map((id) => {
-          const seg = this.db.getSegment(id);
-          return seg?.clean_text || seg?.raw_text || '';
-        }).join('\n');
-        if (allText.trim().length > 10) {
-          const facts = await memoryExtractor.extract(allText);
-          if (facts.length > 0 && this.memoryManager) {
-            for (const fact of facts) {
-              await this.memoryManager.addFact(fact.fact, fact.category, fact.confidence, [recordingId]);
-            }
-            console.log(`[Processor] Image group: extracted ${facts.length} memories`);
-          }
-        }
-      } catch (err) {
-        console.warn('[Processor] Image group memory extraction failed:', err);
-      }
-
       // Enqueue knowledge compilation (async, non-blocking)
       try {
+        this.throwIfCancelled(signal, recordingId);
         this.knowledgeCompiler?.enqueue(recordingId);
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn(`[Processor] Knowledge compilation enqueue failed:`, err);
       }
 
       // 8. Markdown output (one section per image)
       this.taskQueue.updateTask(task.id, { status: 'generating notes', progress: 92, notes: 'Generating markdown...' });
       try {
+        this.throwIfCancelled(signal, recordingId);
         const mdGen = new MarkdownGenerator(this.config.outputDir, settings.obsidianWikilinks);
         const today = formatLocalDate();
 
@@ -2086,6 +2248,7 @@ export class Processor {
           segments,
         });
         mdGen.writeTranscript(today, groupName, transcriptMd);
+        this.throwIfCancelled(signal, recordingId);
 
         if (settings.obsidianAutoExport && settings.obsidianVaultDir) {
           MarkdownGenerator.syncToVault(
@@ -2094,31 +2257,18 @@ export class Processor {
           );
         }
       } catch (err) {
+        if (isTaskCancelledError(err)) throw err;
         console.warn('[Processor] Image group markdown generation failed:', err);
       }
 
-      // 9. Auto-classify tags (Pro feature)
-      if (!this.licenseManager || this.licenseManager.isPro()) {
-        try {
-          const combinedText = allSegmentIds.map((id) => {
-            const seg = this.db.getSegment(id);
-            return seg?.clean_text || seg?.raw_text || '';
-          }).join(' ');
-          if (combinedText.length > 20) {
-            const tags = await this.optimizer.classifyRecording(combinedText);
-            if (tags.length > 0) this.db.setRecordingTags(recordingId, tags);
-          }
-        } catch (err) {
-          console.warn('[Processor] Image group auto-classification failed:', err);
-        }
-      }
-
       // 10. Mark completed
+      this.throwIfCancelled(signal, recordingId);
       this.db.updateRecordingStatus(recordingId, 'completed');
       this.taskQueue.updateTask(task.id, { status: 'completed', progress: 100 });
+      this.runPostCompletionEnrichment(recordingId, allSegmentIds, 'Image group');
       console.log(`[Processor] Image group pipeline completed for: ${groupName} (${totalImages} images)`);
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, 'failed');
+      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
       throw err;
     }
   }

@@ -1,6 +1,4 @@
 import { DatabaseSync } from 'node:sqlite';
-import * as fs from 'fs';
-import * as path from 'path';
 import type { MeetingNotes } from '../llm/text-optimizer';
 import { formatLocalDate } from '../utils/date';
 import { transaction } from './sqlite-util';
@@ -1565,7 +1563,7 @@ export class VoiceBrainDB {
     is_finalized?: 0 | 1;
   }): void {
     const sets: string[] = [];
-    const vals: unknown[] = [];
+    const vals: any[] = [];
     if (patch.topic !== undefined) { sets.push('topic = ?'); vals.push(patch.topic); }
     if (patch.summary !== undefined) { sets.push('summary = ?'); vals.push(patch.summary); }
     if (patch.importance_score !== undefined) { sets.push('importance_score = ?'); vals.push(patch.importance_score); }
@@ -1746,15 +1744,15 @@ export class VoiceBrainDB {
     this.db.prepare('UPDATE recordings SET tags = ? WHERE id = ?').run(JSON.stringify(tags), id);
   }
 
-  /** Reset any recordings stuck in 'processing' or 'pending' status (e.g. after a crash). Returns count. */
+  /** Reset any recordings stuck in active statuses (e.g. after a crash). Returns count. */
   recoverStuckRecordings(): number {
     const result = this.db
-      .prepare("UPDATE recordings SET status = 'failed' WHERE status IN ('processing', 'pending')")
+      .prepare("UPDATE recordings SET status = 'failed' WHERE status IN ('processing', 'pending', 'recording', 'post_processing')")
       .run();
     if (result.changes > 0) {
-      console.log(`[DB] Recovered ${result.changes} stuck recording(s) from 'processing'/'pending' → 'failed'`);
+      console.log(`[DB] Recovered ${result.changes} stuck recording(s) from active statuses → 'failed'`);
     }
-    return result.changes;
+    return Number(result.changes);
   }
 
   /**
@@ -2067,24 +2065,38 @@ export class VoiceBrainDB {
 
   deleteRecording(id: number): void {
     const tx = transaction(this.db, () => {
+      const rec = this.db.prepare('SELECT file_path FROM recordings WHERE id = ?')
+        .get(id) as { file_path?: string } | undefined;
+
+      // Delete recording-scoped queue/projection data first. Some tables were
+      // created before ON DELETE CASCADE was consistently used, so be explicit.
+      try { this.db.prepare('DELETE FROM task_queue WHERE recording_id = ? OR file_path = ?').run(id, rec?.file_path ?? ''); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM compilation_queue WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM meeting_notes WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM speaker_match_suggestions WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM speaker_relationships WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM person_match_suggestions WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM person_relationships WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+      try { this.db.prepare('DELETE FROM recording_chat_messages WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
+
       // Delete extracted items linked to segments of this recording
       this.db.prepare(`
         DELETE FROM extracted_items WHERE segment_id IN (
           SELECT id FROM segments WHERE recording_id = ?
         )
       `).run(id);
-      // Delete FTS entries
+      // Delete content-person links linked to segments of this recording
       this.db.prepare(`
-        DELETE FROM segments_fts WHERE rowid IN (
+        DELETE FROM content_person_links WHERE segment_id IN (
           SELECT id FROM segments WHERE recording_id = ?
         )
       `).run(id);
+      // Delete FTS entries
+      const segIds = this.db.prepare('SELECT id FROM segments WHERE recording_id = ?')
+        .all(id) as { id: number }[];
+      this.deleteSegmentsFtsRows(segIds.map(s => s.id));
       // Delete segments
       this.db.prepare('DELETE FROM segments WHERE recording_id = ?').run(id);
-      // Delete scoped chat history
-      try {
-        this.db.prepare('DELETE FROM recording_chat_messages WHERE recording_id = ?').run(id);
-      } catch { /* table may not yet exist on very old DBs */ }
       // Delete recording
       this.db.prepare('DELETE FROM recordings WHERE id = ?').run(id);
     });
@@ -3846,7 +3858,7 @@ export class VoiceBrainDB {
     title: string,
     url: string,
     metadataJson: string,
-    updatedAt: string,
+    _updatedAt: string,
   ): number {
     const existing = this.db.prepare(
       'SELECT id FROM external_documents WHERE source = ? AND domain = ? AND external_id = ?'

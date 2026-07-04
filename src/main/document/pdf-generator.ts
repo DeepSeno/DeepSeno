@@ -40,7 +40,6 @@ export async function generatePdf(options: PdfOptions, outputDir: string): Promi
     doc.registerFont('CJK', fontPath);
   }
   const fontName = fontPath ? 'CJK' : 'Helvetica';
-  const fontBold = fontPath ? 'CJK' : 'Helvetica-Bold';
 
   // Output stream
   fs.mkdirSync(outputDir, { recursive: true });

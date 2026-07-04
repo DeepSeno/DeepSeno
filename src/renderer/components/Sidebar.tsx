@@ -6,7 +6,6 @@ import {
 import logoIcon from '../assets/logo-icon.jpg';
 import { useI18n } from '../i18n';
 import { useApi } from '../hooks/useApi';
-import { useLicense } from '../hooks/useLicense';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { LucideIcon } from 'lucide-react';
 import { useFeatureLevel, meetsLevel } from '../hooks/useFeatureLevel';
@@ -28,14 +27,11 @@ interface MenuItem {
   icon: LucideIcon;
   label: string;
   minLevel: FeatureLevel;
-  requiresPro?: boolean;
 }
 
 export default function Sidebar() {
   const { t, lang } = useI18n();
   const api = useApi();
-  const { tier, status } = useLicense();
-  const trialDays = status?.trial.daysRemaining || 0;
   const location = useLocation();
   const navigate = useNavigate();
   const [apiOnline, setApiOnline] = useState(false);
@@ -87,15 +83,15 @@ export default function Sidebar() {
       label: t.nav_knowledge,
       items: [
         { id: 'knowledge', path: '/knowledge', icon: Network, label: t.menu.knowledge_graph, minLevel: 'intermediate' },
-        { id: 'reports', path: '/reports', icon: BarChart3, label: t.menu.reports, minLevel: 'advanced', requiresPro: true },
+        { id: 'reports', path: '/reports', icon: BarChart3, label: t.menu.reports, minLevel: 'advanced' },
       ],
     },
     {
       label: t.nav_ai,
       items: [
         { id: 'assistant', path: '/assistant', icon: MessageSquare, label: t.menu.chat, minLevel: 'beginner' },
-        { id: 'memories', path: '/memories', icon: Brain, label: t.menu.memories, minLevel: 'intermediate' as FeatureLevel, requiresPro: true },
-        { id: 'soul', path: '/soul', icon: Bot, label: t.menu.soul, minLevel: 'intermediate' as FeatureLevel, requiresPro: true },
+        { id: 'memories', path: '/memories', icon: Brain, label: t.menu.memories, minLevel: 'intermediate' as FeatureLevel },
+        { id: 'soul', path: '/soul', icon: Bot, label: t.menu.soul, minLevel: 'intermediate' as FeatureLevel },
         ...pluginPageItems,
       ],
     },
@@ -104,9 +100,9 @@ export default function Sidebar() {
       items: [
         { id: 'models', path: '/models', icon: Cpu, label: t.menu.models, minLevel: 'beginner' },
         { id: 'plugins', path: '/plugins', icon: Puzzle, label: t.menu.skills, minLevel: 'intermediate' as FeatureLevel },
-        { id: 'channels', path: '/channels', icon: Zap, label: t.menu.channels, minLevel: 'intermediate', requiresPro: true },
-        { id: 'feishu-cli-source', path: '/feishu-cli-source', icon: Cloud, label: t.menu.feishu_cli_source || '第三方数据源', minLevel: 'intermediate', requiresPro: true },
-        { id: 'scheduler', path: '/scheduler', icon: Clock, label: t.menu.scheduler, minLevel: 'advanced' as FeatureLevel, requiresPro: true },
+        { id: 'channels', path: '/channels', icon: Zap, label: t.menu.channels, minLevel: 'intermediate' },
+        { id: 'feishu-cli-source', path: '/feishu-cli-source', icon: Cloud, label: t.menu.feishu_cli_source || '第三方数据源', minLevel: 'intermediate' },
+        { id: 'scheduler', path: '/scheduler', icon: Clock, label: t.menu.scheduler, minLevel: 'advanced' as FeatureLevel },
         { id: 'settings', path: '/settings', icon: Settings, label: t.menu.settings, minLevel: 'beginner' },
       ],
     },
@@ -118,9 +114,8 @@ export default function Sidebar() {
       items: group.items.filter((item) => meetsLevel(featureLevel, item.minLevel)),
     }))
     .filter((group) => group.items.length > 0);
-
-  // tier labels are under t.settings — look up there, fall back to literal tier
-  const tierLabel = ((t.settings as any)?.[`license_tier_${tier}`]) || tier;
+  const onlineLabel = (t.settings as any).status_online || 'Online';
+  const offlineLabel = (t.settings as any).status_offline || 'Offline';
 
   return (
     <aside className="side" style={{ width: 240, flexShrink: 0 }}>
@@ -163,11 +158,10 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer — license + version + online dot */}
+      {/* Footer */}
       <div className="side__foot">
-        <span className="side__foot-license" title={apiOnline ? t.status_online : t.status_offline}>
-          {tierLabel}
-          {tier === 'trial' && trialDays > 0 ? ` · ${trialDays}d` : ''}
+        <span className="side__foot-license" title={apiOnline ? onlineLabel : offlineLabel}>
+          {apiOnline ? onlineLabel : offlineLabel}
         </span>
         <span>v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.1.0'}</span>
       </div>

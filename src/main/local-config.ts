@@ -40,14 +40,16 @@ export function loadLocalConfig(): LocalConfig {
   if (cached) return { ...cached };
   try {
     const raw = fs.readFileSync(getConfigPath(), 'utf-8');
-    const parsed = JSON.parse(raw);
-    // Ensure machineId is set (UUID for uniqueness, hostname is in lock file for display)
+    const parsed = JSON.parse(raw) as Partial<LocalConfig>;
+    const next: LocalConfig = {
+      ...DEFAULTS,
+      ...parsed,
+      machineId: parsed.machineId || randomUUID(),
+    };
     if (!parsed.machineId) {
-      parsed.machineId = randomUUID();
-      // Persist immediately so it stays stable
-      saveLocalConfig({ ...DEFAULTS, ...parsed });
+      saveLocalConfig(next);
     }
-    cached = { ...DEFAULTS, ...parsed };
+    cached = next;
   } catch {
     cached = { ...DEFAULTS, machineId: randomUUID() };
     // Persist defaults with generated machineId

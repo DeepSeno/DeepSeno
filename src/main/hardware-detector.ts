@@ -10,17 +10,6 @@ export interface HardwareInfo {
   recommendedQuality: 'basic' | 'good' | 'excellent';
 }
 
-// Model catalog sorted by size — Qwen 3.5 series only
-const MODEL_CATALOG: { name: string; runGB: number; perf: number }[] = [
-  { name: 'qwen3.5:4b',   runGB: 6,  perf: 70 },
-  { name: 'qwen3.5:9b',   runGB: 10, perf: 78 },
-  { name: 'qwen3.5:27b',  runGB: 22, perf: 86 },
-  { name: 'qwen3.5:35b',  runGB: 30, perf: 85 },
-  { name: 'qwen3.5:122b', runGB: 88, perf: 90 },
-];
-
-const SYSTEM_OVERHEAD_GB = 6;
-
 export function detectHardware(): HardwareInfo {
   const totalGB = Math.round(os.totalmem() / (1024 ** 3));
 

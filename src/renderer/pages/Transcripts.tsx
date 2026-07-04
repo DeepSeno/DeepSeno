@@ -16,6 +16,28 @@ import type { Conversation, Message, ExtractedItem, SearchResult, LiveSegment } 
 import { classifyContent } from './transcripts/types';
 import { deriveRecordingTitle } from '../utils/recordingTitle';
 
+const LEFT_PANEL_STORAGE_KEY = 'deepseno-transcripts-left-panel-width';
+const RIGHT_PANEL_STORAGE_KEY = 'deepseno-transcripts-right-panel-width';
+const LEFT_PANEL_MIN = 240;
+const LEFT_PANEL_MAX = 420;
+const RIGHT_PANEL_MIN = 300;
+const RIGHT_PANEL_MAX = 560;
+const CENTER_PANEL_MIN = 420;
+
+function readStoredPanelWidth(key: string, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(key);
+    const value = raw ? Number(raw) : NaN;
+    return Number.isFinite(value) ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 export default function Transcripts() {
   const { t, lang } = useI18n();
   const api = useApi();
@@ -41,8 +63,10 @@ export default function Transcripts() {
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [highlightedSegment, setHighlightedSegment] = useState<number | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
-  const [rightPanelWidth, setRightPanelWidth] = useState(380);
-  const isDragging = useRef(false);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(() => readStoredPanelWidth(LEFT_PANEL_STORAGE_KEY, 300));
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => readStoredPanelWidth(RIGHT_PANEL_STORAGE_KEY, 380));
+  const leftDragging = useRef(false);
+  const rightDragging = useRef(false);
 
   // Live mode state
   const [liveRecordingId, setLiveRecordingId] = useState<number | null>(null);
@@ -72,11 +96,6 @@ export default function Transcripts() {
   const [showTranscript, setShowTranscript] = useState(true);
   const isCompact = containerWidth < 1024;
   const isMobile = containerWidth < 768;
-  const conversationListWidth = isMobile
-    ? 280
-    : containerWidth >= 1280
-      ? Math.min(360, Math.max(320, Math.round(containerWidth * 0.22)))
-      : 300;
   const showSideQAPanel = showTranscript && !isMobile && containerWidth >= 1100;
 
   // --- Effects ---
@@ -87,6 +106,43 @@ export default function Transcripts() {
     ro.observe(containerRef.current);
     return () => ro.disconnect();
   }, []);
+
+  const getCurrentContainerWidth = useCallback(() => (
+    containerRef.current?.getBoundingClientRect().width || containerWidth
+  ), [containerWidth]);
+
+  const getMaxLeftPanelWidth = useCallback((rightWidth = rightPanelWidth) => {
+    const width = getCurrentContainerWidth();
+    const rightReserve = showSideQAPanel ? rightWidth + 12 : 0;
+    return Math.max(
+      LEFT_PANEL_MIN,
+      Math.min(LEFT_PANEL_MAX, width - CENTER_PANEL_MIN - rightReserve - 12),
+    );
+  }, [getCurrentContainerWidth, rightPanelWidth, showSideQAPanel]);
+
+  const getMaxRightPanelWidth = useCallback((leftWidth = leftPanelWidth) => {
+    const width = getCurrentContainerWidth();
+    return Math.max(
+      RIGHT_PANEL_MIN,
+      Math.min(RIGHT_PANEL_MAX, width - leftWidth - CENTER_PANEL_MIN - 24),
+    );
+  }, [getCurrentContainerWidth, leftPanelWidth]);
+
+  useLayoutEffect(() => {
+    if (isMobile) return;
+    setLeftPanelWidth((width) => clamp(width, LEFT_PANEL_MIN, getMaxLeftPanelWidth()));
+    if (showSideQAPanel) {
+      setRightPanelWidth((width) => clamp(width, RIGHT_PANEL_MIN, getMaxRightPanelWidth()));
+    }
+  }, [containerWidth, getMaxLeftPanelWidth, getMaxRightPanelWidth, isMobile, showSideQAPanel]);
+
+  useEffect(() => {
+    try { localStorage.setItem(LEFT_PANEL_STORAGE_KEY, String(leftPanelWidth)); } catch {}
+  }, [leftPanelWidth]);
+
+  useEffect(() => {
+    try { localStorage.setItem(RIGHT_PANEL_STORAGE_KEY, String(rightPanelWidth)); } catch {}
+  }, [rightPanelWidth]);
 
   const attachMediaListeners = useCallback((el: HTMLMediaElement): (() => void) => {
     // Guard: ignore events from inactive media elements to prevent race conditions
@@ -135,23 +191,39 @@ export default function Transcripts() {
 
   useEffect(() => { liveRecordingIdRef.current = liveRecordingId; }, [liveRecordingId]);
 
-  // Drag to resize right panel
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
+  const handleLeftDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    isDragging.current = true;
+    leftDragging.current = true;
     const startX = e.clientX;
-    const startWidth = rightPanelWidth;
+    const startWidth = leftPanelWidth;
     const onMove = (ev: MouseEvent) => {
-      if (!isDragging.current) return;
-      const delta = startX - ev.clientX;
-      setRightPanelWidth(Math.max(280, Math.min(600, startWidth + delta)));
+      if (!leftDragging.current) return;
+      const delta = ev.clientX - startX;
+      setLeftPanelWidth(clamp(startWidth + delta, LEFT_PANEL_MIN, getMaxLeftPanelWidth()));
     };
-    const onUp = () => { isDragging.current = false; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    const onUp = () => { leftDragging.current = false; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-  }, [rightPanelWidth]);
+  }, [getMaxLeftPanelWidth, leftPanelWidth]);
+
+  const handleRightDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    rightDragging.current = true;
+    const startX = e.clientX;
+    const startWidth = rightPanelWidth;
+    const onMove = (ev: MouseEvent) => {
+      if (!rightDragging.current) return;
+      const delta = startX - ev.clientX;
+      setRightPanelWidth(clamp(startWidth + delta, RIGHT_PANEL_MIN, getMaxRightPanelWidth()));
+    };
+    const onUp = () => { rightDragging.current = false; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [getMaxRightPanelWidth, rightPanelWidth]);
 
   const loadRecordingData = useCallback(async (recordingId: number, durationSec?: number, recordedAt?: string | null, mediaType?: string) => {
     const isDoc = ['pdf', 'docx', 'text', 'image'].includes(mediaType || '');
@@ -273,7 +345,7 @@ export default function Transcripts() {
         setLiveStatus('idle'); const finishedId = liveRecordingIdRef.current; setLiveRecordingId(null); setLiveSegments([]); setLiveSelected(false);
         loadConversations().then(() => { const id = (data as any)?.recordingId || finishedId; if (id) setConversations(prev => { const idx = prev.findIndex(c => c.recordingId === id); if (idx >= 0) { setSelectedConv(idx); loadRecordingData(id, prev[idx].durationSeconds, prev[idx].recordedAt, prev[idx].mediaType); } return prev; }); });
       }),
-      api.onLiveError((_evt, error) => { toast('error', tr.live_error, typeof error === 'string' ? error : (error?.message || JSON.stringify(error))); }),
+      api.onLiveError((_evt, error) => { toast('error', tr.live_error, error); }),
     ];
     return () => cleanups.forEach(fn => fn());
   }, [loadConversations, loadRecordingData]);
@@ -388,7 +460,7 @@ export default function Transcripts() {
       const result = await api.updateSegmentText(segmentId, newText);
       if (!result.success) {
         console.error('[Transcripts] Failed to save segment text:', result.error);
-        toast?.({ title: 'Save failed', description: result.error, variant: 'error' });
+        toast('error', 'Save failed', result.error);
       }
     } catch (err) {
       console.error('[Transcripts] Error saving segment text:', err);
@@ -559,10 +631,21 @@ export default function Transcripts() {
           </div>
         )}
 
-        {!isMobile && <ConversationList {...sidebarProps} width={conversationListWidth} />}
+        {!isMobile && (
+          <>
+            <ConversationList {...sidebarProps} width={leftPanelWidth} />
+            <div
+              onMouseDown={handleLeftDragStart}
+              className="group/drag flex-shrink-0 cursor-col-resize flex items-center justify-center relative"
+              style={{ width: 12 }}
+            >
+              <div className="group-hover/drag:bg-[var(--line-strong)] transition-colors" style={{ width: 1, height: '100%', background: 'var(--line)' }} />
+            </div>
+          </>
+        )}
 
         {/* Main content area: per-column headers, no global top bar */}
-        <div className="flex-1 flex min-h-0" style={{ background: 'var(--bg-card)' }}>
+        <div className="flex-1 flex min-h-0 min-w-0" style={{ background: 'var(--bg-card)' }}>
           {(() => {
             const isNonAudio = ['image', 'video', 'pdf', 'docx', 'text'].includes(currentMediaType);
             const transcriptColumn = (
@@ -602,15 +685,14 @@ export default function Transcripts() {
 
             const qaColumn = showSideQAPanel ? (
               <>
-                <div onMouseDown={handleDragStart} className="group/drag flex-shrink-0 cursor-col-resize flex items-center justify-center relative" style={{ width: 12 }}>
+                <div onMouseDown={handleRightDragStart} className="group/drag flex-shrink-0 cursor-col-resize flex items-center justify-center relative" style={{ width: 12 }}>
                   <div className="group-hover/drag:bg-[var(--line-strong)] transition-colors" style={{ width: 1, height: '100%', background: 'var(--line)' }} />
                 </div>
                 <div
                   style={{
-                    /* basis = user-set width via drag, but shrinkable when OS window narrows
-                       so the column never extends past the visible viewport */
-                    flex: `0 1 ${rightPanelWidth}px`,
-                    minWidth: 280,
+                    flex: `0 0 ${rightPanelWidth}px`,
+                    width: rightPanelWidth,
+                    minWidth: RIGHT_PANEL_MIN,
                     background: 'var(--bg-card)',
                     minHeight: 0,
                     overflow: 'hidden',

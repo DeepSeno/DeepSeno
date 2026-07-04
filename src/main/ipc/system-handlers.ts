@@ -1,22 +1,19 @@
 import { app, ipcMain, shell, clipboard, BrowserWindow } from 'electron';
-import { spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import type { IpcContext } from './context';
 import { getLlamaServer } from './context';
-import { loadSettings, updateSettings, AppSettings } from '../settings';
-import { getSherpaModelMirror, getEffectiveMirror } from '../mirror-config';
-import { getDbPath, getVecDbPath, getOutputDir, getEffectiveDataDir, getLLMModelsDir } from '../paths';
+import { loadSettings, updateSettings, type AppSettings } from '../settings';
+import { getSherpaModelMirror } from '../mirror-config';
+import { getDbPath, getVecDbPath, getEffectiveDataDir, getLLMModelsDir } from '../paths';
 import { detectHardware } from '../hardware-detector';
 import { getLLMModel, getEmbedModel } from '../llm/create-client';
-import { OpenAIClient } from '../llm/openai-client';
+import { isExplicitModelNotFoundResponse, OpenAIClient } from '../llm/openai-client';
 import { startFileWatching, cleanupFileWatcher } from './pipeline-handlers';
 import { getFFmpegManager } from '../audio/ffmpeg-manager';
 import { reconfigureFFmpeg } from '../audio/preprocessor';
 import { resetAgentInfrastructure } from './integration-handlers';
 import { requireString, requireUrl, ValidationError } from './validate';
-import { AnalyticsTracker } from '../analytics/tracker';
 import { getDefaultPrompts } from '../llm/default-prompts';
 import { findModel, getDownloadUrl } from '../llm/gguf-model-catalog';
 import { type GGUFDownloadState, ggufDownloadStateStore } from '../llm/gguf-download-state';
@@ -420,7 +417,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
             throw new Error('cloud API is not configured');
           }
           const client = new OpenAIClient(settings.cloudApiUrl, settings.cloudApiKey);
-          const ok = await client.isAvailable();
+          const ok = await client.isAvailable(settings.cloudModel);
           if (!ok) throw new Error('cloud API is not reachable');
           return 'Cloud API';
         }
@@ -459,16 +456,28 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   });
 
   // ─── Cloud API Check ──────────────────────────────────────
-  ipcMain.handle('cloud:check', async (_e, url: string, apiKey: string) => {
+  ipcMain.handle('cloud:check', async (_e, url: string, apiKey: string, model?: string) => {
     if (!url || !apiKey) return { ok: false, error: 'Missing URL or API key' };
     const baseUrl = url.replace(/\/+$/, '');
+    const selectedModel = typeof model === 'string' ? model.trim() : '';
+    const formatHttpError = (status: number, text: string) => {
+      let errorMsg = `HTTP ${status}`;
+      try {
+        const json = JSON.parse(text);
+        errorMsg = json.error?.message || json.message || errorMsg;
+      } catch {
+        if (text) errorMsg += `: ${text.slice(0, 120)}`;
+      }
+      return errorMsg;
+    };
+
     try {
       // Try GET /models first (standard OpenAI endpoint)
       const res = await fetch(`${baseUrl}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(10_000),
       });
-      if (res.ok) return { ok: true };
+      if (res.ok && !selectedModel) return { ok: true };
       // Some providers don't support GET /models — try a minimal chat completion
       if (res.status !== 401 && res.status !== 403) {
         const chatRes = await fetch(`${baseUrl}/chat/completions`, {
@@ -478,29 +487,27 @@ export function registerSystemHandlers(ctx: IpcContext): void {
             Authorization: `Bearer ${apiKey}`,
           },
           body: JSON.stringify({
-            model: 'test',
+            model: selectedModel || 'test',
             messages: [{ role: 'user', content: 'hi' }],
             max_tokens: 1,
           }),
           signal: AbortSignal.timeout(10_000),
         });
-        // 401/403 = bad key; 400/404 with model error = API reachable, key valid
-        if (chatRes.ok || chatRes.status === 400 || chatRes.status === 404) {
+        if (chatRes.ok) {
           return { ok: true };
         }
+
         const text = await chatRes.text().catch(() => '');
-        return { ok: false, error: `HTTP ${chatRes.status}: ${text.slice(0, 120)}` };
+        // Without a selected model, a clear "test model not found" response
+        // still proves that the OpenAI-compatible chat endpoint is reachable.
+        if (!selectedModel && isExplicitModelNotFoundResponse(chatRes.status, text)) {
+          return { ok: true };
+        }
+        return { ok: false, error: formatHttpError(chatRes.status, text) };
       }
       // Auth error or other failure
       const text = await res.text().catch(() => '');
-      let errorMsg = `HTTP ${res.status}`;
-      try {
-        const json = JSON.parse(text);
-        errorMsg = json.error?.message || json.message || errorMsg;
-      } catch {
-        if (text) errorMsg += `: ${text.slice(0, 120)}`;
-      }
-      return { ok: false, error: errorMsg };
+      return { ok: false, error: formatHttpError(res.status, text) };
     } catch (err: any) {
       return { ok: false, error: err.message || 'Connection failed' };
     }
@@ -553,7 +560,11 @@ export function registerSystemHandlers(ctx: IpcContext): void {
     }
 
     const controller = new AbortController();
-    const activeDownload = {
+    const activeDownload: {
+      controller: AbortController;
+      fileKey: string;
+      promise: Promise<{ success: boolean; model: string; error?: string }>;
+    } = {
       controller,
       fileKey,
       promise: Promise.resolve({ success: false, model: entry.id, error: 'not started' }),
@@ -816,10 +827,6 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
   // ─── LLM Auto-Install ──────────────────────────────────
 
-  let localInstallAbort: AbortController | null = null;
-
-
-
   ipcMain.handle('system:openExternal', async (_event, url: string) => {
     const validUrl = requireUrl(url, 'url');
     await shell.openExternal(validUrl);
@@ -839,7 +846,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
     return true;
   });
 
-  ipcMain.handle('system:installLocal', async (event) => {
+  ipcMain.handle('system:installLocal', async () => {
     // llama.cpp is bundled with the app, no installation needed
     return { success: true };
   });
@@ -856,10 +863,6 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
   // ─── License Management ──────────────────────────────────
   ipcMain.handle('license:getStatus', () => {
-    const settings = loadSettings();
-    if (!settings.firstLaunchTime) {
-      updateSettings({ firstLaunchTime: Date.now() });
-    }
     return ctx.getLicenseManager().getStatus();
   });
 
@@ -867,23 +870,13 @@ export function registerSystemHandlers(ctx: IpcContext): void {
     return ctx.getLicenseManager().isPro();
   });
 
-  ipcMain.handle('license:activate', (event, key: string) => {
-    const mgr = ctx.getLicenseManager();
-    const result = mgr.activate(key);
-    if (result.success) {
-      updateSettings({ licenseKey: key });
-      // Re-init processor to inject premium components
-      ctx.reinitSingletons();
-      event.sender.send('license:changed');
-      AnalyticsTracker.getInstance().track('license_activated', { tier: result.tier });
-    }
+  ipcMain.handle('license:activate', async (event, key: string) => {
+    const result = await ctx.getLicenseManager().activate(key);
+    event.sender.send('license:changed');
     return result;
   });
 
   ipcMain.handle('license:deactivate', (event) => {
-    updateSettings({ licenseKey: '' });
-    // Re-init processor to remove premium components
-    ctx.reinitSingletons();
     event.sender.send('license:changed');
     return { success: true };
   });

@@ -1197,59 +1197,6 @@ export class QueryEngine {
     };
   }
 
-  /** Rerank candidates by LLM relevance scoring, return top-5. */
-  private async rerank(
-    question: string,
-    candidates: Array<{ segment_id: number; recording_id?: number; speaker: string; text: string; time: string }>,
-  ): Promise<typeof candidates> {
-    if (candidates.length <= 3) return candidates; // Not enough to rerank
-    try {
-      const t0 = Date.now();
-      const settings = loadSettings();
-      const llmModel = getLLMModel(settings);
-
-      // Build compact numbered list for LLM scoring
-      const numbered = candidates.map((c, i) => `[${i}] ${c.text.slice(0, 200)}`).join('\n');
-      const prompt = `Given the question: "${question}"
-
-Rate each text's relevance (0-10). Return ONLY a JSON array of scores in order, e.g. [8,3,7,...].
-
-${numbered}`;
-
-      const raw = await this.local.generate({
-        model: llmModel,
-        system: getStr('rag.rerank_system'),
-        prompt,
-        temperature: 0,
-        num_ctx: 4096,
-        keep_alive: '30m',
-        think: false,
-      });
-
-      // Parse scores from LLM response
-      const match = raw.match(/\[[\d,\s]+\]/);
-      if (!match) {
-        console.log('[RAG] Rerank: failed to parse scores, using original order');
-        return candidates.slice(0, 5);
-      }
-
-      const scores: number[] = JSON.parse(match[0]);
-      if (scores.length !== candidates.length) {
-        console.log(`[RAG] Rerank: score count mismatch (${scores.length} vs ${candidates.length}), using original order`);
-        return candidates.slice(0, 5);
-      }
-
-      // Sort by score descending, take top 5
-      const scored = candidates.map((c, i) => ({ ...c, score: scores[i] || 0 }));
-      scored.sort((a, b) => b.score - a.score);
-      console.log(`[RAG] Rerank: ${Date.now() - t0}ms, scores=[${scores.join(',')}]`);
-      return scored.slice(0, 5);
-    } catch (err) {
-      console.log(`[RAG] Rerank failed, using original order: ${err}`);
-      return candidates.slice(0, 5);
-    }
-  }
-
   private async buildSystemPrompt(today: string, question?: string, queryEmbedding?: number[]): Promise<string> {
     const sp0 = Date.now();
     let soulPrompt = '';

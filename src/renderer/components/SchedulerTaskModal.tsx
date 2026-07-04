@@ -98,7 +98,7 @@ export default function SchedulerTaskModal({ open, task, onClose, onSaved }: Sch
   const [outputFilePath, setOutputFilePath] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const parseTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const parseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Populate form on edit ──────────────────────────
   useEffect(() => {

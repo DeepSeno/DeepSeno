@@ -30,5 +30,5 @@ export interface MessageChannel {
   sendText(chatId: string, text: string): Promise<void>;
   sendCard(chatId: string, card: MessageCard): Promise<void>;
   sendFile(chatId: string, filePath: string): Promise<void>;
-  sendImage(chatId: string, imageData: Buffer, mimeType: string): Promise<void>;
+  sendImage?(chatId: string, imageData: Buffer, mimeType: string): Promise<void>;
 }

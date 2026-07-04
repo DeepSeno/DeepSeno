@@ -10,7 +10,6 @@ import {
 import { CollapsibleCard, FieldRow } from '../../../components/settings';
 import ModelCombobox from '../../../components/ModelCombobox';
 import Select from '../../../components/Select';
-import { useApi } from '../../../hooks/useApi';
 import { useI18n } from '../../../i18n';
 import type { ModelsSectionProps } from './types';
 import { getLocalModelTestButtonClass } from './local-model-test';
@@ -107,7 +106,6 @@ export default function EnginesSection(props: ModelsSectionProps) {
   } = props;
 
   const { lang } = useI18n();
-  const api = useApi();
   const isLocalMode = (settings.llmProvider || 'local') === 'local';
   const isCloudMode = settings.llmProvider === 'openai';
 
@@ -130,6 +128,14 @@ export default function EnginesSection(props: ModelsSectionProps) {
     },
     [settings.cloudPresetId, settings.cloudApiUrl],
   );
+  const cloudEmbedModelValue = settings.cloudEmbedModel || settings.cloudModel || '';
+  const cloudEmbedSuggestions = [
+    ...new Set([
+      ...(activePreset?.embedModels || []),
+      ...(settings.cloudModel ? [settings.cloudModel] : []),
+      ...cloudModels,
+    ]),
+  ];
 
   const llmModel = settings.llmModel || 'qwen3.5:4b';
   const runtimeReady = localInstallStage === 'already_installed';
@@ -317,35 +323,6 @@ export default function EnginesSection(props: ModelsSectionProps) {
                 />
               </FieldRow>
 
-              {activePreset?.id === 'volcengine' && (
-                <div
-                  className="mx-1"
-                  style={{
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    background: 'var(--c-accent-bg)',
-                    border: '1px solid oklch(0.85 0.06 60)',
-                  }}
-                >
-                  <p className="kz-text-ink leading-relaxed" style={{ fontSize: 12 }}>
-                    {s.cloud_promo_text}
-                  </p>
-                  <div className="flex items-center gap-3 mt-1.5">
-                    <button
-                      type="button"
-                      onClick={() => api.openExternal('https://volcengine.com/L/sYBKFm1EhRY/')}
-                      className="kz-text-accent kz-serif-italic"
-                      style={{ fontSize: 12, textDecoration: 'underline', textUnderlineOffset: 3 }}
-                    >
-                      {s.cloud_subscribe}
-                    </button>
-                    <span className="kz-mono kz-text-accent" style={{ fontSize: 11 }}>
-                      {s.cloud_invite_code}: 3JRQCLYH
-                    </span>
-                  </div>
-                </div>
-              )}
-
               <FieldRow
                 label={s.cloud_api_url}
                 hint={activePreset ? undefined : s.cloud_api_url_hint}
@@ -410,6 +387,17 @@ export default function EnginesSection(props: ModelsSectionProps) {
                     onChange={(v) => updateField({ cloudModel: v })}
                     suggestions={[...new Set([...(activePreset?.models || []), ...cloudModels])]}
                     placeholder={s.cloud_model_placeholder}
+                  />
+                </div>
+              </FieldRow>
+
+              <FieldRow label={s.cloud_embed_model} hint={s.cloud_embed_model_hint}>
+                <div className="max-w-md w-full">
+                  <ModelCombobox
+                    value={cloudEmbedModelValue}
+                    onChange={(v) => updateField({ cloudEmbedModel: v === settings.cloudModel ? '' : v })}
+                    suggestions={cloudEmbedSuggestions}
+                    placeholder={settings.cloudModel || s.cloud_model_placeholder}
                   />
                 </div>
               </FieldRow>

@@ -42,6 +42,7 @@ export interface AppSettings {
   language: 'en' | 'zh';
   userNickname: string;
   asrLanguage: 'auto' | 'zh' | 'en' | 'ja' | 'ko' | 'yue';
+  realtimeDailySummary: boolean;
   autoReportDaily: boolean;
   autoReportDailyTime: string;
   autoReportWeekly: boolean;
@@ -86,12 +87,16 @@ export interface AppSettings {
   dingtalkAppSecret: string;
   dingtalkRobotCode: string;
   dingtalkEnabled: boolean;
+  openclawWechatEnabled: boolean;
   wechatToken: string;
   wechatEncodingAESKey: string;
+  notificationSound: boolean;
   showAllFeatures: boolean;
   soulConfig: string;
   agentsRules: string;
+  vocabularyContext: string;
   streamingModel: string;
+  pasteCleanModel: string;
   workflowTodoPush: boolean;
   workflowDecisionPush: boolean;
   workflowUrgentPush: boolean;
@@ -100,7 +105,23 @@ export interface AppSettings {
   smtpUser: string;
   smtpPass: string;
   smtpFromName: string;
+  emailRecipient: string;
   emailEnabled: boolean;
+  firstLaunchTime: number;
+  licensing: string;
+  licenseKey: string;
+  diarizationMethod: 'embedding' | 'legacy';
+  relayTunnelEnabled: boolean;
+  pipelinePrompts: {
+    textClean: string;
+    imageAnalysis: string;
+    videoAnalysis: string;
+    infoExtract: string;
+    dailySummary: string;
+    classify: string;
+    memoryExtract: string;
+    speakerCorrection: string;
+  };
   plugins: Array<{
     id: string;
     name: string;
@@ -552,6 +573,7 @@ export interface VoiceBrainApi {
   isQueuePaused: () => Promise<boolean>;
   resetStuckTasks: () => Promise<{ queueCount: number; dbCount: number }>;
   reprocessRecording: (recordingId: number) => Promise<PipelineReprocessResult>;
+  reoptimizeRecording: (recordingId: number) => Promise<{ ok: boolean; error?: string }>;
 
   // Database - Recordings
   getRecordings: () => Promise<RecordingRow[]>;
@@ -569,6 +591,7 @@ export interface VoiceBrainApi {
   // Database - Update Recording
   updateRecordingTitle: (id: number, title: string) => Promise<{ success: boolean; error?: string }>;
   updateRecordingCategory: (id: number, category: string | null) => Promise<{ success: boolean; error?: string }>;
+  updateSegmentText: (id: number, text: string) => Promise<{ success: boolean; error?: string }>;
 
   // Database - Clear / Delete
   deleteRecording: (id: number) => Promise<{ success: boolean; error?: string }>;
@@ -688,6 +711,7 @@ export interface VoiceBrainApi {
     recordingId: number,
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   ) => Promise<{ success: boolean; error?: string }>;
+  ragCancelScopedStream: () => Promise<void>;
   getActiveScopedRagStream: (recordingId: number) => Promise<ActiveRagStream | null>;
   onRagScopedChunk: (cb: (event: IpcEvent, chunk: string) => void) => () => void;
   onRagScopedDone: (cb: (event: IpcEvent, sources: RagSource[]) => void) => () => void;
@@ -703,7 +727,7 @@ export interface VoiceBrainApi {
     dbReady: boolean;
     storageUsed: string;
   }>;
-  checkCloudApi: (url: string, apiKey: string) => Promise<{ ok: boolean; error?: string }>;
+  checkCloudApi: (url: string, apiKey: string, model?: string) => Promise<{ ok: boolean; error?: string }>;
   listCloudModels: (url: string, apiKey: string) => Promise<string[]>;
   checkScreenPermission: () => Promise<string>;
 
@@ -713,11 +737,13 @@ export interface VoiceBrainApi {
 
   // Hardware Detection
   detectHardware: () => Promise<HardwareInfo>;
+  getDefaultPrompts: () => Promise<AppSettings['pipelinePrompts']>;
 
   // Environment & Models
   detectEnvironment: () => Promise<EnvCheckResult>;
   listModels: () => Promise<string[]>;
   pullModel: (modelName: string, force?: boolean) => Promise<{ success: boolean; model: string; error?: string }>;
+  testLocal: (modelName?: string) => Promise<{ success: boolean; error?: string }>;
   cancelPull: (modelName?: string) => Promise<void>;
   getPullStatus: () => Promise<ModelPullProgress[]>;
   checkSherpaModels: () => Promise<SherpaModelsCheckResult>;
@@ -754,6 +780,8 @@ export interface VoiceBrainApi {
   onTaskAdded: (cb: (event: IpcEvent, task: QueueTaskEvent) => void) => () => void;
   onTaskProgress: (cb: (event: IpcEvent, task: QueueTaskEvent) => void) => () => void;
   onTaskCompleted: (cb: (event: IpcEvent, task: QueueTaskEvent) => void) => () => void;
+  onTaskCancelled: (cb: (event: IpcEvent, task: QueueTaskEvent) => void) => () => void;
+  onTextNoteNew: (cb: (event: IpcEvent, note: TextNoteRow) => void) => () => void;
   onTaskFailed: (cb: (event: IpcEvent, task: QueueTaskEvent) => void) => () => void;
 
   // Keyboard shortcut events
@@ -768,11 +796,15 @@ export interface VoiceBrainApi {
   onRecordingStateChanged: (cb: (event: IpcEvent, recording: boolean) => void) => () => void;
   onRecordingSaved: (cb: (event: IpcEvent, data: { filePath: string; duration: number }) => void) => () => void;
   onRecordingError: (cb: (event: IpcEvent, error: string) => void) => () => void;
+  onPostProcessing: (cb: (event: IpcEvent, data: { active: boolean; recordingId: number }) => void) => () => void;
+  onPostProcessComplete: (cb: (event: IpcEvent, data: { recordingId: number }) => void) => () => void;
 
   // Feishu Bot
   feishuGetStatus: () => Promise<{ status: string }>;
   feishuTestConnection: (appId: string, appSecret: string) => Promise<{ success: boolean; error?: string; adminOpenId?: string }>;
   feishuRestart: () => Promise<{ status: string; error?: string }>;
+  feishuSimulate: (params: { type: string; text?: string; wavPath?: string; msgType?: string }) => Promise<any>;
+  feishuRunTestSuite: () => Promise<any>;
 
   // External Source Providers (Feishu CLI is the built-in provider)
   externalSourcesListProviders: () => Promise<Array<{ id: string; displayName: string; domains: string[] }>>;
@@ -856,13 +888,6 @@ export interface VoiceBrainApi {
   relayEnable: (enabled: boolean) => Promise<{ success: boolean; status: string }>;
   relayGetPairingQR: () => Promise<{ url?: string; expiresAt?: number; error?: string }>;
   relayUnpair: () => Promise<{ success: boolean }>;
-  relayGetSubscription: () => Promise<{
-    state: 'subscribed' | 'expired' | 'unsubscribed' | 'rate_limited' | 'error';
-    licenseKey: string;
-    machineId: string;
-    expiresAt?: string;
-    error?: string;
-  }>;
 
   // Database Export / Backup
   exportDatabase: () => Promise<{ success: boolean; path?: string; error?: string }>;
@@ -948,7 +973,24 @@ export interface VoiceBrainApi {
   knowledgeCreate: (data: { slug: string; type: string; title: string; content?: string }) => Promise<{ id?: number; slug?: string; existed?: boolean; error?: string }>;
   knowledgeGetBySlug: (slug: string) => Promise<any>;
   knowledgeGetAll: (type?: string) => Promise<any[]>;
+  knowledgeSearch: (query: string, type?: string) => Promise<any[]>;
+  knowledgeGetLinks: (pageId: number) => Promise<any[]>;
+  knowledgeGetBacklinks: (pageId: number) => Promise<any[]>;
+  knowledgeGetGraph: () => Promise<any>;
+  knowledgeGetQueueStatus: () => Promise<any>;
+  knowledgeGetQueueEntries: () => Promise<any[]>;
+  knowledgeClearStuckQueue: () => Promise<any>;
+  knowledgeGetStats: () => Promise<any>;
+  knowledgeRecompile: (pageId: number) => Promise<any>;
+  knowledgeCompileRecording: (recordingId: number) => Promise<any>;
   knowledgeUpdateContent: (pageId: number, content: string) => Promise<any>;
+  knowledgeCompileAll: () => Promise<any>;
+  knowledgeMergePages: (sourcePageIds: number[], targetPageId: number) => Promise<any>;
+  knowledgeFindDuplicates: () => Promise<any>;
+  knowledgeDelete: (pageId: number) => Promise<any>;
+  knowledgeBatchDelete: (pageIds: number[]) => Promise<any>;
+  knowledgeRenamePage: (pageId: number, newTitle: string, newType: string) => Promise<any>;
+  knowledgeEditContent: (pageId: number, content: string) => Promise<any>;
 }
 
 declare global {

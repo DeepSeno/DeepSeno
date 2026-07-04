@@ -10,7 +10,7 @@ import {
   type SimulationLinkDatum,
 } from 'd3-force';
 import { select } from 'd3-selection';
-import { zoom, zoomIdentity, type ZoomBehavior } from 'd3-zoom';
+import { zoom, type ZoomBehavior } from 'd3-zoom';
 import { drag, type D3DragEvent } from 'd3-drag';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { useI18n } from '../../i18n';

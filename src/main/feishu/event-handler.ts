@@ -503,7 +503,8 @@ export class FeishuEventHandler {
           const parsed = summaries.map((s) => ({
             date: s.date,
             summary: s.summary_text || '',
-            keyEvents: s.key_events_json ? JSON.parse(s.key_events_json) : {},
+            todos: s.key_events_json ? (JSON.parse(s.key_events_json).todos || []) : [],
+            decisions: s.key_events_json ? (JSON.parse(s.key_events_json).decisions || []) : [],
           }));
           const result = await withTimeout(
             this.optimizer.generateWeeklySummary(startDate, endDate, parsed),
@@ -520,6 +521,8 @@ export class FeishuEventHandler {
           const textNotes = this.getDb().getTextNotesByDate(date);
 
           const segData = segments.map((s: any) => ({
+            start: s.start_time ?? 0,
+            end: s.end_time ?? s.start_time ?? 0,
             speaker: s.speaker_name || 'Unknown',
             text: s.clean_text || s.raw_text || '',
             time: `${Math.floor((s.start_time || 0) / 60)}:${String(Math.floor((s.start_time || 0) % 60)).padStart(2, '0')}`,
@@ -528,6 +531,8 @@ export class FeishuEventHandler {
           for (const note of textNotes) {
             const d = new Date(note.created_at);
             segData.push({
+              start: 0,
+              end: 0,
               speaker: note.user_name || '[飞书]',
               text: note.content,
               time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,

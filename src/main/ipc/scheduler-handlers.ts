@@ -8,7 +8,6 @@ import { createLLMClient, getLLMModel } from '../llm/create-client';
 import { loadSettings } from '../settings';
 import { PREDEFINED_ACTIONS } from '../scheduler/predefined-actions';
 
-const VALID_STATUSES = ['active', 'paused', 'disabled'] as const;
 const VALID_TASK_TYPES = ['predefined', 'prompt', 'report', 'extraction', 'reminder', 'custom'] as const;
 const VALID_SCHEDULE_TYPES = ['cron', 'interval', 'once'] as const;
 

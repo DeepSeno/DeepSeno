@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { loadLocalConfig, saveLocalConfig } from '../local-config';
-import { getLocalDataDir, getEffectiveDataDir, resetEffectiveDataDir } from '../paths';
+import { getLocalDataDir, resetEffectiveDataDir } from '../paths';
 import { clearSettingsCache } from '../settings';
 import { LockManager } from './lock-manager';
 import { WalCheckpointer } from './wal-checkpoint';

@@ -25,11 +25,11 @@ interface CommandPaletteProps {
 interface SearchResult {
   id: number;
   recording_id?: number;
-  speaker_name?: string;
-  recording_name?: string;
+  speaker_name?: string | null;
+  recording_name?: string | null;
   start_time?: number;
-  clean_text?: string;
-  raw_text?: string;
+  clean_text?: string | null;
+  raw_text?: string | null;
 }
 
 interface Command {

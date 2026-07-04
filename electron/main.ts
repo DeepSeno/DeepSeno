@@ -145,13 +145,10 @@ ipcMain.handle('lanServer:getStatus', () => {
     try {
       const session = relayPairingManager.getSession();
       if (!session) {
-        const relay = relayPairingManager.startSession(
-          loadSettings().licenseKey || '',
-          loadLocalConfig().machineId || '',
-        );
+        const relay = relayPairingManager.startSession(loadLocalConfig().machineId || '');
         status.relayUrl = relay.url;
       } else {
-        const url = `deepseno://pair?key=${encodeURIComponent(loadSettings().licenseKey || '')}&mid=${encodeURIComponent(loadLocalConfig().machineId || '')}&pub=${encodeURIComponent(session.publicKeyBase64)}&nonce=${encodeURIComponent(session.nonce)}`;
+        const url = `deepseno://pair?mid=${encodeURIComponent(loadLocalConfig().machineId || '')}&pub=${encodeURIComponent(session.publicKeyBase64)}&nonce=${encodeURIComponent(session.nonce)}`;
         status.relayUrl = url;
       }
     } catch (e) {
@@ -200,7 +197,6 @@ function startRelayTunnel(): void {
 
   relayTunnel = new RelayTunnel({
     serverUrl: wsUrl,
-    licenseKey: loadSettings().licenseKey || '',
     machineId: loadLocalConfig().machineId || '',
     lanServer,
     certManager: relayCertManager,
@@ -229,8 +225,7 @@ ipcMain.handle('relay:enable', (_e, enabled: boolean) => {
 // Generate a QR code for phone pairing. Always available — no license required.
 ipcMain.handle('relay:getPairingQR', () => {
   if (!relayPairingManager) relayPairingManager = new PairingManager();
-  const licenseKey = loadSettings().licenseKey || '';
-  const qr = relayPairingManager.startSession(licenseKey, loadLocalConfig().machineId || '');
+  const qr = relayPairingManager.startSession(loadLocalConfig().machineId || '');
   return { url: qr.url, expiresAt: qr.expiresAt };
 });
 
@@ -238,14 +233,6 @@ ipcMain.handle('relay:getPairingQR', () => {
 ipcMain.handle('relay:unpair', () => {
   relayPairingManager?.clearCredential();
   return { success: true };
-});
-
-// Query subscription state from the backend (for UI display).
-// Relay is free for all license holders — no subscription check needed.
-ipcMain.handle('relay:getSubscription', () => {
-  const licenseKey = loadSettings().licenseKey || '';
-  const machineId = loadLocalConfig().machineId || '';
-  return { state: 'subscribed' as const, licenseKey, machineId };
 });
 
 // ─── Theme-aware window chrome (matches CSS theme switch) ───
@@ -337,9 +324,8 @@ function createWindow() {
     });
   }
 
-  // Windows: prevent Alt key from activating the menu bar.
-  // Alt+, and Alt+. are used as recording shortcuts, and pressing Alt
-  // triggers the hidden menu bar to appear, which is confusing.
+  // Windows: prevent Alt key from activating the menu bar when users choose
+  // an Alt-based recording shortcut.
   if (process.platform === 'win32') {
     win.webContents.on('before-input-event', (_event, input) => {
       if (input.alt && input.type === 'keyDown') {

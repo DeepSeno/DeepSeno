@@ -16,11 +16,13 @@ interface PipelineResult {
 
 export class WorkflowEngine {
   constructor(
-    private db: VoiceBrainDB,
+    _db: VoiceBrainDB,
     private router?: MessageRouter,
     private todoTracker?: TodoTracker,
     private emailService?: EmailService,
-  ) {}
+  ) {
+    void _db;
+  }
 
   async onPipelineCompleted(result: PipelineResult): Promise<void> {
     const settings = loadSettings();

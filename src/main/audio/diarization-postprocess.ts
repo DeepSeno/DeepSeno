@@ -25,6 +25,7 @@ const DEFAULT_OPTIONS: Required<PostProcessOptions> = {
   minSegmentDuration: 0.3,
   mergeGap: 0.5,
   minSpeakerDuration: 1.0,
+  light: false,
 };
 
 /**

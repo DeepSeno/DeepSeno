@@ -8,7 +8,6 @@ import { StreamingTranscriber, type LiveSegment } from '../audio/streaming-trans
 import { type RecordingScene, type AudioSource, getSceneConfig } from '../audio/recording-scene';
 import { loadSettings, AppSettings } from '../settings';
 import { getOutputDir, getVecDbPath } from '../paths';
-import { requirePro } from '../licensing/require-pro';
 import { getStr } from '../i18n';
 import { runWithPriority } from '../llm/llm-scheduler';
 
@@ -95,7 +94,7 @@ function getOrCreateSegOptimizer(settings: AppSettings): Promise<{ optimizer: an
   return segOptimizerReady;
 }
 
-function buildContextPrompt(rawText: string, customPrompt: string | undefined): string {
+function buildContextPrompt(_rawText: string, customPrompt: string | undefined): string {
   // If no context or vocabulary accumulated, use original behavior
   if (recentSegmentContext.length === 0 && sessionVocabulary.size === 0) {
     return customPrompt || '';
@@ -136,63 +135,6 @@ function extractTermsFromResponse(text: string): { cleanText: string; terms: str
     return { cleanText, terms };
   }
   return { cleanText: text, terms: [] };
-}
-
-function startSegmentOptimization(segId: number, rawText: string, settings: AppSettings): void {
-  if (!rawText.trim()) return;
-
-  const promise = (async () => {
-    const t0 = Date.now();
-    await segOptAcquire();
-    const waitMs = Date.now() - t0;
-    try {
-      const { optimizer, keepAlive } = await getOrCreateSegOptimizer(settings);
-      const customPrompt = settings.llmCleanPrompt?.trim() || undefined;
-      const contextPrompt = buildContextPrompt(rawText, customPrompt);
-      const cleanResponse = await optimizer.cleanText(rawText, contextPrompt || customPrompt, keepAlive);
-
-      // Extract vocabulary terms from LLM response
-      const { cleanText, terms } = extractTermsFromResponse(cleanResponse);
-      for (const term of terms) {
-        sessionVocabulary.add(term);
-      }
-
-      const totalMs = Date.now() - t0;
-      // Write clean_text to DB immediately so postProcessing can use it
-      if (liveDb && cleanText && cleanText.trim()) {
-        try {
-          liveDb.updateSegmentCleanText(segId, cleanText);
-        } catch (dbErr) {
-          console.warn(`[realtime] Failed to write clean_text for segment ${segId}:`, dbErr);
-        }
-      }
-
-      // Update context window with cleaned text
-      recentSegmentContext.push({ text: cleanText || rawText });
-      if (recentSegmentContext.length > CONTEXT_WINDOW_SIZE * 2) {
-        recentSegmentContext = recentSegmentContext.slice(-CONTEXT_WINDOW_SIZE);
-      }
-
-      const changed = cleanText !== rawText;
-      console.log(`[realtime] Segment ${segId} optimized (${(totalMs / 1000).toFixed(1)}s, wait=${waitMs}ms, ${changed ? 'CHANGED' : 'UNCHANGED'}${terms.length > 0 ? `, terms=[${terms.join(',')}]` : ''}): "${rawText.substring(0, 30)}..." → "${cleanText.substring(0, 30)}..."`);
-      // Broadcast optimized text to recorder window for live replacement
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) {
-          win.webContents.send('live:segmentOptimized', { segId, cleanText });
-        }
-      }
-      return cleanText;
-    } catch (err) {
-      console.warn(`[realtime] Segment ${segId} optimization failed:`, err);
-      // Still update context with raw text
-      recentSegmentContext.push({ text: rawText });
-      return rawText; // fallback to raw
-    } finally {
-      segOptRelease();
-    }
-  })();
-
-  segOptList.push({ segId, rawText, promise });
 }
 
 /**
@@ -546,7 +488,9 @@ async function diarizeAudioForRecording(
     let bestSpeaker = '';
     let bestOverlap = 0;
     for (const ds of diarResult.segments) {
-      const overlap = Math.min(seg.end_time, ds.end) - Math.max(seg.start_time, ds.start);
+      const segStart = seg.start_time ?? 0;
+      const segEnd = seg.end_time ?? segStart;
+      const overlap = Math.min(segEnd, ds.end) - Math.max(segStart, ds.start);
       if (overlap > bestOverlap) {
         bestOverlap = overlap;
         bestSpeaker = ds.speaker;
@@ -669,7 +613,6 @@ async function postProcessLiveRecording(
             }
           } else {
             // Fallback: proportional mapping
-            const totalChars = cleanedLines.reduce((a, l) => a + l.length, 0);
             let lineIdx = 0;
             for (let i = 0; i < rawSegs.length; i++) {
               if (lineIdx < cleanedLines.length) {
@@ -827,8 +770,8 @@ async function postProcessLiveRecording(
       title: baseName,
       recordedAt: recording.recorded_at || undefined,
       segments: updatedSegments.map((s) => ({
-        start: s.start_time,
-        end: s.end_time,
+        start: s.start_time ?? 0,
+        end: s.end_time ?? s.start_time ?? 0,
         speaker: s.speaker_name || 'Unknown',
         text: s.raw_text || '',
         clean_text: s.clean_text || '',
@@ -855,7 +798,6 @@ async function postProcessLiveRecording(
   console.log(`[realtime] Post-processing complete for recording ${recordingId}`);
 
   if (Notification.isSupported()) {
-    const lang = settings.language;
     new Notification({
       title: getStr('notify.live_complete') as string,
       body: (getStr('notify.live_complete_body') as Function)(recordingId) as string,
@@ -1327,13 +1269,11 @@ export function registerRealtimeHandlers(ctx: IpcContext): void {
   // ─── Real-time Transcription ──────────────────────────────
 
   ipcMain.handle('realtime:start', async (_event, scene?: RecordingScene) => {
-    requirePro(ctx.getLicenseManager(), 'streaming_transcription');
     return startRealtimeTranscription(ctx, scene || 'dictation');
   });
 
   // Fire-and-forget: use ipcMain.on (NOT handle)
   ipcMain.on('realtime:chunk', (_event, buffer: ArrayBuffer, source: AudioSource = 'mic') => {
-    if (!ctx.getLicenseManager().isFeatureAvailable('streaming_transcription')) return;
     // No active recording — skip
     if (liveRecordingId === null) return;
 
@@ -1403,7 +1343,6 @@ export function registerRealtimeHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('realtime:stop', async () => {
-    requirePro(ctx.getLicenseManager(), 'streaming_transcription');
     return stopRealtimeTranscription(ctx);
   });
 

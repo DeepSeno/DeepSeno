@@ -2,15 +2,8 @@ import { useState, useEffect } from 'react';
 import { Loader2, Download, FileText, Calendar, Plus, Trash2, Check } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useApi } from '../hooks/useApi';
+import type { DailySummaryRow, MonthlySummaryRow, WeeklySummaryRow } from '../hooks/useApi';
 import { useNotifications } from '../components/NotificationCenter';
-
-interface DailySummaryRow {
-  id: number;
-  date: string;
-  summary_text: string;
-  timeline_json: string | null;
-  key_events_json: string | null;
-}
 
 interface TimelineItem {
   time: string;
@@ -29,26 +22,12 @@ interface ParsedKeyEvents {
   decisions: string[];
 }
 
-interface WeeklySummaryRow {
-  id: number;
-  start_date: string;
-  end_date: string;
-  summary_json: string | null;
-}
-
 interface WeeklyResult {
   summary: string;
   highlights: string[];
   todos_summary: Array<{ content: string; status?: string; person?: string }>;
   decisions: string[];
   next_week_focus: string[];
-}
-
-interface MonthlySummaryRow {
-  id: number;
-  start_date: string;
-  end_date: string;
-  summary_json: string | null;
 }
 
 interface MonthlyResult {
@@ -181,7 +160,7 @@ export default function Reports() {
     }
   }
 
-  function summaryPreview(text: string): string {
+  function summaryPreview(text: string | null): string {
     if (!text) return '--';
     return text.length > 60 ? text.slice(0, 60) + '...' : text;
   }
@@ -217,7 +196,7 @@ export default function Reports() {
         if (result.error === 'no_data') {
           setError(r.no_dailies);
         } else {
-          setWeeklyResult(result);
+          setWeeklyResult(result as unknown as WeeklyResult);
           // Reload weekly list and select the new entry
           const weeklyData = await api.getAllWeeklySummaries();
           setWeeklySummaries(weeklyData || []);
@@ -264,7 +243,7 @@ export default function Reports() {
           toast('success', t.export_success, result.filePath);
         }
       } else if (mode === 'weekly' && weeklyResult) {
-        const result = await api.exportWeeklySummary(startDate, endDate, weeklyResult);
+        const result = await api.exportWeeklySummary(startDate, endDate, weeklyResult as unknown as Record<string, unknown>);
         if (result.filePath) {
           setExportPath(result.filePath);
           toast('success', t.export_success, result.filePath);

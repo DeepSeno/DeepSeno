@@ -61,6 +61,16 @@ function getSceneLabel(scene: RecordingScene, t: any): string {
   return (t.settings as any)?.[key] || scene;
 }
 
+function getRecordingErrorText(error: string, t: any): string {
+  if (error === 'microphone_denied') return t.rec.mic_denied;
+  if (error === 'microphone_not_found') return t.rec.mic_not_found;
+  if (error === 'microphone_unavailable') return t.rec.mic_unavailable;
+  if (error === 'microphone_not_supported') return t.rec.mic_not_supported;
+  if (error === 'mic_disconnected') return t.rec.mic_disconnected;
+  if (error === 'ffmpeg_unavailable') return t.rec.ffmpeg_missing;
+  return error;
+}
+
 export default function Header() {
   const { lang, setLang, t } = useI18n();
   const api = useApi();
@@ -86,6 +96,13 @@ export default function Header() {
     });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    const unsub = api.onRecordingError((_event: any, error: string) => {
+      toast('error', t.rec.recording_error, getRecordingErrorText(error, t));
+    });
+    return unsub;
+  }, [api, t, toast]);
 
   useEffect(() => {
     const unsub1 = api.onPostProcessing?.(((_event: any, data: { active: boolean }) => {

@@ -16,14 +16,24 @@ export class Diarizer {
     this.engine = engine;
   }
 
-  async diarize(audioPath: string, _hfToken?: string): Promise<DiarizeResult> {
+  async diarize(audioPath: string, _hfToken?: string, signal?: AbortSignal): Promise<DiarizeResult> {
+    if (signal?.aborted) {
+      const err = new Error('Task cancelled by user');
+      err.name = 'TaskCancelledError';
+      throw err;
+    }
     // Adaptive clustering threshold based on audio duration
     // Shorter audio → lower threshold (more aggressive speaker separation)
     // Longer audio → higher threshold (more data means more confidence in clustering)
     const threshold = this.computeAdaptiveThreshold(audioPath);
     console.log(`[Diarizer] Adaptive clustering threshold: ${threshold.toFixed(2)}`);
 
-    const rawSegments = await this.engine.diarize(audioPath, threshold);
+    const rawSegments = await this.engine.diarize(audioPath, threshold, signal);
+    if (signal?.aborted) {
+      const err = new Error('Task cancelled by user');
+      err.name = 'TaskCancelledError';
+      throw err;
+    }
 
     // Convert numeric speaker IDs to SPEAKER_XX format
     const segments: DiarizeSegment[] = rawSegments.map((seg) => ({

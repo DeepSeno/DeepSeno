@@ -1,6 +1,5 @@
 import { BrowserWindow, Notification } from 'electron';
 import { spawn } from 'child_process';
-import fs from 'fs';
 import path from 'path';
 
 import { DatabaseSync } from 'node:sqlite';
@@ -8,7 +7,6 @@ import { VoiceBrainDB } from '../db/database';
 import { quarantineSqliteFiles, type StorageRepairResult } from '../db/sqlite-recovery';
 import type { LLMClient } from '../llm/llm-client';
 import { createLLMClient, createEmbedClient, getLLMModel, getEmbedModel } from '../llm/create-client';
-import { TextOptimizer } from '../llm/text-optimizer';
 import { Processor } from '../pipeline/processor';
 import { QueryEngine } from '../rag/query-engine';
 import { QueryAnalyzer } from '../rag/query-analyzer';
@@ -194,13 +192,7 @@ function getLicenseManagerInstance(): LicenseManager {
   if (!licenseManager) {
     const settings = loadSettings();
     const firstLaunch = settings.firstLaunchTime || Date.now();
-    licenseManager = new LicenseManager(firstLaunch, settings.licenseKey || null);
-    // Fire-and-forget: validate with server in background.
-    // Until the response comes back, cachedValidation is null and the user
-    // gets trial/free features locally — acceptable for startup UX.
-    licenseManager.refreshValidation().catch((err) => {
-      console.warn('[IPC] Background license validation failed:', err);
-    });
+    licenseManager = new LicenseManager(firstLaunch);
   }
   return licenseManager;
 }
@@ -216,7 +208,6 @@ function getProcessor(): Processor {
       whisperModel: settings.whisperModel || 'sensevoice',
       llmModel: getLLMModel(settings),
       sherpaEngine: getSherpaEngineInstance(),
-      licenseManager: getLicenseManagerInstance(),
     });
     processor.setQueryEngine(getQueryEngine());
 
@@ -224,6 +215,7 @@ function getProcessor(): Processor {
     const tq = processor.getTaskQueue();
     tq.setDb(getDb().getRawDb());
     tq.restoreFromDb();
+    getDb().recoverStuckRecordings();
 
     const memoryManager = new MemoryManager(getDb(), getLLM(), getEmbedLLM());
     memoryManagerInstance = memoryManager;
@@ -255,6 +247,7 @@ function getProcessor(): Processor {
     };
     tq.on('task:added', sendToRenderer('pipeline:task:added'));
     tq.on('task:progress', sendToRenderer('pipeline:task:progress'));
+    tq.on('task:cancelled', sendToRenderer('pipeline:task:cancelled'));
     tq.on('task:completed', (task: QueueTask) => {
       sendToRenderer('pipeline:task:completed')(task);
       if (Notification.isSupported()) {
@@ -287,6 +280,7 @@ function reinitSingletons(): void {
     try {
       const tq = processor.getTaskQueue();
       tq.markActiveAsInterrupted();
+      getDb().recoverStuckRecordings();
       tq.dispose();
     } catch { /* best-effort */ }
   }
@@ -307,7 +301,6 @@ function reinitSingletons(): void {
   eventsWired = false;
   console.log('[ipc] Singletons re-initialized for new paths');
 }
-
 
 function closeVectorDbHandle(): void {
   if (vecDb) {
@@ -488,6 +481,7 @@ export async function cleanupSingletons(): Promise<void> {
     try {
       const tq = processor.getTaskQueue();
       tq.markActiveAsInterrupted();
+      if (db) db.recoverStuckRecordings();
       tq.dispose();
     } catch {
       // Best-effort — DB may already be closing

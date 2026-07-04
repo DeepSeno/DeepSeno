@@ -39,6 +39,35 @@ export default function Recordings() {
     api.isQueuePaused().then(setPaused).catch((e) => console.warn('[Recordings] isQueuePaused:', e));
   }, []);
 
+  const hasActiveWork = queueItems.length > 0 || historyItems.some((item) => item.status === 'active');
+
+  // IPC progress events can be missed while the renderer is suspended or the page is remounted.
+  // Poll only while active work exists so the UI reconciles with the DB truth and then goes quiet.
+  useEffect(() => {
+    if (!hasActiveWork) return;
+
+    let stopped = false;
+    const refreshActiveWork = () => {
+      if (stopped) return;
+      Promise.all([loadQueue(), loadHistory()])
+        .catch((err) => console.warn('[Recordings] active-work refresh failed:', err));
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshActiveWork();
+    };
+
+    const timer = window.setInterval(refreshActiveWork, 2000);
+    window.addEventListener('focus', refreshActiveWork);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshActiveWork);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [hasActiveWork]);
+
   // --- Live task events ---
   useEffect(() => {
     function taskToQueueItem(task: QueueTaskEvent): QueueItem {
@@ -47,7 +76,11 @@ export default function Recordings() {
         name: task.filePath.split(/[/\\]/).pop() || task.filePath,
         filePath: task.filePath, duration: '', size: '',
         progress: task.progress,
-        status: task.status === 'pending' ? 'pending' : task.status === 'completed' ? 'done' : task.status === 'failed' ? 'error' : 'processing',
+        status: task.status === 'pending' ? 'pending'
+          : task.status === 'completed' ? 'done'
+          : task.status === 'cancelled' ? 'cancelled'
+          : ['failed', 'interrupted'].includes(task.status) ? 'error'
+          : 'processing',
         rawStatus: task.status,
         currentStep: STATUS_TO_STEP[task.status] ?? -1,
         error: task.error || null,
@@ -69,6 +102,12 @@ export default function Recordings() {
         const name = task.filePath.split(/[/\\]/).pop() || task.filePath;
         toast('success', rRef.current.pipeline_complete, name);
       }),
+      api.onTaskCancelled((_e, task) => {
+        setQueueItems((prev) => prev.filter((q) => q.id !== task.id));
+        loadHistory();
+        const name = task.filePath.split(/[/\\]/).pop() || task.filePath;
+        toast('info', rRef.current.pipeline_cancelled || 'Cancelled', name);
+      }),
       api.onTaskFailed((_e, task) => {
         setQueueItems((prev) => prev.map((q) => q.id === task.id ? taskToQueueItem(task) : q));
         const name = task.filePath.split(/[/\\]/).pop() || task.filePath;
@@ -79,12 +118,6 @@ export default function Recordings() {
         toast('success', rRef.current.recording_saved, fname);
         try { await api.enqueue(data.filePath); } catch { /* Already enqueued by main process */ }
         loadQueue();
-      }),
-      api.onRecordingError((_e, error) => {
-        if (error === 'microphone_denied') toast('error', rRef.current.mic_denied);
-        else if (error === 'mic_disconnected') toast('error', rRef.current.mic_disconnected);
-        else if (error === 'ffmpeg_unavailable') toast('error', rRef.current.ffmpeg_missing);
-        else toast('error', rRef.current.recording_error, error);
       }),
       api.onTextNoteNew((_e, _note) => {
         loadTextNotes();
@@ -100,7 +133,11 @@ export default function Recordings() {
       setQueueItems(queue.map((item) => ({
         id: item.id, name: item.filePath.split(/[/\\]/).pop() || item.filePath,
         filePath: item.filePath, duration: '', size: '', progress: item.progress,
-        status: item.status === 'pending' ? 'pending' : item.status === 'completed' ? 'done' : item.status === 'failed' ? 'error' : 'processing',
+        status: item.status === 'pending' ? 'pending'
+          : item.status === 'completed' ? 'done'
+          : item.status === 'cancelled' ? 'cancelled'
+          : ['failed', 'interrupted'].includes(item.status) ? 'error'
+          : 'processing',
         rawStatus: item.status, currentStep: STATUS_TO_STEP[item.status] ?? -1,
         error: item.error || null,
         notes: (item as any).notes || null,
@@ -118,7 +155,10 @@ export default function Recordings() {
         date: rec.processed_at ? new Date(rec.processed_at).toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US', { month: '2-digit', day: '2-digit' }) : '',
         duration: rec.duration_seconds ? formatDuration(rec.duration_seconds) : '',
         size: '', speakers: rec.speaker_count || 0, extracted: rec.extracted_count || 0,
-        status: rec.status === 'completed' ? 'done' : rec.status === 'failed' ? 'error' : 'active',
+        status: rec.status === 'completed' ? 'done'
+          : rec.status === 'cancelled' ? 'cancelled'
+          : ['failed', 'interrupted'].includes(rec.status) ? 'error'
+          : 'active',
         tags: rec.tags ? (() => { try { return JSON.parse(rec.tags); } catch { return []; } })() : [],
         scene: rec.capture_scene || 'dictation',
         mediaType: rec.media_type || 'audio',
@@ -238,8 +278,18 @@ export default function Recordings() {
   }
 
   async function handleCancel(taskId: string) {
-    try { await api.cancelTask(taskId); setQueueItems((prev) => prev.filter((q) => q.id !== taskId)); }
-    catch (err) { console.error('[Recordings] Cancel failed:', err); }
+    try {
+      const ok = await api.cancelTask(taskId);
+      if (ok) {
+        setQueueItems((prev) => prev.filter((q) => q.id !== taskId));
+        await Promise.all([loadQueue(), loadHistory()]);
+      } else {
+        await Promise.all([loadQueue(), loadHistory()]);
+      }
+    } catch (err) {
+      console.error('[Recordings] Cancel failed:', err);
+      toast('error', r.pipeline_failed, String(err));
+    }
   }
 
   async function handlePauseToggle() {
@@ -268,8 +318,18 @@ export default function Recordings() {
   }
 
   async function handleDeleteConfirm(recordingId: number) {
-    try { await api.deleteRecording(recordingId); setDeleteConfirmId(null); loadHistory(); }
-    catch (err) { console.error('[Recordings] Delete failed:', err); toast('error', r.delete_failed, String(err)); setDeleteConfirmId(null); }
+    try {
+      const result = await api.deleteRecording(recordingId);
+      if (!result?.success) {
+        throw new Error(result?.error || r.delete_failed);
+      }
+      setDeleteConfirmId(null);
+      await Promise.all([loadHistory(), loadQueue()]);
+    } catch (err) {
+      console.error('[Recordings] Delete failed:', err);
+      toast('error', r.delete_failed, String(err));
+      setDeleteConfirmId(null);
+    }
   }
 
   // --- Derived state ---
@@ -282,6 +342,7 @@ export default function Recordings() {
     IMAGE: historyItems.filter((i) => i.mediaType === 'image').length,
     TEXT: textNoteItems.length,
     DONE: historyItems.filter((i) => i.status === 'done').length,
+    CANCELLED: historyItems.filter((i) => i.status === 'cancelled').length,
     ERROR: historyItems.filter((i) => i.status === 'error').length,
   };
   const filters = [
@@ -292,6 +353,7 @@ export default function Recordings() {
     { key: 'IMAGE', label: r.filter_image, count: counts.IMAGE },
     { key: 'TEXT', label: r.filter_text, count: counts.TEXT },
     { key: 'DONE', label: r.filter_done, count: counts.DONE },
+    { key: 'CANCELLED', label: r.filter_cancelled, count: counts.CANCELLED },
     { key: 'ERROR', label: r.filter_error, count: counts.ERROR },
   ];
 
@@ -303,6 +365,7 @@ export default function Recordings() {
     if (filter === 'DOCUMENT') return ['pdf', 'docx'].includes(item.mediaType);
     if (filter === 'IMAGE') return item.mediaType === 'image';
     if (filter === 'DONE') return item.status === 'done';
+    if (filter === 'CANCELLED') return item.status === 'cancelled';
     if (filter === 'ERROR') return item.status === 'error';
     return true;
   });

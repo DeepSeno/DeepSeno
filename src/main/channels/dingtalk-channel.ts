@@ -84,7 +84,7 @@ export class DingTalkChannel implements MessageChannel {
     }
   }
 
-  async sendText(chatId: string, text: string): Promise<void> {
+  async sendText(_chatId: string, text: string): Promise<void> {
     const token = await this.getValidToken();
     await this.callApi(
       `${API_BASE}/robot/send?access_token=${token}`,
@@ -95,7 +95,7 @@ export class DingTalkChannel implements MessageChannel {
     );
   }
 
-  async sendCard(chatId: string, card: MessageCard): Promise<void> {
+  async sendCard(_chatId: string, card: MessageCard): Promise<void> {
     const token = await this.getValidToken();
     const text = card.sections
       .map((s) => (s.header ? `### ${s.header}\n${s.content}` : s.content))

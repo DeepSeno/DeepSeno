@@ -54,7 +54,9 @@ export function getEffectiveDataDir(): string {
     } catch {
       _effectiveDataDir = getLocalDataDir();
     }
-    fs.mkdirSync(_effectiveDataDir, { recursive: true });
+    const effectiveDataDir = _effectiveDataDir ?? getLocalDataDir();
+    _effectiveDataDir = effectiveDataDir;
+    fs.mkdirSync(effectiveDataDir, { recursive: true });
   }
   return _effectiveDataDir;
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  Brain, Calendar, ChevronDown, ChevronRight, RefreshCw,
-  FileText, Sparkles, Check, X, Trash2, ArrowUp, ArrowDown,
+  Brain, ChevronDown, ChevronRight, RefreshCw,
+  Sparkles, Check, X, Trash2, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useApi, type MemoryRow, type MemoryStats, type MemoryDocument, type MemoryDateEntry } from '../hooks/useApi';
@@ -147,7 +147,7 @@ export default function MemoryManager() {
   }, [editingId]);
 
   // ── Debounced auto-save ──────────────────────────────
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleContentChange = useCallback((newContent: string) => {
     setDocContent(newContent);
     setLastSaved(null);

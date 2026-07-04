@@ -1,7 +1,6 @@
 import React from 'react';
 import { FileText } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { useLicense } from '../../hooks/useLicense';
 import { MeetingNotes } from '../../hooks/useApi';
 
 interface MeetingNotesItem {
@@ -21,9 +20,8 @@ export const RecentMeetings = React.memo(function RecentMeetings({
   onNavigate,
 }: RecentMeetingsProps) {
   const { t } = useI18n();
-  const { isFeatureAvailable } = useLicense();
   const d = t.dash;
-  const isPro = isFeatureAvailable('meeting_notes');
+  const items = Array.isArray(meetingNotesList) ? meetingNotesList : [];
 
   return (
     <div className="kz-paper" style={{ overflow: 'hidden' }}>
@@ -38,7 +36,7 @@ export const RecentMeetings = React.memo(function RecentMeetings({
         <h3 className="kz-section-title" style={{ margin: 0 }}>
           <FileText size={12} />
           <span>{d.recent_notes}</span>
-          <span className="kz-section-title__count">{meetingNotesList.length}</span>
+          <span className="kz-section-title__count">{items.length}</span>
         </h3>
         <button
           onClick={() => onNavigate('/library')}
@@ -47,67 +45,73 @@ export const RecentMeetings = React.memo(function RecentMeetings({
           {d.view_all_link} &rarr;
         </button>
       </div>
-      {meetingNotesList.slice(0, 5).map((item, idx) => (
-        <div
-          key={item.recordingId}
-          onClick={() => onNavigate(`/library?recording=${item.recordingId}`)}
-          className="kz-row-hover kz-anim-in"
-          style={{
-            padding: '14px 18px',
-            borderTop: '1px solid var(--line-soft)',
-            cursor: 'pointer',
-            animationDelay: `${idx * 30}ms`,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
-            <span className="kz-mono kz-text-mute" style={{ fontSize: 11 }}>
-              {item.date}
-            </span>
-            <span
-              className="kz-serif"
-              style={{ fontSize: 14.5, color: 'var(--ink)', flex: 1, minWidth: 0 }}
-            >
-              <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {item.notes.title}
-              </span>
-            </span>
-          </div>
+      {items.slice(0, 5).map((item, idx) => {
+        const participants = Array.isArray(item.notes.participants) ? item.notes.participants : [];
+        const decisions = Array.isArray(item.notes.decisions) ? item.notes.decisions : [];
+        const actionItems = Array.isArray(item.notes.actionItems) ? item.notes.actionItems : [];
+        const title = item.notes.title || item.fileName;
+        const discussionSummary = item.notes.discussionSummary || (item.notes as any).summary || '';
+
+        return (
           <div
-            className="kz-text-soft"
+            key={item.recordingId}
+            onClick={() => onNavigate(`/library?recording=${item.recordingId}`)}
+            className="kz-row-hover kz-anim-in"
             style={{
-              fontSize: 12.5,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              display: '-webkit-box',
-              WebkitLineClamp: 1,
-              WebkitBoxOrient: 'vertical',
-              marginBottom: isPro ? 6 : 0,
+              padding: '14px 18px',
+              borderTop: '1px solid var(--line-soft)',
+              cursor: 'pointer',
+              animationDelay: `${idx * 30}ms`,
             }}
           >
-            {item.notes.discussionSummary}
-          </div>
-          {isPro && (
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
+              <span className="kz-mono kz-text-mute" style={{ fontSize: 11 }}>
+                {item.date}
+              </span>
+              <span
+                className="kz-serif"
+                style={{ fontSize: 14.5, color: 'var(--ink)', flex: 1, minWidth: 0 }}
+              >
+                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {title}
+                </span>
+              </span>
+            </div>
+            <div
+              className="kz-text-soft"
+              style={{
+                fontSize: 12.5,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                display: '-webkit-box',
+                WebkitLineClamp: 1,
+                WebkitBoxOrient: 'vertical',
+                marginBottom: 6,
+              }}
+            >
+              {discussionSummary}
+            </div>
             <div
               className="kz-mono kz-text-faint"
               style={{ display: 'flex', gap: 12, fontSize: 11 }}
             >
               <span>
-                {item.notes.participants.length} {d.speakers_unit}
+                {participants.length} {d.speakers_unit}
               </span>
-              {item.notes.decisions.length > 0 && (
+              {decisions.length > 0 && (
                 <span>
-                  {item.notes.decisions.length} {d.decisions_count}
+                  {decisions.length} {d.decisions_count}
                 </span>
               )}
-              {item.notes.actionItems.length > 0 && (
+              {actionItems.length > 0 && (
                 <span>
-                  {item.notes.actionItems.length} {d.actions_count}
+                  {actionItems.length} {d.actions_count}
                 </span>
               )}
             </div>
-          )}
-        </div>
-      ))}
+          </div>
+        );
+      })}
     </div>
   );
 });

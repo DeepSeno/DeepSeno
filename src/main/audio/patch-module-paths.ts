@@ -7,8 +7,6 @@
  *
  * Call this BEFORE any require() of native addons (sherpa-onnx-node, etc.).
  */
-import path from 'path';
-
 export function patchModulePathsForPackagedBuild(): void {
   if (!__dirname.includes('app.asar')) return;
 

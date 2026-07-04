@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { InsightEngine } from '../agent/insight-engine';
-import type { Insight } from '../agent/insight-engine';
 
 function makeDate(offsetDays: number): string {
   const d = new Date();

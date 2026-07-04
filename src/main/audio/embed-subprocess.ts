@@ -108,8 +108,6 @@ interface ExtractFromFileRequest {
   modelsDir: string;
 }
 
-type EmbedRequest = ExtractRequest | ExtractFromFileRequest;
-
 // ─── Cached extractor for multiple calls within same process ──
 
 let cachedExtractor: any = null;
@@ -136,7 +134,6 @@ function getExtractor(modelsDir: string): any {
 function runExtract(request: ExtractRequest, reqId?: number): void {
   try {
     const extractor = getExtractor(request.modelsDir);
-    const sherpa = require('sherpa-onnx-node');
 
     const samples = new Float32Array(request.samplesArray);
 

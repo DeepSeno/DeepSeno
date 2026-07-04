@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import os from 'os';
-import { TaskQueue } from '../task-queue';
+import { TaskQueue, type QueueTask } from '../task-queue';
 
 const TMP_DIR = os.tmpdir().replace(/\\/g, '/');
 
@@ -31,7 +31,7 @@ describe('TaskQueue', () => {
     queue.on('task:completed', () => events.push('completed'));
     queue.on('task:progress', () => events.push('progress'));
 
-    queue.setProcessor(async (task) => {
+    queue.setProcessor(async (task: QueueTask) => {
       queue.updateTask(task.id, { progress: 50 });
     });
 
@@ -65,7 +65,7 @@ describe('TaskQueue', () => {
     const queue = new TaskQueue();
     const order: string[] = [];
 
-    queue.setProcessor(async (task) => {
+    queue.setProcessor(async (task: QueueTask) => {
       order.push(task.filePath);
       await new Promise((r) => setTimeout(r, 30));
     });

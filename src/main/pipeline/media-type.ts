@@ -27,7 +27,7 @@ export function detectMediaType(filePath: string): MediaType | null {
   return EXT_MAP[ext] ?? null;
 }
 
-export function isDocumentType(type: MediaType): boolean {
+export function isDocumentType(type: MediaType): type is 'pdf' | 'docx' | 'text' {
   return type === 'pdf' || type === 'docx' || type === 'text';
 }
 

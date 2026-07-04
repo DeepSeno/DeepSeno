@@ -1,10 +1,10 @@
-import type { LLMClient } from '../llm/llm-client';
+import type { LLMClient, LocalChatMessage, LocalTool } from '../llm/llm-client';
 import type { ToolRegistry, ToolResult, ToolDefinition } from './tool-registry';
 import { loadSoulContext, buildSoulSystemPrompt } from './soul';
 import { loadSettings } from '../settings';
 import type { PluginConfig } from '../plugin/types';
 import { getPromptText, readSkillPrompt } from '../skill/skill-file';
-import type { SessionManager, ContextPayload } from '../channels/session-manager';
+import type { SessionManager } from '../channels/session-manager';
 import { getStr, getLang } from '../i18n';
 
 interface AgentAction {
@@ -149,7 +149,7 @@ export class AgentExecutor {
   private async executeWithNativeTools(
     channelId: string,
     userId: string,
-    userName: string,
+    _userName: string,
     message: string,
     toolDefs: ToolDefinition[],
     t0: number,

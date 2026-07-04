@@ -29,7 +29,7 @@ function parseInline(text: string, defaultOpts: Record<string, any> = {}): any[]
 
 export async function generateDocx(options: DocxOptions, outputDir: string): Promise<string> {
   const {
-    Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType,
+    Document, Packer, Paragraph, TextRun, AlignmentType,
     Header, Footer, PageNumber, BorderStyle, convertInchesToTwip,
   } = require('docx');
 

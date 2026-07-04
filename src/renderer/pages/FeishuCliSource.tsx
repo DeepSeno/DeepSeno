@@ -3,7 +3,7 @@ import { Download, RefreshCw, LogIn, LogOut, CheckCircle, XCircle, Circle, Play,
 import { useI18n } from '../i18n';
 import { useApi } from '../hooks/useApi';
 import { useNotifications } from '../components/NotificationCenter';
-import { CollapsibleCard, FieldRow, BTN, INPUT } from '../components/settings';
+import { CollapsibleCard, FieldRow, BTN } from '../components/settings';
 import { useSettings } from '../hooks/useSettings';
 
 interface CliStatus {

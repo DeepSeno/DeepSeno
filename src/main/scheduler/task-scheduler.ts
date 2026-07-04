@@ -95,7 +95,6 @@ export class TaskScheduler {
       // 1. Execute due scheduled tasks
       const allActive = db.listScheduledTasks({ status: 'active' });
       const dueTasks = db.getDueScheduledTasks();
-      const nowUtc = new Date().toISOString();
       if (dueTasks.length > 0) {
         console.log(`[TaskScheduler] poll: ${dueTasks.length} due task(s) of ${allActive.length} active`);
       }

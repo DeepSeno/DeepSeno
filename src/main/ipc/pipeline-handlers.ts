@@ -4,7 +4,7 @@ import path from 'path';
 import type { IpcContext } from './context';
 import { FileWatcher } from '../watcher';
 import { loadSettings } from '../settings';
-import { getOutputDir, getLocalDataDir, getTempDir } from '../paths';
+import { getLocalDataDir, getTempDir } from '../paths';
 import { requireString, requireId, ValidationError } from './validate';
 import { isSqliteCorruptionError, makeRepairFailureMessage } from '../db/sqlite-recovery';
 
@@ -16,8 +16,6 @@ let fileWatcher: FileWatcher | null = null;
  * Files already inside the watch directory or data directory are not copied.
  */
 function copyToImportsIfNeeded(filePath: string): string {
-  const settings = loadSettings();
-  const watchDir = settings.watchDir || '';
   const dataDir = getLocalDataDir();
 
   // Already inside data dir (e.g. imports/) — no copy needed
@@ -76,7 +74,16 @@ export function registerPipelineHandlers(ctx: IpcContext): void {
   ipcMain.handle('pipeline:cancel', (_event, taskId: string) => {
     try {
       const validId = requireString(taskId, 'taskId', 100);
-      return ctx.getProcessor().getTaskQueue().cancel(validId);
+      const queue = ctx.getProcessor().getTaskQueue();
+      const task = queue.getById(validId);
+      const cancelled = queue.cancel(validId);
+      if (cancelled && task) {
+        const recordingId = task.recordingId ?? ctx.getDb().getRecordingByPath(task.filePath)?.id;
+        if (recordingId) {
+          ctx.getDb().updateRecordingStatus(recordingId, 'cancelled');
+        }
+      }
+      return cancelled;
     } catch {
       return false;
     }

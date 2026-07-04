@@ -46,7 +46,7 @@ export interface PairingSession {
 
 export interface StoredCredential {
   /** The shared AES-256 key, derived via ECDH + HKDF. */
-  aesKey: string; // base64
+  aesKeyBase64: string;
   /** The phone's ECDH public key (base64), for re-derivation if needed. */
   phonePublicKey: string;
   /** When the pairing was completed (ISO string). */
@@ -85,13 +85,11 @@ export class PairingManager {
    * Start a new pairing session: generate ECDH key pair + nonce, and return
    * the QR code data for the phone to scan.
    *
-   * @param licenseKey  The user's license key (embedded in QR for the phone
-   *                    to authenticate with the server)
    * @param machineId   This machine's persistent ID (so the server can route
    *                    to this desktop's WebSocket)
    * @returns QR code data containing the pair URL
    */
-  startSession(licenseKey: string, machineId: string): PairingQRData {
+  startSession(machineId: string): PairingQRData {
     const { privateKeyPem, publicKeyBase64 } = generateECDHKeyPair();
     const nonce = generatePairingNonce();
 
@@ -105,7 +103,6 @@ export class PairingManager {
     // Build the QR URL. The phone scans this and gets everything it needs to
     // POST its public key to the server.
     const params = new URLSearchParams({
-      key: licenseKey,
       mid: machineId,
       pub: publicKeyBase64,
       nonce,

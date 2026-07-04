@@ -201,7 +201,7 @@ function vadFeedAndDrain(sessionId: number, samples: Float32Array): VadDrainSegm
         const samplesBuffer = segSamples.buffer.slice(
           segSamples.byteOffset,
           segSamples.byteOffset + segSamples.byteLength,
-        );
+        ) as ArrayBuffer;
         results.push({
           index: session.segmentIndex++,
           start: startSec,
@@ -279,7 +279,7 @@ function vadFlushAndDrain(sessionId: number): VadDrainSegment[] {
       const samplesBuffer = segSamples.buffer.slice(
         segSamples.byteOffset,
         segSamples.byteOffset + segSamples.byteLength,
-      );
+      ) as ArrayBuffer;
       results.push({
         index: session.segmentIndex++,
         start: startSec,

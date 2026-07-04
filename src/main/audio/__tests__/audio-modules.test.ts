@@ -15,11 +15,12 @@ import { Transcriber } from '../transcriber';
 import { Diarizer } from '../diarizer';
 import { SherpaEngine } from '../sherpa-engine';
 import { SherpaModelManager } from '../sherpa-model-manager';
+import type { SherpaEngineProxy } from '../sherpa-engine-proxy';
 
 const TMP_DIR = os.tmpdir().replace(/\\/g, '/');
 
 describe('Audio module instantiation and interface', () => {
-  const engine = new SherpaEngine(new SherpaModelManager(`${TMP_DIR}/fake-models`));
+  const engine = new SherpaEngine(new SherpaModelManager(`${TMP_DIR}/fake-models`)) as unknown as SherpaEngineProxy;
 
   it('AudioPreprocessor can be instantiated and has expected methods', () => {
     const preprocessor = new AudioPreprocessor(engine);

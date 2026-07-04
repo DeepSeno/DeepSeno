@@ -30,6 +30,7 @@ describe('UnifiedMessageHandler', () => {
       execute: vi.fn().mockResolvedValue({
         text: 'Test response',
         toolCalls: [],
+        images: [],
       } as AgentResponse),
     };
     mockSessionManager = {

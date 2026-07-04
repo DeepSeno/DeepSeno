@@ -5,7 +5,7 @@ import { QueryEngine } from '../rag/query-engine';
 import { VoiceBrainDB } from '../db/database';
 import type { SherpaEngineProxy } from '../audio/sherpa-engine-proxy';
 import { loadSettings } from '../settings';
-import { createLLMClient, getLLMModel } from '../llm/create-client';
+import { createLLMClient } from '../llm/create-client';
 import { FeishuEventHandler } from './event-handler';
 import { type TranscriptionResult } from './card-builder';
 import { MessageQueue } from './message-queue';
@@ -111,7 +111,6 @@ export class FeishuBot extends EventEmitter {
   private getDb: () => VoiceBrainDB;
   private getSherpaEngine: () => SherpaEngineProxy;
   private getMemoryManager: () => import('../agent/memory-manager').MemoryManager | null;
-  private config: FeishuBotConfig | null = null;
   private _status: FeishuBotStatus = 'disconnected';
   private messageQueue: MessageQueue | null = null;
   private reconnectManager: ReconnectManager | null = null;
@@ -152,8 +151,6 @@ export class FeishuBot extends EventEmitter {
     if (this._status !== 'disconnected') {
       await this.stop();
     }
-
-    this.config = config;
 
     const settings = loadSettings();
     const local = createLLMClient(settings);
@@ -212,7 +209,7 @@ export class FeishuBot extends EventEmitter {
         this.wsClient = new lark.WSClient({
           appId: config.appId,
           appSecret: config.appSecret,
-          loggerLevel: lark.LoggerLevel.WARN,
+          loggerLevel: lark.LoggerLevel.warn,
           httpInstance: fetchHttpInstance as any,
         });
         await this.wsClient.start({ eventDispatcher });
@@ -261,7 +258,6 @@ export class FeishuBot extends EventEmitter {
     }
     this.client = null;
     this.handler = null;
-    this.config = null;
     this.setStatus('disconnected');
     console.log('[Feishu] Bot stopped');
   }

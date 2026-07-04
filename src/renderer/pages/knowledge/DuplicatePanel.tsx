@@ -24,7 +24,6 @@ interface DuplicatePanelProps {
   selectMode: boolean;
   selectedIds: Set<number>;
   onToggleSelectMode: () => void;
-  onToggleSelection: (id: number) => void;
   onMergeComplete: () => void;
   /** Slot rendered on the right side of the toolbar (e.g. rebuild / delete) */
   rightSlot?: React.ReactNode;
@@ -36,7 +35,6 @@ export default function DuplicatePanel({
   selectMode,
   selectedIds,
   onToggleSelectMode,
-  onToggleSelection,
   onMergeComplete,
   rightSlot,
 }: DuplicatePanelProps) {

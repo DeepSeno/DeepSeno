@@ -8,7 +8,14 @@ import { zh } from './zh';
 export const TRANSLATIONS = { en, zh } as const;
 
 export type Lang = 'en' | 'zh';
-export type Translations = (typeof TRANSLATIONS)['en'];
+type WidenLiteral<T> =
+  T extends (...args: any[]) => any ? T :
+  T extends string ? string :
+  T extends number ? number :
+  T extends boolean ? boolean :
+  T extends readonly unknown[] ? T :
+  { readonly [K in keyof T]: WidenLiteral<T[K]> };
+export type Translations = WidenLiteral<(typeof TRANSLATIONS)['en']>;
 
 interface I18nContextType {
   lang: Lang;

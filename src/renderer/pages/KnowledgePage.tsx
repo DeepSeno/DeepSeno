@@ -458,15 +458,6 @@ export default function KnowledgePage() {
   }, [graphPanelWidth]);
 
   // ─── Render Helpers ─────────────────────────────────────────
-  const TypeBadge = ({ type }: { type: string }) => {
-    const tone = getTypeTone(type);
-    return (
-      <span className={`kz-badge kz-badge--${tone.tone}`}>
-        {getTypeLabel(type, t)}
-      </span>
-    );
-  };
-
   const StatusBadge = ({ page }: { page: { content_edited?: number; compilation_count: number } }) => {
     const status = getPageStatus(page);
     const count = page.compilation_count;
@@ -710,7 +701,6 @@ export default function KnowledgePage() {
           selectMode={selectMode}
           selectedIds={selectedIds}
           onToggleSelectMode={handleToggleSelectMode}
-          onToggleSelection={handleToggleSelection}
           onMergeComplete={handleMergeComplete}
           rightSlot={
             selectMode && selectedIds.size > 0 ? (

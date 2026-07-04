@@ -24,14 +24,6 @@ interface SessionRow {
   message_count: number;
 }
 
-interface MessageRow {
-  id: number;
-  session_id: number;
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: number;
-}
-
 export class SessionManager {
   /** Maps `channelId:userId` to session ID */
   activeSessionCache: Map<string, number> = new Map();

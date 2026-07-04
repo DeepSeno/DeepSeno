@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { SherpaEngineProxy } from './sherpa-engine-proxy';
-import type { VadDrainSegment, VadConfigOverrides } from './sherpa-worker-types';
+import type { VadConfigOverrides } from './sherpa-worker-types';
 
 /** A single transcription segment emitted during real-time streaming. */
 export interface LiveSegment {
@@ -162,7 +162,7 @@ export class StreamingTranscriber extends EventEmitter {
    * Stop the transcription session.
    * Flushes remaining VAD buffer, transcribes any final segments.
    */
-  async stop(timeoutMs = 3000): Promise<DoneSummary> {
+  async stop(_timeoutMs = 3000): Promise<DoneSummary> {
     if (!this.running || this.sessionId === null) {
       throw new Error('StreamingTranscriber is not running');
     }

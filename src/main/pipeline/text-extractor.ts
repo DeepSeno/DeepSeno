@@ -25,40 +25,25 @@ export async function extractText(filePath: string, mediaType: string): Promise<
 
 export async function extractPdfText(filePath: string, options: ExtractPdfOptions = {}): Promise<ExtractedText> {
   ensurePdfJsGlobals();
-  const mod = await import('pdf-parse');
-  const PDFParse = mod.PDFParse || mod.default;
+  const { PDFParse } = await import('pdf-parse');
 
   const buffer = await fs.readFile(filePath);
-
-  // pdf-parse v2: class-based API — new PDFParse({ data }) + getText()
-  if (typeof PDFParse === 'function' && PDFParse.prototype && PDFParse.prototype.getText) {
-    const uint8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const parser = new PDFParse({ data: uint8 });
-    try {
-      const parseOptions = options.maxPages && options.maxPages > 0
-        ? { first: Math.floor(options.maxPages) }
-        : undefined;
-      const result = await parser.getText(parseOptions);
-      const text = (typeof result === 'string' ? result : result?.text || '').trim();
-      return {
-        text,
-        pageCount: typeof result === 'string' ? undefined : result?.total,
-        wordCount: countWords(text),
-      };
-    } finally {
-      await parser.destroy?.();
-    }
+  const uint8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const parser = new PDFParse({ data: uint8 });
+  try {
+    const parseOptions = options.maxPages && options.maxPages > 0
+      ? { first: Math.floor(options.maxPages) }
+      : undefined;
+    const result: any = await parser.getText(parseOptions);
+    const text = (typeof result === 'string' ? result : result?.text || '').trim();
+    return {
+      text,
+      pageCount: typeof result === 'string' ? undefined : result?.total,
+      wordCount: countWords(text),
+    };
+  } finally {
+    await parser.destroy?.();
   }
-
-  // pdf-parse v1: function-based API — pdfParse(buffer) returns { text, numpages }
-  const pdfParse = PDFParse;
-  const data = await pdfParse(buffer, options.maxPages ? { max: Math.floor(options.maxPages) } : undefined);
-  const text = data.text.trim();
-  return {
-    text,
-    pageCount: data.numpages,
-    wordCount: countWords(text),
-  };
 }
 
 function ensurePdfJsGlobals(): void {

@@ -183,7 +183,7 @@ function buildChunks(totalSamples: number, sampleRate: number): ChunkDef[] {
 }
 
 function extractSpeakerEmbedding(
-  sherpa: any,
+  _sherpa: any,
   extractor: any,
   wave: { samples: Float32Array; sampleRate: number },
   segments: Segment[],

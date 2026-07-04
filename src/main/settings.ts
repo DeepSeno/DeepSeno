@@ -224,7 +224,7 @@ function getDefaults(): AppSettings {
     localEmbedModel: '',
     obsidianVaultDir: '',
     sceneShortcuts: {
-      dictation: 'Alt+,',
+      dictation: 'CommandOrControl+Shift+D',
       local_meeting: 'CommandOrControl+Shift+L',
       online_meeting: 'CommandOrControl+Shift+M',
       media: 'CommandOrControl+Shift+K',
@@ -238,6 +238,7 @@ function getDefaults(): AppSettings {
     pasteCleanModel: '',
     showAllFeatures: true,
     firstLaunchTime: 0,  // 0 means "set on first load"
+    licensing: 'free',
     licenseKey: '',
     diarizationMethod: 'embedding',
     relayTunnelEnabled: false,
@@ -253,6 +254,7 @@ function getDefaults(): AppSettings {
       dailySummary: '',
       classify: '',
       memoryExtract: '',
+      speakerCorrection: '',
     },
   };
 }
@@ -423,6 +425,15 @@ export function loadSettings(): AppSettings {
   delete c.recordingShortcut;
   // Ensure all scene keys exist (forward compat)
   cached.sceneShortcuts = { ...defaults.sceneShortcuts, ...cached.sceneShortcuts };
+  // Alt+, is accepted by Electron in some environments, but it is fragile on
+  // physical macOS keyboards/input methods. Migrate the old default only;
+  // user-customized shortcuts are left untouched.
+  if (cached.sceneShortcuts.dictation === 'Alt+,') {
+    cached.sceneShortcuts = {
+      ...cached.sceneShortcuts,
+      dictation: defaults.sceneShortcuts.dictation,
+    };
+  }
 
   // Migrate outdated LLM model names to current default (qwen3.5 series)
   const OUTDATED_MODELS = new Set([

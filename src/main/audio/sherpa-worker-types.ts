@@ -62,6 +62,11 @@ export interface VadDestroyRequest extends WorkerRequestBase {
   args: { sessionId: number };
 }
 
+export interface SetLanguageRequest extends WorkerRequestBase {
+  method: 'setLanguage';
+  args: { language: string };
+}
+
 export interface DisposeRequest extends WorkerRequestBase {
   method: 'dispose';
   args: Record<string, never>;
@@ -77,6 +82,7 @@ export type WorkerRequest =
   | VadFeedAndDrainRequest
   | VadFlushAndDrainRequest
   | VadDestroyRequest
+  | SetLanguageRequest
   | DisposeRequest;
 
 // ─── Response types ─────────────────────────────────────────

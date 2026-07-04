@@ -6,12 +6,15 @@ import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
 import { generateToken, getToken, authMiddleware } from './auth';
 import { CertManager } from './cert-manager';
 import { MessageQueuedError } from '../channels/openclaw-wechat-channel';
 import { getUploadsDir } from '../paths';
 import { deriveLanKey, processProxyRequest } from './proxy-dispatcher';
+
+function firstParam(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? '' : value ?? '';
+}
 
 /**
  * LAN HTTP server for mobile companion sync.
@@ -167,8 +170,9 @@ export class LanServer {
 
     // ─── Protected: serve recording images ────────────────
     this.app.get('/api/recordings/:id/image{/:index}', authMiddleware, (req, res) => {
-      const recordingId = parseInt(req.params.id, 10);
-      const index = req.params.index ? parseInt(req.params.index, 10) : 0;
+      const recordingId = parseInt(firstParam(req.params.id), 10);
+      const indexParam = firstParam(req.params.index);
+      const index = indexParam ? parseInt(indexParam, 10) : 0;
       const filePath = this.onGetRecordingFilePath?.(recordingId);
       if (!filePath || !fs.existsSync(filePath)) {
         res.status(404).json({ error: 'Image not found' });
@@ -245,7 +249,7 @@ export class LanServer {
 
     // ─── Protected: get image count for a recording ──────
     this.app.get('/api/recordings/:id/images', authMiddleware, (req, res) => {
-      const recordingId = parseInt(req.params.id, 10);
+      const recordingId = parseInt(firstParam(req.params.id), 10);
       const filePath = this.onGetRecordingFilePath?.(recordingId);
       if (!filePath || !fs.existsSync(filePath)) {
         res.json({ count: 0, images: [] });
@@ -274,13 +278,13 @@ export class LanServer {
 
     // ─── Protected: get segments for a recording ──────────
     this.app.get('/api/recordings/:id/segments', authMiddleware, (req, res) => {
-      const segments = this.onGetSegments?.(parseInt(req.params.id, 10)) || [];
+      const segments = this.onGetSegments?.(parseInt(firstParam(req.params.id), 10)) || [];
       res.json(segments);
     });
 
     // ─── Protected: full-text search ────────────────────
     this.app.get('/api/search', authMiddleware, (req, res) => {
-      const q = req.query.q as string;
+      const q = firstParam(req.query.q as string | string[] | undefined);
       if (!q) {
         res.status(400).json({ error: 'q parameter is required' });
         return;
@@ -292,7 +296,7 @@ export class LanServer {
     // ─── Protected: get meeting notes for a recording ─────
     this.app.get('/api/recordings/:id/notes', authMiddleware, (req, res) => {
       const notes =
-        this.onGetMeetingNotes?.(parseInt(req.params.id, 10)) || null;
+        this.onGetMeetingNotes?.(parseInt(firstParam(req.params.id), 10)) || null;
       res.json(notes || { error: 'No notes found' });
     });
 
@@ -314,7 +318,7 @@ export class LanServer {
     // ─── Protected: daily summary ─────────────────────────
     this.app.get('/api/daily-summary/:date', authMiddleware, (req, res) => {
       try {
-        const summary = this.onGetDailySummary?.(req.params.date);
+        const summary = this.onGetDailySummary?.(firstParam(req.params.date));
         res.json(summary || { error: 'No summary found' });
       } catch (err) {
         res.status(500).json({ error: String(err) });
@@ -324,7 +328,7 @@ export class LanServer {
     // ─── Protected: weekly summary ────────────────────────
     this.app.get('/api/weekly-summary/:startDate', authMiddleware, (req, res) => {
       try {
-        const summary = this.onGetWeeklySummary?.(req.params.startDate);
+        const summary = this.onGetWeeklySummary?.(firstParam(req.params.startDate));
         res.json(summary || { error: 'No summary found' });
       } catch (err) {
         res.status(500).json({ error: String(err) });
@@ -334,7 +338,7 @@ export class LanServer {
     // ─── Protected: monthly summary ───────────────────────
     this.app.get('/api/monthly-summary/:startDate', authMiddleware, (req, res) => {
       try {
-        const summary = this.onGetMonthlySummary?.(req.params.startDate);
+        const summary = this.onGetMonthlySummary?.(firstParam(req.params.startDate));
         res.json(summary || { error: 'No summary found' });
       } catch (err) {
         res.status(500).json({ error: String(err) });
@@ -345,9 +349,9 @@ export class LanServer {
     this.app.get('/api/extracted-items', authMiddleware, (req, res) => {
       try {
         const opts: { type?: string; status?: string; recordingId?: number } = {};
-        if (req.query.type) opts.type = req.query.type as string;
-        if (req.query.status) opts.status = req.query.status as string;
-        if (req.query.recordingId) opts.recordingId = parseInt(req.query.recordingId as string, 10);
+        if (req.query.type) opts.type = firstParam(req.query.type as string | string[] | undefined);
+        if (req.query.status) opts.status = firstParam(req.query.status as string | string[] | undefined);
+        if (req.query.recordingId) opts.recordingId = parseInt(firstParam(req.query.recordingId as string | string[] | undefined), 10);
         const items = this.onGetExtractedItems?.(opts) || [];
         res.json(items);
       } catch (err) {
@@ -358,7 +362,7 @@ export class LanServer {
     // ─── Protected: update extracted item status ──────────
     this.app.patch('/api/extracted-items/:id/status', authMiddleware, (req, res) => {
       try {
-        const id = parseInt(req.params.id, 10);
+        const id = parseInt(firstParam(req.params.id), 10);
         const { status } = req.body;
         if (!status) {
           res.status(400).json({ error: 'status is required' });
@@ -394,7 +398,7 @@ export class LanServer {
     // ─── Protected: session messages ──────────────────────
     this.app.get('/api/chat/sessions/:id/messages', authMiddleware, (req, res) => {
       try {
-        const sessionId = parseInt(req.params.id, 10);
+        const sessionId = parseInt(firstParam(req.params.id), 10);
         const messages = this.onGetSessionMessages?.(sessionId) || [];
         res.json(messages);
       } catch (err) {
@@ -753,31 +757,6 @@ export class LanServer {
     // ─── mDNS skipped — phones connect via QR code scan ───
 
     return token;
-  }
-
-  /**
-   * Friendly, stable device name for the companion's discovery list.
-   * os.hostname() is network-derived and gets poisoned to placeholders like
-   * "bogon" behind some VPNs, so prefer the user-set computer name.
-   */
-  private getDeviceName(): string {
-    // macOS: the user-facing Computer Name (what AirDrop/Finder show) — set by
-    // the user, unaffected by DHCP/VPN. Fall back to the Bonjour-safe LocalHostName.
-    if (process.platform === 'darwin') {
-      for (const key of ['ComputerName', 'LocalHostName']) {
-        try {
-          const name = execSync(`scutil --get ${key}`, { timeout: 1000 }).toString().trim();
-          if (name) return name;
-        } catch { /* ignore */ }
-      }
-    }
-    // Other platforms (or scutil failed): hostname minus .local, unless it's a
-    // useless placeholder or a bare IP.
-    const host = os.hostname().replace(/\.local$/, '').trim();
-    const bad = new Set(['', 'bogon', 'localhost', 'unknown']);
-    const looksLikeIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
-    if (host && !bad.has(host.toLowerCase()) && !looksLikeIp) return host;
-    return 'Desktop';
   }
 
   /** Stop the server. */

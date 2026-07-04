@@ -50,6 +50,22 @@ function isRetryableError(err: Error): boolean {
   );
 }
 
+const TERMINAL_STATUSES = new Set<QueueTask['status']>([
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+]);
+
+function isTerminalStatus(status: QueueTask['status']): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
+function isCancellationError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.name === 'TaskCancelledError' || /cancelled by user|canceled by user/i.test(err.message);
+}
+
 // Maximum time (ms) a single task is allowed to run before being force-failed.
 const TASK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -93,16 +109,14 @@ export class TaskQueue extends EventEmitter {
       task: QueueTask,
       signal: AbortSignal,
     ) => Promise<void>;
+    this.processNext();
   }
 
   add(filePath: string): QueueTask {
     const existing = this.queue.find(
       (t) =>
         t.filePath === filePath &&
-        t.status !== 'completed' &&
-        t.status !== 'failed' &&
-        t.status !== 'cancelled' &&
-        t.status !== 'interrupted',
+        !isTerminalStatus(t.status),
     );
     if (existing) return existing;
 
@@ -146,19 +160,24 @@ export class TaskQueue extends EventEmitter {
   cancel(taskId: string): boolean {
     const task = this.queue.find((t) => t.id === taskId);
     if (!task) return false;
-
-    if (task.status === 'pending') {
-      task.status = 'cancelled';
-      this.markDirty(task.id);
-      this.emit('task:cancelled', task);
-      return true;
-    }
+    if (isTerminalStatus(task.status)) return false;
 
     // Cancel currently processing task
     if (this.currentTaskId === taskId && this.abortController) {
       this.abortController.abort();
       task.status = 'cancelled';
-      this.markDirty(task.id);
+      task.error = 'Cancelled by user';
+      task.notes = 'Cancelled by user';
+      this.persistTaskNow(task);
+      this.emit('task:cancelled', task);
+      return true;
+    }
+
+    if (task.status === 'pending') {
+      task.status = 'cancelled';
+      task.error = 'Cancelled by user';
+      task.notes = 'Cancelled by user';
+      this.persistTaskNow(task);
       this.emit('task:cancelled', task);
       return true;
     }
@@ -204,12 +223,13 @@ export class TaskQueue extends EventEmitter {
     this.processing = true;
     this.currentTaskId = task.id;
     this.abortController = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | null = null;
 
     try {
       // Race the task against a timeout to prevent indefinite hangs
       const taskPromise = this.processFunc(task, this.abortController.signal);
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(
+        timeout = setTimeout(() => reject(new Error(
           `Task timed out after ${TASK_TIMEOUT_MS / 60000} minutes. ` +
           'The pipeline step may have hung (Python subprocess or LLM call). ' +
           'The task will be marked as failed and the queue will continue.'
@@ -217,15 +237,36 @@ export class TaskQueue extends EventEmitter {
       });
 
       await Promise.race([taskPromise, timeoutPromise]);
+      if (timeout) clearTimeout(timeout);
 
-      if (task.status !== 'cancelled') {
+      if (task.status === 'completed') {
+        task.progress = 100;
+        this.persistTaskNow(task);
+        this.emit('task:completed', task);
+      } else if (task.status === 'failed') {
+        this.persistTaskNow(task);
+        this.emit('task:failed', task);
+      } else if (!isTerminalStatus(task.status)) {
         task.status = 'completed';
         task.progress = 100;
-        this.markDirty(task.id);
+        this.persistTaskNow(task);
         this.emit('task:completed', task);
       }
     } catch (err: any) {
-      if (task.status !== 'cancelled') {
+      if (isCancellationError(err)) {
+        if (!isTerminalStatus(task.status)) {
+          task.status = 'cancelled';
+          task.error = 'Cancelled by user';
+          task.notes = 'Cancelled by user';
+          this.persistTaskNow(task);
+          this.emit('task:cancelled', task);
+        }
+      } else if (task.status === 'failed') {
+        task.error = task.error || err.message;
+        this.persistTaskNow(task);
+        console.error(`[TaskQueue] Task ${task.id} failed:`, task.error);
+        this.emit('task:failed', task);
+      } else if (!isTerminalStatus(task.status)) {
         // Auto-retry for transient errors (network, timeout, Local)
         if (isRetryableError(err) && task.retryCount < task.maxRetries) {
           task.retryCount++;
@@ -241,20 +282,17 @@ export class TaskQueue extends EventEmitter {
           const delay = backoffDelay(task.retryCount);
           console.log(`[TaskQueue] Retry delay: ${Math.round(delay / 1000)}s`);
           await new Promise((r) => setTimeout(r, delay));
-          this.processing = false;
-          this.currentTaskId = null;
-          this.abortController = null;
-          this.processNext();
           return;
         }
 
         task.status = 'failed';
         task.error = err.message;
-        this.markDirty(task.id);
+        this.persistTaskNow(task);
         console.error(`[TaskQueue] Task ${task.id} failed:`, err.message);
         this.emit('task:failed', task);
       }
     } finally {
+      if (timeout) clearTimeout(timeout);
       this.processing = false;
       this.currentTaskId = null;
       this.abortController = null;
@@ -264,18 +302,19 @@ export class TaskQueue extends EventEmitter {
 
   /** Force-reset stuck queue state (e.g. after a crash recovery). */
   resetStuck(): number {
+    if (this.abortController) {
+      try { this.abortController.abort(); } catch { /* already aborted */ }
+    }
     let count = 0;
     for (const task of this.queue) {
       if (
-        task.status !== 'completed' &&
-        task.status !== 'failed' &&
-        task.status !== 'cancelled' &&
+        !isTerminalStatus(task.status) &&
         task.status !== 'pending' &&
-        task.status !== 'interrupted'
+        task.id === this.currentTaskId
       ) {
         task.status = 'failed';
         task.error = 'Reset: task was stuck in processing state';
-        this.markDirty(task.id);
+        this.persistTaskNow(task);
         this.emit('task:failed', task);
         count++;
       }
@@ -291,19 +330,26 @@ export class TaskQueue extends EventEmitter {
   updateTask(id: string, update: Partial<QueueTask>): void {
     const task = this.queue.find((t) => t.id === id);
     if (task) {
+      if (isTerminalStatus(task.status)) {
+        const nextStatus = update.status;
+        if (!nextStatus || !isTerminalStatus(nextStatus) || nextStatus !== task.status) {
+          return;
+        }
+      }
       Object.assign(task, update);
       this.markDirty(task.id);
       this.emit('task:progress', task);
     }
   }
 
+  getById(taskId: string): QueueTask | undefined {
+    return this.queue.find((t) => t.id === taskId);
+  }
+
   getAll(): QueueTask[] {
     return this.queue.filter(
       (t) =>
-        t.status !== 'completed' &&
-        t.status !== 'failed' &&
-        t.status !== 'cancelled' &&
-        t.status !== 'interrupted',
+        !isTerminalStatus(t.status),
     );
   }
 
@@ -395,7 +441,7 @@ export class TaskQueue extends EventEmitter {
       const rows = this.db.prepare(`
         SELECT id, file_path, recording_id, status, progress, error, notes, retry_count, max_retries, media_type, created_at
         FROM task_queue
-        WHERE status NOT IN ('completed', 'cancelled')
+        WHERE status NOT IN ('completed', 'cancelled', 'interrupted')
       `).all() as Array<{
         id: string;
         file_path: string;
@@ -436,7 +482,7 @@ export class TaskQueue extends EventEmitter {
       const cutoff = new Date(Date.now() - RETENTION_MS).toISOString();
       this.db.prepare(`
         DELETE FROM task_queue
-        WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?
+        WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted') AND updated_at < ?
       `).run(cutoff);
     } catch (err: any) {
       console.error('[TaskQueue] Failed to cleanup old tasks:', err.message);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeTranscriptWithDiarization, MergedSegment } from '../merge-transcript';
+import { mergeTranscriptWithDiarization } from '../merge-transcript';
 import { TranscribeResult } from '../transcriber';
 import { DiarizeResult } from '../diarizer';
 

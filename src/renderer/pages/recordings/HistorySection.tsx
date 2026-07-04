@@ -1,4 +1,4 @@
-import { Trash2, RefreshCw, X, Mic, Video, FileText, File, Image, MessageCircle, Inbox, History, ExternalLink } from 'lucide-react';
+import { Trash2, X, Mic, Video, FileText, File, Image, MessageCircle, Inbox, History, ExternalLink } from 'lucide-react';
 import { Translations } from '../../i18n';
 import type { HistoryItem, TextNoteItem } from './types';
 import { SCENE_BADGE, MEDIA_TYPE_BADGE } from './types';
@@ -178,12 +178,20 @@ export default function HistorySection({
                     className={`kz-badge ${
                       item.status === 'done'
                         ? 'kz-badge--success'
-                        : item.status === 'error'
-                          ? 'kz-badge--danger'
-                          : 'kz-badge--info'
+                        : item.status === 'cancelled'
+                          ? 'kz-badge--warn'
+                          : item.status === 'error'
+                            ? 'kz-badge--danger'
+                            : 'kz-badge--info'
                     } kz-badge--dot`}
                   >
-                    {item.status === 'done' ? r.status_success : item.status === 'error' ? r.status_error : r.status_active}
+                    {item.status === 'done'
+                      ? r.status_success
+                      : item.status === 'cancelled'
+                        ? r.status_cancelled
+                        : item.status === 'error'
+                          ? r.status_error
+                          : r.status_active}
                   </span>
                   {/* Action buttons — icon-only ghost (matches design: reprocess + open + delete) */}
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>

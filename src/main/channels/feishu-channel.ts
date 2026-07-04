@@ -4,7 +4,6 @@ import { FeishuBot } from '../feishu/bot';
 export class FeishuChannel implements MessageChannel {
   readonly id = 'feishu';
   readonly name = '飞书';
-  private messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null;
 
   constructor(private bot: FeishuBot) {}
 
@@ -22,8 +21,7 @@ export class FeishuChannel implements MessageChannel {
     return this.bot.status === 'connected';
   }
 
-  onMessage(handler: (msg: IncomingMessage) => Promise<void>): void {
-    this.messageHandler = handler;
+  onMessage(_handler: (msg: IncomingMessage) => Promise<void>): void {
     // Note: Currently FeishuBot handles messages internally via EventHandler.
     // Future: decouple EventHandler to route through this handler.
   }

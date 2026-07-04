@@ -15,9 +15,10 @@ export function seedPredefinedTasks(): void {
   let db: VoiceBrainDB | null = null;
   try {
     db = new VoiceBrainDB(getDbPath());
+    const rawDb = db.getRawDb();
 
     // Check if tasks already exist — if so, only add missing predefined tasks
-    const count = db.db.prepare('SELECT COUNT(*) AS cnt FROM scheduled_tasks').get() as { cnt: number };
+    const count = rawDb.prepare('SELECT COUNT(*) AS cnt FROM scheduled_tasks').get() as { cnt: number };
     if (count.cnt > 0) {
       console.log('[seedTasks] scheduled_tasks already populated, checking for missing tasks');
       seedMissingTasks(db);
@@ -50,7 +51,7 @@ export function seedPredefinedTasks(): void {
     });
     if (!settings.autoReportDaily) {
       // Pause the task we just created (it's the last inserted row)
-      const lastId = db.db.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
+      const lastId = rawDb.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
       db.updateScheduledTask(lastId.id, { status: 'paused' });
     }
 
@@ -81,7 +82,7 @@ export function seedPredefinedTasks(): void {
       next_run_at: weeklyNextRun ?? undefined,
     });
     if (!settings.autoReportWeekly) {
-      const lastId = db.db.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
+      const lastId = rawDb.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
       db.updateScheduledTask(lastId.id, { status: 'paused' });
     }
 
@@ -109,7 +110,7 @@ export function seedPredefinedTasks(): void {
       next_run_at: monthlyNextRun ?? undefined,
     });
     if (!settings.autoReportMonthly) {
-      const lastId = db.db.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
+      const lastId = rawDb.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
       db.updateScheduledTask(lastId.id, { status: 'paused' });
     }
 
@@ -202,7 +203,8 @@ export function seedPredefinedTasks(): void {
  */
 function seedMissingTasks(db: VoiceBrainDB): void {
   const settings = loadSettings();
-  const existing = db.db.prepare(
+  const rawDb = db.getRawDb();
+  const existing = rawDb.prepare(
     "SELECT action FROM scheduled_tasks WHERE task_type = 'predefined'"
   ).all() as { action: string }[];
   const existingActions = new Set(existing.map(e => e.action));
@@ -213,7 +215,7 @@ function seedMissingTasks(db: VoiceBrainDB): void {
   // keep getting an automatic daily summary now that the per-recording one is
   // gone. Idempotent — only runs until the task already carries { today: true }.
   try {
-    const dailyTasks = db.db.prepare(
+    const dailyTasks = rawDb.prepare(
       "SELECT id, action_params, status FROM scheduled_tasks WHERE action = 'daily_report' AND task_type = 'predefined'"
     ).all() as { id: number; action_params: string | null; status: string }[];
     for (const t of dailyTasks) {
@@ -255,7 +257,7 @@ function seedMissingTasks(db: VoiceBrainDB): void {
   // no dedup → flooded channels and the LLM queue. Downfreq existing tasks to
   // daily 08:00. Idempotent — only the old hourly value is rewritten.
   try {
-    const insightTasks = db.db.prepare(
+    const insightTasks = rawDb.prepare(
       "SELECT id, schedule_expr FROM scheduled_tasks WHERE action = 'insight_scan' AND task_type = 'predefined'"
     ).all() as { id: number; schedule_expr: string }[];
     const newInsightCron = '0 8 * * *';
@@ -295,7 +297,7 @@ function seedMissingTasks(db: VoiceBrainDB): void {
       next_run_at: computeNextRun('cron', monthlyCron) ?? undefined,
     });
     if (!settings.autoReportMonthly) {
-      const lastId = db.db.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
+      const lastId = rawDb.prepare('SELECT MAX(id) AS id FROM scheduled_tasks').get() as { id: number };
       db.updateScheduledTask(lastId.id, { status: 'paused' });
     }
     console.log('[seedTasks] Added missing task: monthly_report');
