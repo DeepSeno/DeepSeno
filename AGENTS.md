@@ -2,6 +2,14 @@
 
 本文档供开发者与 AI 助手参考，描述项目结构、技术约定与已知风险点。
 
+## 项目关系
+- 当前仓库（`deepseno`）是 DeepSeno 的客户端 PC 项目，即 macOS + Windows Electron 桌面应用。
+- 同级仓库位于 `/Users/daiqiang/Project`：
+  - `deepseno-ios`：DeepSeno iOS 项目。
+  - `deepseno-android`：DeepSeno Android 项目。
+  - `voicebrain-web`：DeepSeno 后端/Web 项目，在部分本地环境中可能不存在。
+- `AGENTS.md` 是本仓库面向 AI 助手的唯一项目说明入口；旧的 `CLAUDE.md` 内容如有出现，应合并到本文件后删除。
+
 ## 协作约定
 - 仓库内沟通、注释、提交说明默认使用中文，保持表达专业、简洁、准确。
 - 不擅自引入与当前任务无关的改动（依赖、配置、格式化），保持 diff 聚焦。
