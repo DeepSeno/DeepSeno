@@ -99,7 +99,7 @@ import { autoUpdater } from 'electron-updater';
 import { registerIpcHandlers, cleanupIpc, startFileWatching, getRecordingFilePath, enqueueForProcessing, getQueryEngine, getTaskQueue, getProcessor, initFeishuBot, stopFeishuBot, getFeishuBot, getSyncManager, startRealtimeTranscription, stopRealtimeTranscription, prewarmTranscriber, getSegmentTextForRecording, hasPendingSegmentOptimizations, awaitAndMergeSegmentOptimizations, pasteClean, triggerPostProcessing, getCurrentScene, stopChannels, getDingTalkChannel, getWeChatChannel, getMessageRouter, stopPlugins, getPluginEngine, getSherpaEngine, setDownloadManager, getAgentExecutor, getKnowledgeCompiler, getInsightEngine } from '../src/main/ipc-handlers';
 import { BackgroundDownloadManager } from '../src/main/download-manager';
 import { VoiceBrainDB } from '../src/main/db/database';
-import { getDbPath, getLLMModelsDir } from '../src/main/paths';
+import { getDbPath } from '../src/main/paths';
 import { TaskScheduler } from '../src/main/scheduler/task-scheduler';
 import { TaskExecutor } from '../src/main/scheduler/task-executor';
 import { seedPredefinedTasks } from '../src/main/scheduler/seed-tasks';
@@ -116,6 +116,8 @@ import { WorkflowEngine } from '../src/main/agent/workflow-engine';
 import { AgentEventBus } from '../src/main/agent/event-bus';
 import { getFFmpegManager } from '../src/main/audio/ffmpeg-manager';
 import { LlamaServerManager } from '../src/main/llm/llama-server-manager';
+import { ensureLlamaServer, getLlamaServer, setLlamaServer } from '../src/main/ipc/context';
+import { prepareLlamaRouterRuntime } from '../src/main/llm/llama-router-runtime';
 
 let taskScheduler: TaskScheduler | null = null;
 let ollamaManager: OllamaManager | null = null;
@@ -1307,27 +1309,13 @@ app.whenReady().then(async () => {
   // ─── Bundled llama-server (local provider) ──────────────────
   const settings = loadSettings();
   if (settings.llmProvider === 'local') {
-    const { setLlamaServer } = await import('../src/main/ipc/context');
-
-    // Always create the manager so IPC handlers can access it
-    llamaServer = new LlamaServerManager();
-    setLlamaServer(llamaServer);
+    // Always create the manager so IPC handlers can access it.
+    llamaServer = ensureLlamaServer();
 
     // Start in router mode — auto-discovers GGUF files in models directory
-    const modelsDir = getLLMModelsDir();
-    const presetSrc = path.join(__dirname, '..', '..', 'resources', 'llama-models', 'models.ini');
-    const presetDest = path.join(modelsDir, 'models.ini');
-    // Copy preset to models directory if it exists and is newer
-    try {
-      if (fs.existsSync(presetSrc)) {
-        if (!fs.existsSync(presetDest) || fs.statSync(presetSrc).mtimeMs > fs.statSync(presetDest).mtimeMs) {
-          fs.copyFileSync(presetSrc, presetDest);
-        }
-      }
-    } catch { /* ignore copy errors */ }
+    const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
 
     if (fs.existsSync(modelsDir)) {
-      const presetPath = fs.existsSync(presetDest) ? presetDest : undefined;
       llamaServer.startRouter(modelsDir, {
         maxModels: 2,
         flashAttn: true,
@@ -2070,8 +2058,9 @@ function cleanupRuntimeServices(): Promise<void> {
     });
 
     const llamaStop = runShutdownTask('llama-server', async () => {
-      const server = llamaServer;
+      const server = llamaServer || getLlamaServer();
       llamaServer = null;
+      setLlamaServer(null);
       await server?.stop();
     });
 

@@ -35,6 +35,7 @@ export default function Sidebar() {
   const location = useLocation();
   const navigate = useNavigate();
   const [apiOnline, setApiOnline] = useState(false);
+  const [aiProvider, setAiProvider] = useState<'local' | 'openai'>('local');
   const [isRecording, setIsRecording] = useState(false);
   const [pluginPageItems, setPluginPageItems] = useState<MenuItem[]>([]);
   const featureLevel = useFeatureLevel();
@@ -62,13 +63,16 @@ export default function Sidebar() {
 
   useEffect(() => {
     function checkStatus() {
-      api.getStatus().then((s) => setApiOnline(s.local)).catch(() => setApiOnline(false));
+      api.getStatus().then((s) => {
+        setApiOnline(s.local);
+        setAiProvider(s.aiProvider || 'local');
+      }).catch(() => setApiOnline(false));
     }
     checkStatus();
     const timer = setInterval(checkStatus, 30_000);
     const unsub = api.onRecordingStateChanged((_e, recording) => setIsRecording(recording));
     return () => { clearInterval(timer); unsub(); };
-  }, []);
+  }, [api]);
 
   const menuGroups: { label: string; items: MenuItem[] }[] = [
     {
@@ -114,8 +118,14 @@ export default function Sidebar() {
       items: group.items.filter((item) => meetsLevel(featureLevel, item.minLevel)),
     }))
     .filter((group) => group.items.length > 0);
-  const onlineLabel = (t.settings as any).status_online || 'Online';
-  const offlineLabel = (t.settings as any).status_offline || 'Offline';
+  const isCloudAi = aiProvider === 'openai';
+  const aiReadyLabel = isCloudAi
+    ? ((t.settings as any).cloud_ai_connected || 'Cloud AI capability')
+    : ((t.settings as any).local_ai_connected || 'Local AI capability');
+  const aiOfflineLabel = isCloudAi
+    ? ((t.settings as any).cloud_ai_not_ready || 'Cloud AI capability not ready')
+    : ((t.settings as any).local_ai_not_ready || 'Local AI capability not ready');
+  const aiStatusLabel = apiOnline ? aiReadyLabel : aiOfflineLabel;
 
   return (
     <aside className="side" style={{ width: 240, flexShrink: 0 }}>
@@ -160,8 +170,8 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div className="side__foot">
-        <span className="side__foot-license" title={apiOnline ? onlineLabel : offlineLabel}>
-          {apiOnline ? onlineLabel : offlineLabel}
+        <span className="side__foot-license" title={aiStatusLabel}>
+          {aiStatusLabel}
         </span>
         <span>v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.1.0'}</span>
       </div>

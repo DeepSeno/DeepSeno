@@ -23,7 +23,7 @@ import { SyncManager } from '../sync/sync-manager';
 import { LicenseManager } from '../licensing/license-manager';
 import { SherpaEngineProxy } from '../audio/sherpa-engine-proxy';
 import { BackgroundDownloadManager } from '../download-manager';
-import type { LlamaServerManager } from '../llm/llama-server-manager';
+import { LlamaServerManager } from '../llm/llama-server-manager';
 
 // ─── IpcContext Interface ──────────────────────────────────
 
@@ -546,6 +546,13 @@ export function createIpcContext(windowGetter: () => BrowserWindow | null): IpcC
 // ─── LlamaServer singleton ──────────────────────────────────
 
 let llamaServerInstance: LlamaServerManager | null = null;
+
+export function ensureLlamaServer(): LlamaServerManager {
+  if (!llamaServerInstance) {
+    llamaServerInstance = new LlamaServerManager();
+  }
+  return llamaServerInstance;
+}
 
 export function setLlamaServer(server: LlamaServerManager | null): void {
   llamaServerInstance = server;

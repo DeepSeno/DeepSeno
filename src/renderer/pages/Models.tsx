@@ -128,9 +128,6 @@ export default function Models() {
 
   // ─── Load data on mount ────────────────────────────────────
   useEffect(() => {
-    if (settings?.llmProvider === 'local') {
-      checkLlamaServer();
-    }
     checkLocal();
     api.detectHardware().then((hw) => setTotalMemoryGB(hw.totalMemoryGB)).catch(() => {});
   }, []);
@@ -210,6 +207,17 @@ export default function Models() {
       setLlamaServerStatus({ running: false, port: null });
     }
   }, [api]);
+
+  useEffect(() => {
+    if (settings?.llmProvider !== 'local') {
+      setLlamaServerStatus({ running: false, port: null });
+      return;
+    }
+
+    checkLlamaServer();
+    const timer = window.setInterval(checkLlamaServer, 5000);
+    return () => window.clearInterval(timer);
+  }, [settings?.llmProvider, checkLlamaServer]);
 
   const checkLocal = useCallback(async () => {
     setLocalStatus('checking');
@@ -343,16 +351,18 @@ export default function Models() {
     setLocalTesting(true);
     try {
       // Ensure llama-server is running
-      const status = await api.llamaStatus();
+      let status = await api.llamaStatus();
       if (!status.running) {
         const result = await api.llamaStart();
         if (!result.success) {
           throw new Error(result.error || 'Failed to start llama-server');
         }
+        status = await api.llamaStatus();
       }
 
       // Send test request — model name is specified in the request body
-      const port = (await api.llamaStatus()).port;
+      const port = status.port;
+      setLlamaServerStatus({ running: status.running, port: status.port });
       if (!port) throw new Error('llama-server port not available');
 
       const apiModel = toLocalModelApiName(model);
@@ -409,10 +419,11 @@ export default function Models() {
         try {
           await api.llamaStop();
           await api.llamaStart();
+          await checkLlamaServer();
         } catch { /* best effort restore */ }
       }
     }
-  }, [api, s, settings?.llmModel, toast]);
+  }, [api, s, settings?.llmModel, toast, checkLlamaServer]);
 
   const handleCancelLocalPull = useCallback((modelName?: string) => {
     api.cancelPull(modelName);
@@ -429,6 +440,7 @@ export default function Models() {
 
   // ─── Readiness computation ─────────────────────────────────
   const localReady = localStatus === 'connected';
+  const localEngineReady = llamaServerStatus.running && Boolean(llamaServerStatus.port);
   const llmModel = settings?.llmModel || 'qwen3.5:4b';
   const llmReady = settings?.llmProvider === 'openai'
     ? Boolean(settings?.cloudModel?.trim()) && cloudStatus === 'connected'
@@ -436,7 +448,7 @@ export default function Models() {
       ? localModelStatuses[llmModel] === 'done' || isModelInstalled(localModels, llmModel)
       : isModelInstalled(localModels, llmModel);
   const sherpaReady = svModelStatus === 'ready';
-  const engineReady = settings?.llmProvider === 'openai' ? true : settings?.llmProvider === 'local' ? true : localReady; // llama-server binary is always bundled
+  const engineReady = settings?.llmProvider === 'openai' ? true : settings?.llmProvider === 'local' ? localEngineReady : localReady;
   const allReady = engineReady && llmReady && sherpaReady;
   const enginesHasIssue = !allReady;
 

@@ -2,7 +2,7 @@ import { app, ipcMain, shell, clipboard, BrowserWindow } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import type { IpcContext } from './context';
-import { getLlamaServer } from './context';
+import { ensureLlamaServer, getLlamaServer } from './context';
 import { loadSettings, updateSettings, type AppSettings } from '../settings';
 import { getSherpaModelMirror } from '../mirror-config';
 import { getDbPath, getVecDbPath, getEffectiveDataDir, getLLMModelsDir } from '../paths';
@@ -17,6 +17,7 @@ import { requireString, requireUrl, ValidationError } from './validate';
 import { getDefaultPrompts } from '../llm/default-prompts';
 import { findModel, getDownloadUrl } from '../llm/gguf-model-catalog';
 import { type GGUFDownloadState, ggufDownloadStateStore } from '../llm/gguf-download-state';
+import { prepareLlamaRouterRuntime } from '../llm/llama-router-runtime';
 
 // Module-level state for tracking active downloads (survives page navigation)
 let sherpaDlState: { model: string; completed: number; total: number; status: string } | null = null;
@@ -247,7 +248,17 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
   // ─── System ────────────────────────────────────────────────
   ipcMain.handle('system:getStatus', async () => {
+    let local = false;
+    let aiProvider: AppSettings['llmProvider'] = 'local';
     try {
+      const settings = loadSettings();
+      aiProvider = settings.llmProvider;
+      if (settings.llmProvider === 'local') {
+        const status = getLlamaServer()?.getStatus();
+        local = Boolean(status?.running && status.port);
+      } else {
+        local = Boolean(settings.cloudApiUrl && settings.cloudApiKey && settings.cloudModel);
+      }
     } catch {
       // LLM not available
     }
@@ -277,6 +288,8 @@ export function registerSystemHandlers(ctx: IpcContext): void {
     }
 
     return {
+      local,
+      aiProvider,
       dbReady: true,
       storageUsed,
     };
@@ -330,43 +343,40 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       // empty models directory.
       const updatedSettings = loadSettings();
       if (updatedSettings.llmProvider === 'local') {
-        const server = getLlamaServer();
-        if (server) {
-          // Fire-and-forget: restart + prewarm in background so the UI
-          // doesn't freeze on the wizard's "start using" button.
-          const modelsDir = getLLMModelsDir();
-          const presetPath = path.join(modelsDir, 'models.ini');
-          server.startRouter(modelsDir, {
-            maxModels: 2,
-            flashAttn: true,
-            presetPath: fs.existsSync(presetPath) ? presetPath : undefined,
-          }).then(async ({ port }) => {
-            console.log(`[Settings] llama-server restarted on port ${port}`);
-            updateSettings({ llamaServerPort: port });
+        const server = ensureLlamaServer();
+        // Fire-and-forget: restart + prewarm in background so the UI
+        // doesn't freeze on the wizard's "start using" button.
+        const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
+        server.startRouter(modelsDir, {
+          maxModels: 2,
+          flashAttn: true,
+          presetPath,
+        }).then(async ({ port }) => {
+          console.log(`[Settings] llama-server restarted on port ${port}`);
+          updateSettings({ llamaServerPort: port });
 
-            const s = loadSettings();
-            const chatModel = getLLMModel(s);
-            const embedModel = getEmbedModel(s);
-            const base = `http://127.0.0.1:${port}/v1`;
-            const body = (model: string) => JSON.stringify({
-              model,
-              messages: [{ role: 'user', content: 'hi' }],
-              max_tokens: 1,
-              stream: false,
-            });
-            for (const model of [chatModel, embedModel]) {
-              try {
-                await fetch(`${base}/chat/completions`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: body(model),
-                });
-              } catch { /* ignore */ }
-            }
-          }).catch((err) => {
-            console.error('[Settings] llama-server restart failed:', err);
+          const s = loadSettings();
+          const chatModel = getLLMModel(s);
+          const embedModel = getEmbedModel(s);
+          const base = `http://127.0.0.1:${port}/v1`;
+          const body = (model: string) => JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: 'hi' }],
+            max_tokens: 1,
+            stream: false,
           });
-        }
+          for (const model of [chatModel, embedModel]) {
+            try {
+              await fetch(`${base}/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body(model),
+              });
+            } catch { /* ignore */ }
+          }
+        }).catch((err) => {
+          console.error('[Settings] llama-server restart failed:', err);
+        });
       }
 
       ctx.resetLLMClient();
@@ -950,15 +960,16 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   // ─── llama-server (bundled local inference) ────────────────
   ipcMain.handle('llama:start', async () => {
     try {
-      const server = getLlamaServer();
-      if (!server) return { success: false, error: 'llama-server manager not initialized' };
+      const server = ensureLlamaServer();
 
       // Router mode: start with models directory, auto-discovers GGUF files
-      const modelsDir = getLLMModelsDir();
+      const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
       const { port } = await server.startRouter(modelsDir, {
         maxModels: 2,
         flashAttn: true,
+        presetPath,
       });
+      updateSettings({ llamaServerPort: port });
       return { success: true, port };
     } catch (err: any) {
       return { success: false, error: err?.message || String(err) };

@@ -251,6 +251,7 @@ export function createMockApi(): VoiceBrainApi {
     onMainLog: () => () => {},
     getStatus: async () => ({
       local: false,
+      aiProvider: 'local',
       dbReady: false,
       storageUsed: '0 MB',
     }),

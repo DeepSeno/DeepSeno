@@ -724,6 +724,7 @@ export interface VoiceBrainApi {
   onMainLog: (cb: (event: IpcEvent, log: string) => void) => () => void;
   getStatus: () => Promise<{
     local: boolean;
+    aiProvider: 'local' | 'openai';
     dbReady: boolean;
     storageUsed: string;
   }>;

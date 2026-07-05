@@ -217,6 +217,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "resources/llama-models",
+        "to": "llama-models",
+        "filter": [
+          "**/*"
+        ]
       }
     ]
   }
