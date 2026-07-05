@@ -170,7 +170,12 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div className="side__foot">
-        <span className="side__foot-license" title={aiStatusLabel}>
+        <span
+          className={`side__foot-license ${
+            apiOnline ? 'side__foot-license--ready' : 'side__foot-license--not-ready'
+          }`}
+          title={aiStatusLabel}
+        >
           {aiStatusLabel}
         </span>
         <span>v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.1.0'}</span>

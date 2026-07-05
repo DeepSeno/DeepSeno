@@ -402,8 +402,14 @@
 .side__foot-license { display: flex; align-items: center; gap: 7px; }
 .side__foot-license::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%;
+}
+.side__foot-license--ready::before {
   background: var(--c-success);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--c-success) 18%, transparent);
+}
+.side__foot-license--not-ready::before {
+  background: var(--c-danger);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--c-danger) 18%, transparent);
 }
 
 /* ---------- Header ---------- */
