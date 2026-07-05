@@ -3,6 +3,7 @@ import { Smartphone, Copy, CheckCircle2, ShieldCheck } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useApi } from '../hooks/useApi';
 import { useI18n } from '../i18n';
+import { SITE_BASE_URL } from '../config';
 
 interface ConnectionInfo {
   host: string;
@@ -11,6 +12,14 @@ interface ConnectionInfo {
 }
 
 type ConnectionType = 'none' | 'lan' | 'p2p' | 'relay';
+
+const DEFAULT_SITE_BASE_URL = 'https://deepseno.enmooy.com';
+
+function getMobilePairBaseUrl(): string {
+  return (SITE_BASE_URL || DEFAULT_SITE_BASE_URL)
+    .replace(/\/api\/v1\/?$/, '')
+    .replace(/\/$/, '') + '/mobile/pair';
+}
 
 export default function MobileSync() {
   const api = useApi();
@@ -24,7 +33,7 @@ export default function MobileSync() {
   const [clientCount, setClientCount] = useState(0);
   const [serverRunning, setServerRunning] = useState(false);
   const [relayTransportMode, setRelayTransportMode] = useState<'none' | 'p2p' | 'relay'>('none');
-  const qrPayload = useRef<string>('{}'); // stored QR JSON for copy
+  const qrPayload = useRef<string>(''); // stored QR URL for copy
 
   const qrGenerated = useRef(false);
   const relayIncluded = useRef(false);
@@ -60,24 +69,34 @@ export default function MobileSync() {
       // Generate or update QR if needed
       const hasRelay = !!(status as any).relayUrl;
       if (!qrGenerated.current || (hasRelay && !relayIncluded.current)) {
-        const payload: Record<string, unknown> = {
-          host: status.host, port: status.port,
-          token: status.token, fingerprint: status.fingerprint || '',
-        };
-        if (hasRelay) {
-          const u = new URL((status as any).relayUrl.replace('deepseno://pair', 'https://dummy'));
-          payload.relay = {
-            mid: u.searchParams.get('mid') || '',
-            pub: u.searchParams.get('pub') || '',
-            nonce: u.searchParams.get('nonce') || '',
-          };
-          relayIncluded.current = true;
-        }
-        const url = await QRCode.toDataURL(JSON.stringify(payload), {
-          width: 200, margin: 2, color: { dark: '#18181b', light: '#ffffff' },
+        const params = new URLSearchParams({
+          host: String(status.host),
+          port: String(status.port),
+          token: status.token || '',
         });
-        qrPayload.current = JSON.stringify(payload);
-        console.log('[MobileSync] QR JSON:', qrPayload.current.substring(0, 200) + '...');
+        if (status.fingerprint) params.set('fingerprint', status.fingerprint);
+        if (hasRelay) {
+          try {
+            const u = new URL((status as any).relayUrl.replace('deepseno://pair', 'https://dummy'));
+            const mid = u.searchParams.get('mid') || '';
+            const pub = u.searchParams.get('pub') || '';
+            const nonce = u.searchParams.get('nonce') || '';
+            if (mid && pub && nonce) {
+              params.set('mid', mid);
+              params.set('pub', pub);
+              params.set('nonce', nonce);
+              relayIncluded.current = true;
+            }
+          } catch (err) {
+            console.warn('[MobileSync] Failed to parse relay pairing URL:', err);
+          }
+        }
+        const pairUrl = `${getMobilePairBaseUrl()}?${params.toString()}`;
+        const url = await QRCode.toDataURL(pairUrl, {
+          width: 240, margin: 2, color: { dark: '#18181b', light: '#ffffff' },
+        });
+        qrPayload.current = pairUrl;
+        console.log('[MobileSync] QR URL:', qrPayload.current.substring(0, 240) + '...');
         setQrDataUrl(url);
         setConnectionInfo({ host: status.host, port: status.port, token: status.token || null });
         qrGenerated.current = true;
@@ -128,9 +147,12 @@ export default function MobileSync() {
           <div className="flex gap-6 items-start">
             <div className="flex flex-col items-center gap-2 flex-shrink-0">
               <div className="p-3" style={{ background: 'var(--bg)', border: '1px solid var(--line)', borderRadius: '10px' }}>
-                <img src={qrDataUrl} alt="QR" className="w-44 h-44 block" />
+                <img src={qrDataUrl} alt="QR" className="w-52 h-52 block" />
               </div>
-              <span className="text-[11px] kz-text-mute">{isZh ? '用手机扫描' : 'Scan with phone'}</span>
+              <span className="text-[11px] kz-text-mute">{isZh ? '用 DeepSeno App 扫码配对' : 'Scan with DeepSeno app'}</span>
+              <span className="max-w-[13rem] text-center text-[11px] leading-relaxed kz-text-faint">
+                {isZh ? '没有 App？用系统相机扫码下载 App' : 'No app yet? Scan with the system camera to download it.'}
+              </span>
             </div>
             <div className="flex-1 space-y-3 min-w-0">
               <h3 className="kz-section-title">{isZh ? '连接状态' : 'Connection'}</h3>
@@ -155,7 +177,7 @@ export default function MobileSync() {
                 window.api.clipboardWriteText(qrPayload.current);
                 setCopied(true); setTimeout(() => setCopied(false), 2000);
               }} className="kz-btn kz-btn--sm flex-shrink-0">
-                {copied ? <><CheckCircle2 size={12} /> {isZh ? '已复制' : 'Copied'}</> : <><Copy size={12} /> {isZh ? '复制连接信息' : 'Copy Info'}</>}
+                {copied ? <><CheckCircle2 size={12} /> {isZh ? '已复制' : 'Copied'}</> : <><Copy size={12} /> {isZh ? '复制二维码链接' : 'Copy QR Link'}</>}
               </button>
             </div>
           </div>
