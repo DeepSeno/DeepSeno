@@ -105,6 +105,7 @@ import { TaskExecutor } from '../src/main/scheduler/task-executor';
 import { seedPredefinedTasks } from '../src/main/scheduler/seed-tasks';
 import { loadSettings, updateSettings } from '../src/main/settings';
 import { createLLMClient, getLLMModel, getEmbedModel } from '../src/main/llm/create-client';
+import { appendAppLog, captureRendererConsole, installMainConsoleCapture, registerLogIpcHandlers } from '../src/main/logging/log-bus';
 import { LanServer } from '../src/main/server/lan-server';
 import { RelayTunnel } from '../src/main/server/relay-tunnel';
 import { PairingManager } from '../src/main/server/relay-pairing';
@@ -118,6 +119,8 @@ import { getFFmpegManager } from '../src/main/audio/ffmpeg-manager';
 import { LlamaServerManager } from '../src/main/llm/llama-server-manager';
 import { ensureLlamaServer, getLlamaServer, setLlamaServer } from '../src/main/ipc/context';
 import { prepareLlamaRouterRuntime } from '../src/main/llm/llama-router-runtime';
+
+installMainConsoleCapture();
 
 let taskScheduler: TaskScheduler | null = null;
 let ollamaManager: OllamaManager | null = null;
@@ -258,6 +261,7 @@ ipcMain.on('theme:changed', (_event, theme: 'dark' | 'light') => {
 });
 
 let recorderWindow: BrowserWindow | null = null;
+let logWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 let isRecording = false;
@@ -535,12 +539,7 @@ function createWindow() {
     });
   }
 
-  // Log renderer console errors to main process stdout for debugging
-  win.webContents.on('console-message', (_event, level, message) => {
-    if (level >= 2) { // warnings and errors
-      console.log(`[Renderer ${level === 2 ? 'WARN' : 'ERROR'}] ${message}`);
-    }
-  });
+  captureRendererConsole(win, 'main-window');
 
   // Intercept close → hide to tray instead of quitting
   win.on('close', (e) => {
@@ -555,6 +554,63 @@ function createWindow() {
   } else {
     win.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
+}
+
+function getLogWindowBounds() {
+  const { x, y, width, height } = screen.getPrimaryDisplay().workArea;
+  const targetWidth = Math.min(1760, Math.max(1500, Math.floor(width * 0.96)), width);
+  const targetHeight = Math.min(820, Math.max(680, Math.floor(height * 0.92)), height);
+  return {
+    width: targetWidth,
+    height: targetHeight,
+    x: x + Math.max(0, Math.floor((width - targetWidth) / 2)),
+    y: y + Math.max(0, Math.floor((height - targetHeight) / 2)),
+  };
+}
+
+function createLogWindow(): BrowserWindow {
+  const logWindowBounds = getLogWindowBounds();
+  if (logWindow && !logWindow.isDestroyed()) {
+    logWindow.setBounds(logWindowBounds);
+    logWindow.show();
+    logWindow.focus();
+    return logWindow;
+  }
+
+  logWindow = new BrowserWindow({
+    ...logWindowBounds,
+    minWidth: Math.min(1180, logWindowBounds.width),
+    minHeight: Math.min(640, logWindowBounds.height),
+    autoHideMenuBar: true,
+    backgroundColor: '#0a0a0b',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 10 },
+    titleBarOverlay: {
+      color: '#0a0a0b',
+      symbolColor: '#ececef',
+      height: 40,
+    },
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+    title: 'DeepSeno Logs',
+  });
+
+  captureRendererConsole(logWindow, 'logs-window');
+
+  logWindow.on('closed', () => {
+    logWindow = null;
+  });
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    logWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/#/logs`);
+  } else {
+    logWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: '/logs' });
+  }
+
+  return logWindow;
 }
 
 // ─── Recorder floating window ───
@@ -597,10 +653,7 @@ function createRecorderWindow() {
     recorderWindow.loadFile(path.join(__dirname, '../renderer/src/renderer/recorder.html'));
   }
 
-  // Forward renderer console messages to main process for debugging
-  recorderWindow.webContents.on('console-message', (_e, _level, message) => {
-    console.log(`[recorder-renderer] ${message}`);
-  });
+  captureRendererConsole(recorderWindow, 'recorder-window');
 
   recorderWindow.on('closed', () => {
     recorderWindow = null;
@@ -715,7 +768,7 @@ function toggleRecording(scene: RecordingScene = 'dictation') {
 
 function getMainWindow(): BrowserWindow | null {
   return BrowserWindow.getAllWindows().find(
-    (w) => w !== recorderWindow && !w.isDestroyed()
+    (w) => w !== recorderWindow && w !== logWindow && !w.isDestroyed()
   ) || null;
 }
 
@@ -1335,7 +1388,9 @@ app.whenReady().then(async () => {
   // Setup recording IPC
   setupRecordingIpc();
 
+  registerLogIpcHandlers(createLogWindow);
   registerIpcHandlers(() => getMainWindow());
+  appendAppLog('info', 'main', 'startup', 'Main IPC handlers registered');
 
   // Initialize SherpaEngineProxy worker pool (batch + realtime workers)
   // Use 1 batch worker by default — a second worker brings little parallelism

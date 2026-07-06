@@ -19,6 +19,7 @@ import SoulPage from './renderer/pages/SoulPage';
 import MemoryManager from './renderer/pages/MemoryManager';
 import Scheduler from './renderer/pages/Scheduler';
 import KnowledgePage from './renderer/pages/KnowledgePage';
+import LogWindow from './renderer/pages/LogWindow';
 import SetupWizard from './renderer/components/wizard/SetupWizard';
 import CommandPalette from './renderer/components/CommandPalette';
 import { PageErrorBoundary } from './renderer/components/PageErrorBoundary';
@@ -70,6 +71,7 @@ function AppRoutes() {
   return (
     <>
       <Routes>
+        <Route path="/logs" element={<PageErrorBoundary pageName="Logs"><LogWindow /></PageErrorBoundary>} />
         <Route element={<Layout />}>
           <Route path="/" element={<PageErrorBoundary pageName="Dashboard"><Dashboard /></PageErrorBoundary>} />
           <Route path="/sources" element={<PageErrorBoundary pageName="Sources"><Sources /></PageErrorBoundary>} />
@@ -109,6 +111,8 @@ function AppContent() {
   const [defaultOutputDir, setDefaultOutputDir] = useState('');
   const [defaultWatchDir, setDefaultWatchDir] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [hashPath, setHashPath] = useState(() => window.location.hash || '#/');
+  const isLogRoute = hashPath.startsWith('#/logs');
 
   useEffect(() => {
     api.loadSettings().then((settings) => {
@@ -128,7 +132,13 @@ function AppContent() {
     return () => window.removeEventListener('toggle-command-palette', handleToggle);
   }, []);
 
-  if (setupComplete === null) {
+  useEffect(() => {
+    const onHashChange = () => setHashPath(window.location.hash || '#/');
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  if (setupComplete === null && !isLogRoute) {
     return (
       <div className="h-screen w-screen bg-zinc-100 flex items-center justify-center">
         <div className="text-zinc-400 font-mono text-sm">Loading...</div>
@@ -136,7 +146,7 @@ function AppContent() {
     );
   }
 
-  if (!setupComplete) {
+  if (!setupComplete && !isLogRoute) {
     return (
       <SetupWizard
         defaultOutputDir={defaultOutputDir}
@@ -149,7 +159,7 @@ function AppContent() {
   return (
     <HashRouter>
       <RecordingProvider>
-        <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+        {!isLogRoute && <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />}
         <AppRoutes />
       </RecordingProvider>
     </HashRouter>

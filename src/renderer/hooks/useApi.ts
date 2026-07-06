@@ -8,6 +8,26 @@ export interface SyncStatus {
   lockHolder: { machineId: string; hostname: string; acquiredAt: string } | null;
 }
 
+export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type AppLogSource = 'main' | 'renderer';
+
+export interface AppLogEntry {
+  id: number;
+  timestamp: string;
+  level: AppLogLevel;
+  source: AppLogSource;
+  scope: string;
+  message: string;
+  details?: string;
+}
+
+export interface RendererLogInput {
+  level?: AppLogLevel;
+  scope?: string;
+  message?: string;
+  details?: unknown;
+}
+
 export interface QueueTaskEvent {
   id: string;
   filePath: string;
@@ -731,6 +751,12 @@ export interface VoiceBrainApi {
   openDevTools: () => Promise<void>;
   getMainLogs: () => Promise<string[]>;
   onMainLog: (cb: (event: IpcEvent, log: string) => void) => () => void;
+  openLogWindow: () => Promise<{ ok: boolean; id?: number }>;
+  getAppLogs: () => Promise<AppLogEntry[]>;
+  appendRendererLog: (entry: RendererLogInput) => Promise<{ ok: boolean; id?: number }>;
+  clearAppLogs: () => Promise<{ ok: boolean }>;
+  exportAppLogs: () => Promise<{ canceled: true } | { canceled: false; filePath: string; count: number }>;
+  onAppLogEntry: (cb: (event: IpcEvent, entry: AppLogEntry) => void) => () => void;
   getStatus: () => Promise<{
     local: boolean;
     aiProvider: 'local' | 'openai';

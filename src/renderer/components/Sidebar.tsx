@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutGrid, Import, BookOpen, BarChart3, ClipboardList, Settings, Brain, Bot, Puzzle,
   Sparkles, Mail, Calendar, Pen, Code2, Search, Hash, MessageSquare, Lightbulb, Wrench, Globe, Cpu, Zap, Clock, Network, Cloud,
@@ -8,6 +8,7 @@ import { useI18n } from '../i18n';
 import { useApi } from '../hooks/useApi';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { LucideIcon } from 'lucide-react';
+import type { KeyboardEvent, MouseEvent } from 'react';
 import { useFeatureLevel, meetsLevel } from '../hooks/useFeatureLevel';
 import type { FeatureLevel } from '../hooks/useFeatureLevel';
 
@@ -39,6 +40,7 @@ export default function Sidebar() {
   const [isRecording, setIsRecording] = useState(false);
   const [pluginPageItems, setPluginPageItems] = useState<MenuItem[]>([]);
   const featureLevel = useFeatureLevel();
+  const brandClickRef = useRef<{ count: number; lastAt: number }>({ count: 0, lastAt: 0 });
 
   const loadPluginPages = useCallback(() => {
     api.pluginGetAll().then((plugins) => {
@@ -127,10 +129,38 @@ export default function Sidebar() {
     : ((t.settings as any).local_ai_not_ready || 'Local AI capability not ready');
   const aiStatusLabel = apiOnline ? aiReadyLabel : aiOfflineLabel;
 
+  const handleBrandClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    const now = Date.now();
+    const state = brandClickRef.current;
+    state.count = now - state.lastAt <= 1_800 ? state.count + 1 : 1;
+    state.lastAt = now;
+    if (event.detail >= 3 || state.count >= 3) {
+      state.count = 0;
+      api.openLogWindow().catch((err) => console.warn('[Sidebar] Failed to open log window:', err));
+      return;
+    }
+    navigate('/');
+  }, [api, navigate]);
+
+  const handleBrandKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    navigate('/');
+  }, [navigate]);
+
   return (
     <aside className="side" style={{ width: 240, flexShrink: 0 }}>
       {/* Brand */}
-      <div className="side__brand" style={{ cursor: 'pointer' }} onClick={() => navigate('/')}>
+      <div
+        className="side__brand"
+        role="button"
+        tabIndex={0}
+        data-log-name="DeepSeno brand shortcut"
+        aria-label="DeepSeno"
+        style={{ cursor: 'pointer' }}
+        onClick={handleBrandClick}
+        onKeyDown={handleBrandKeyDown}
+      >
         <img
           src={logoIcon}
           alt="DeepSeno"

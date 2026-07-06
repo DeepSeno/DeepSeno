@@ -579,6 +579,17 @@
 .kz-btn--sm { height: 27px; padding: 0 11px; font-size: 11.5px; border-radius: 7px; }
 .kz-btn--lg { height: 38px; padding: 0 18px; font-size: 13px; }
 
+/* ---------- Diagnostics log window ---------- */
+.log-window__topbar {
+  -webkit-app-region: drag;
+}
+.log-window__topbar button,
+.log-window__topbar input,
+.log-window__topbar label,
+.log-window__topbar .log-window__no-drag {
+  -webkit-app-region: no-drag;
+}
+
 /* ---------- Chips, badges, dots ---------- */
 .kz-chip {
   display: inline-flex; align-items: center; gap: 6px;

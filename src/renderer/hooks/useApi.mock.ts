@@ -249,6 +249,12 @@ export function createMockApi(): VoiceBrainApi {
     openDevTools: async () => {},
     getMainLogs: async () => [],
     onMainLog: () => () => {},
+    openLogWindow: async () => ({ ok: true }),
+    getAppLogs: async () => [],
+    appendRendererLog: async () => ({ ok: true }),
+    clearAppLogs: async () => ({ ok: true }),
+    exportAppLogs: async () => ({ canceled: true as const }),
+    onAppLogEntry: () => () => {},
     getStatus: async () => ({
       local: false,
       aiProvider: 'local',

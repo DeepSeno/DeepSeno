@@ -306,6 +306,21 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('main:log', handler);
     return () => ipcRenderer.removeListener('main:log', handler);
   },
+  openLogWindow: () =>
+    ipcRenderer.invoke('logs:openWindow'),
+  getAppLogs: () =>
+    ipcRenderer.invoke('logs:getEntries'),
+  appendRendererLog: (entry: { level?: string; scope?: string; message?: string; details?: unknown }) =>
+    ipcRenderer.invoke('logs:appendRenderer', entry),
+  clearAppLogs: () =>
+    ipcRenderer.invoke('logs:clear'),
+  exportAppLogs: () =>
+    ipcRenderer.invoke('logs:export'),
+  onAppLogEntry: (cb: (_e: any, entry: any) => void) => {
+    const handler = (_e: any, entry: any) => cb(_e, entry);
+    ipcRenderer.on('logs:entry', handler);
+    return () => ipcRenderer.removeListener('logs:entry', handler);
+  },
   getStatus: () =>
     ipcRenderer.invoke('system:getStatus'),
   checkCloudApi: (url: string, apiKey: string, model?: string) =>

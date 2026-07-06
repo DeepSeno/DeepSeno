@@ -20,6 +20,7 @@ import { type GGUFDownloadState, ggufDownloadStateStore } from '../llm/gguf-down
 import { hasGGUFMagic, readGGUFFileInfo, validateGGUFFilePath } from '../llm/gguf-model-files';
 import { prepareLlamaRouterRuntime } from '../llm/llama-router-runtime';
 import { toLocalModelApiName } from '../llm/model-names';
+import { appLogStore, logsToText } from '../logging/log-bus';
 
 // Module-level state for tracking active downloads (survives page navigation)
 let sherpaDlState: { model: string; completed: number; total: number; status: string } | null = null;
@@ -384,31 +385,6 @@ async function streamToFile(
   }
 }
 
-// ─── Main process log capture ──────────────────────────────
-const LOG_BUFFER_MAX = 500;
-const logBuffer: string[] = [];
-const originalLog = console.log;
-const originalError = console.error;
-const originalWarn = console.warn;
-
-function captureLog(level: string, args: any[]) {
-  const ts = new Date().toISOString().slice(11, 23);
-  const msg = `[${ts}] [${level}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`;
-  logBuffer.push(msg);
-  if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
-  // Forward to renderer
-  try {
-    const wins = BrowserWindow.getAllWindows();
-    for (const w of wins) {
-      if (!w.isDestroyed()) w.webContents.send('main:log', msg);
-    }
-  } catch { /* ignore */ }
-}
-
-console.log = (...args: any[]) => { originalLog.apply(console, args); captureLog('INFO', args); };
-console.error = (...args: any[]) => { originalError.apply(console, args); captureLog('ERROR', args); };
-console.warn = (...args: any[]) => { originalWarn.apply(console, args); captureLog('WARN', args); };
-
 export function registerSystemHandlers(ctx: IpcContext): void {
   // ─── DevTools & Logs ──────────────────────────────────────
   ipcMain.handle('system:openDevTools', () => {
@@ -418,7 +394,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   });
 
   ipcMain.handle('system:getMainLogs', () => {
-    return logBuffer.slice();
+    return logsToText(appLogStore.getEntries()).split('\n');
   });
 
   // ─── System ────────────────────────────────────────────────
