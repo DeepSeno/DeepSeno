@@ -9,7 +9,25 @@ import DropZone from './recordings/DropZone';
 import QueueSection from './recordings/QueueSection';
 import HistorySection from './recordings/HistorySection';
 import type { QueueItem, HistoryItem, TextNoteItem } from './recordings/types';
-import { STATUS_TO_STEP } from './recordings/types';
+import { STATUS_TO_STEP, sortHistoryItemsForDisplay } from './recordings/types';
+import { isAlreadyProcessedEnqueue, isFailedEnqueue, isSkippedEnqueue } from '../utils/enqueueResult';
+
+export function mapQueueTaskStatus(status: string): QueueItem['status'] {
+  if (status === 'pending') return 'pending';
+  if (status === 'completed') return 'done';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'interrupted') return 'interrupted';
+  if (status === 'failed') return 'error';
+  return 'processing';
+}
+
+export function mapRecordingStatus(status: string): HistoryItem['status'] {
+  if (status === 'completed') return 'done';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'interrupted') return 'interrupted';
+  if (status === 'failed') return 'error';
+  return 'active';
+}
 
 export default function Recordings() {
   const { t, lang } = useI18n();
@@ -31,6 +49,7 @@ export default function Recordings() {
   const [paused, setPaused] = useState(false);
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const historyRefreshTimerRef = useRef<number | null>(null);
 
   // --- Initial data load ---
   useEffect(() => {
@@ -68,6 +87,22 @@ export default function Recordings() {
     };
   }, [hasActiveWork]);
 
+  function scheduleHistoryRefresh(delayMs = 250) {
+    if (historyRefreshTimerRef.current != null) return;
+    historyRefreshTimerRef.current = window.setTimeout(() => {
+      historyRefreshTimerRef.current = null;
+      loadHistory();
+    }, delayMs);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (historyRefreshTimerRef.current != null) {
+        window.clearTimeout(historyRefreshTimerRef.current);
+      }
+    };
+  }, []);
+
   // --- Live task events ---
   useEffect(() => {
     function taskToQueueItem(task: QueueTaskEvent): QueueItem {
@@ -76,11 +111,7 @@ export default function Recordings() {
         name: task.filePath.split(/[/\\]/).pop() || task.filePath,
         filePath: task.filePath, duration: '', size: '',
         progress: task.progress,
-        status: task.status === 'pending' ? 'pending'
-          : task.status === 'completed' ? 'done'
-          : task.status === 'cancelled' ? 'cancelled'
-          : ['failed', 'interrupted'].includes(task.status) ? 'error'
-          : 'processing',
+        status: mapQueueTaskStatus(task.status),
         rawStatus: task.status,
         currentStep: STATUS_TO_STEP[task.status] ?? -1,
         error: task.error || null,
@@ -92,9 +123,11 @@ export default function Recordings() {
     const unsubs = [
       api.onTaskAdded((_e, task) => {
         setQueueItems((prev) => [...prev, taskToQueueItem(task)]);
+        scheduleHistoryRefresh(0);
       }),
       api.onTaskProgress((_e, task) => {
         setQueueItems((prev) => prev.map((q) => q.id === task.id ? taskToQueueItem(task) : q));
+        scheduleHistoryRefresh();
       }),
       api.onTaskCompleted((_e, task) => {
         setQueueItems((prev) => prev.filter((q) => q.id !== task.id));
@@ -110,6 +143,7 @@ export default function Recordings() {
       }),
       api.onTaskFailed((_e, task) => {
         setQueueItems((prev) => prev.map((q) => q.id === task.id ? taskToQueueItem(task) : q));
+        scheduleHistoryRefresh(0);
         const name = task.filePath.split(/[/\\]/).pop() || task.filePath;
         toast('error', rRef.current.pipeline_failed, `${name}: ${task.error || rRef.current.unknown_error}`);
       }),
@@ -118,6 +152,7 @@ export default function Recordings() {
         toast('success', rRef.current.recording_saved, fname);
         try { await api.enqueue(data.filePath); } catch { /* Already enqueued by main process */ }
         loadQueue();
+        loadHistory();
       }),
       api.onTextNoteNew((_e, _note) => {
         loadTextNotes();
@@ -133,11 +168,7 @@ export default function Recordings() {
       setQueueItems(queue.map((item) => ({
         id: item.id, name: item.filePath.split(/[/\\]/).pop() || item.filePath,
         filePath: item.filePath, duration: '', size: '', progress: item.progress,
-        status: item.status === 'pending' ? 'pending'
-          : item.status === 'completed' ? 'done'
-          : item.status === 'cancelled' ? 'cancelled'
-          : ['failed', 'interrupted'].includes(item.status) ? 'error'
-          : 'processing',
+        status: mapQueueTaskStatus(item.status),
         rawStatus: item.status, currentStep: STATUS_TO_STEP[item.status] ?? -1,
         error: item.error || null,
         notes: (item as any).notes || null,
@@ -149,22 +180,21 @@ export default function Recordings() {
   async function loadHistory() {
     try {
       const recordings = await api.getRecordings();
-      setHistoryItems(recordings.map((rec: RecordingRow) => ({
+      const items = recordings.map((rec: RecordingRow) => ({
         id: `PROC-${String(rec.id).padStart(3, '0')}`, recordingId: rec.id,
         name: rec.file_name,
         date: rec.processed_at ? new Date(rec.processed_at).toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US', { month: '2-digit', day: '2-digit' }) : '',
         duration: rec.duration_seconds ? formatDuration(rec.duration_seconds) : '',
         size: '', speakers: rec.speaker_count || 0, extracted: rec.extracted_count || 0,
-        status: rec.status === 'completed' ? 'done'
-          : rec.status === 'cancelled' ? 'cancelled'
-          : ['failed', 'interrupted'].includes(rec.status) ? 'error'
-          : 'active',
+        status: mapRecordingStatus(rec.status),
         tags: rec.tags ? (() => { try { return JSON.parse(rec.tags); } catch { return []; } })() : [],
         scene: rec.capture_scene || 'dictation',
         mediaType: rec.media_type || 'audio',
         pageCount: rec.page_count,
         wordCount: rec.word_count,
-      })));
+        statusUpdatedAt: rec.status_updated_at || rec.processed_at || rec.recorded_at || null,
+      }));
+      setHistoryItems(sortHistoryItemsForDisplay(items));
     } catch (err) { console.error('[Recordings] loadHistory failed:', err); }
   }
 
@@ -211,7 +241,7 @@ export default function Recordings() {
   async function handleFileDrop(e: React.DragEvent) {
     e.preventDefault(); setDragOver(false);
     const files = Array.from(e.dataTransfer.files);
-    let enqueued = 0, skipped = 0, tooLarge = 0;
+    let enqueued = 0, skipped = 0, alreadyProcessed = 0, tooLarge = 0;
     for (const file of files) {
       const ext = file.name.split('.').pop()?.toLowerCase();
       if (ACCEPTED_EXTENSIONS.has(ext || '')) {
@@ -223,15 +253,18 @@ export default function Recordings() {
         if (file.size > maxSize) { tooLarge++; continue; }
         try {
           const result = await api.enqueue(filePath);
-          if (result?.status === 'failed') { skipped++; }
+          if (isAlreadyProcessedEnqueue(result)) { skipped++; alreadyProcessed++; }
+          else if (isFailedEnqueue(result) || isSkippedEnqueue(result)) { skipped++; }
           else { enqueued++; }
         } catch { skipped++; }
       } else { skipped++; }
     }
     if (tooLarge > 0) toast('error', `${tooLarge} ${r.file_too_large}`);
     if (enqueued > 0) toast('success', `${enqueued} ${r.files_queued}`, skipped > 0 ? `${skipped} ${r.files_skipped}` : undefined);
+    else if (alreadyProcessed > 0 && alreadyProcessed === skipped && tooLarge === 0) toast('info', `${alreadyProcessed} ${(r as any).files_already_processed || r.files_skipped}`);
     else if (skipped > 0 && tooLarge === 0) toast('error', r.drop_formats);
     loadQueue();
+    loadHistory();
   }
 
   async function handleBrowse() {
@@ -241,11 +274,15 @@ export default function Recordings() {
 
       let enqueued = 0;
       let skipped = 0;
+      let alreadyProcessed = 0;
       let lastError = '';
       for (const filePath of filePaths) {
         try {
           const result = await api.enqueue(filePath);
-          if (result?.status === 'failed') {
+          if (isAlreadyProcessedEnqueue(result)) {
+            skipped++;
+            alreadyProcessed++;
+          } else if (isFailedEnqueue(result) || isSkippedEnqueue(result)) {
             skipped++;
             lastError = result.error || r.unknown_error;
           } else {
@@ -258,10 +295,13 @@ export default function Recordings() {
       }
       if (enqueued > 0) {
         toast('success', `${enqueued} ${r.files_queued}`, skipped > 0 ? `${skipped} ${r.files_skipped}` : undefined);
+      } else if (alreadyProcessed > 0 && alreadyProcessed === skipped) {
+        toast('info', `${alreadyProcessed} ${(r as any).files_already_processed || r.files_skipped}`);
       } else if (skipped > 0) {
         toast('error', r.pipeline_failed, lastError || r.drop_formats);
       }
       loadQueue();
+      loadHistory();
     } catch (err) {
       toast('error', r.pipeline_failed, String(err));
     }
@@ -341,8 +381,10 @@ export default function Recordings() {
     DOCUMENT: historyItems.filter((i) => ['pdf', 'docx'].includes(i.mediaType)).length,
     IMAGE: historyItems.filter((i) => i.mediaType === 'image').length,
     TEXT: textNoteItems.length,
+    ACTIVE: historyItems.filter((i) => i.status === 'active').length,
     DONE: historyItems.filter((i) => i.status === 'done').length,
     CANCELLED: historyItems.filter((i) => i.status === 'cancelled').length,
+    INTERRUPTED: historyItems.filter((i) => i.status === 'interrupted').length,
     ERROR: historyItems.filter((i) => i.status === 'error').length,
   };
   const filters = [
@@ -352,8 +394,10 @@ export default function Recordings() {
     { key: 'DOCUMENT', label: r.filter_document, count: counts.DOCUMENT },
     { key: 'IMAGE', label: r.filter_image, count: counts.IMAGE },
     { key: 'TEXT', label: r.filter_text, count: counts.TEXT },
+    { key: 'ACTIVE', label: r.filter_active, count: counts.ACTIVE },
     { key: 'DONE', label: r.filter_done, count: counts.DONE },
     { key: 'CANCELLED', label: r.filter_cancelled, count: counts.CANCELLED },
+    { key: 'INTERRUPTED', label: (r as any).filter_interrupted || (r as any).status_interrupted || 'Interrupted', count: counts.INTERRUPTED },
     { key: 'ERROR', label: r.filter_error, count: counts.ERROR },
   ];
 
@@ -364,8 +408,10 @@ export default function Recordings() {
     if (filter === 'VIDEO') return item.mediaType === 'video';
     if (filter === 'DOCUMENT') return ['pdf', 'docx'].includes(item.mediaType);
     if (filter === 'IMAGE') return item.mediaType === 'image';
+    if (filter === 'ACTIVE') return item.status === 'active';
     if (filter === 'DONE') return item.status === 'done';
     if (filter === 'CANCELLED') return item.status === 'cancelled';
+    if (filter === 'INTERRUPTED') return item.status === 'interrupted';
     if (filter === 'ERROR') return item.status === 'error';
     return true;
   });

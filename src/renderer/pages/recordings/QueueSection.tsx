@@ -19,6 +19,8 @@ interface QueueSectionProps {
 export function getQueueSummaryLabel(queueItems: QueueItem[], r: Translations['rec']): string {
   const processing = queueItems.filter((item) => item.status === 'processing').length;
   const queued = queueItems.filter((item) => item.status === 'pending').length;
+  const interrupted = queueItems.filter((item) => item.status === 'interrupted').length;
+  const failed = queueItems.filter((item) => item.status === 'error').length;
   const parts: string[] = [];
 
   if (processing > 0) {
@@ -27,11 +29,38 @@ export function getQueueSummaryLabel(queueItems: QueueItem[], r: Translations['r
   if (queued > 0) {
     parts.push(`${queued} ${r.status_queued || ''}`.trim());
   }
+  if (interrupted > 0) {
+    parts.push(`${interrupted} ${((r as any).status_interrupted || 'Interrupted')}`.trim());
+  }
+  if (failed > 0) {
+    parts.push(`${failed} ${r.status_error || ''}`.trim());
+  }
   if (parts.length === 0 && queueItems.length > 0) {
     parts.push(`${queueItems.length} ${(r as any).queue_in_progress || ''}`.trim());
   }
 
   return parts.join(' / ');
+}
+
+export function canRetryQueueItem(item: Pick<QueueItem, 'status'>): boolean {
+  return item.status === 'error' || item.status === 'interrupted';
+}
+
+export function getQueueStatusLabel(item: Pick<QueueItem, 'status' | 'progress'>, r: Translations['rec']): string {
+  if (item.status === 'processing') return `${item.progress}%`;
+  if (item.status === 'done') return r.status_success;
+  if (item.status === 'cancelled') return r.status_cancelled;
+  if (item.status === 'interrupted') return (r as any).status_interrupted || 'Interrupted';
+  if (item.status === 'error') return r.status_error;
+  return r.status_queued;
+}
+
+function getQueueStatusBadgeClass(status: string): string {
+  if (status === 'processing') return 'kz-badge--info';
+  if (status === 'done') return 'kz-badge--success';
+  if (status === 'cancelled' || status === 'interrupted') return 'kz-badge--warn';
+  if (status === 'error') return 'kz-badge--danger';
+  return 'kz-badge--mute';
 }
 
 export default function QueueSection({
@@ -107,15 +136,9 @@ export default function QueueSection({
                     {item.duration}{item.duration && item.size ? ' · ' : ''}{item.size}
                   </span>
                   <span
-                    className={`kz-badge ${
-                      item.status === 'processing'
-                        ? 'kz-badge--info'
-                        : item.status === 'error'
-                          ? 'kz-badge--danger'
-                          : 'kz-badge--mute'
-                    }`}
+                    className={`kz-badge ${getQueueStatusBadgeClass(item.status)}`}
                   >
-                    {item.status === 'processing' ? `${item.progress}%` : item.status === 'error' ? r.status_error : r.status_queued}
+                    {getQueueStatusLabel(item, r)}
                   </span>
                   {(item.status === 'pending' || item.status === 'processing') && (
                     <button
@@ -127,7 +150,7 @@ export default function QueueSection({
                       <X size={12} />
                     </button>
                   )}
-                  {item.status === 'error' && (
+                  {canRetryQueueItem(item) && (
                     <button
                       onClick={() => onRetry(item.id)}
                       className="kz-btn kz-btn--ghost kz-btn--sm"
@@ -173,10 +196,10 @@ export default function QueueSection({
                     );
                   });
                 })()}
-                {item.status === 'error' && (
+                {canRetryQueueItem(item) && (
                   <button
                     onClick={() => onRetry(item.id)}
-                    className="kz-btn kz-btn--sm kz-btn--danger"
+                    className={`kz-btn kz-btn--sm${item.status === 'error' ? ' kz-btn--danger' : ''}`}
                     style={{ marginLeft: 6 }}
                   >
                     <RefreshCw size={10} />
@@ -190,7 +213,7 @@ export default function QueueSection({
                   className="kz-mono"
                   style={{
                     fontSize: 11,
-                    color: 'var(--c-danger)',
+                    color: item.status === 'interrupted' ? 'var(--c-warn)' : 'var(--c-danger)',
                     marginTop: 8,
                     cursor: 'pointer',
                     userSelect: 'text',

@@ -51,6 +51,23 @@ describe('RAG model readiness', () => {
     expect(error).toBe(RAG_MODEL_SETUP_MESSAGE);
   });
 
+  it('checks local GGUF aliases for explicit local model settings', () => {
+    const checked: string[] = [];
+    const error = getRagModelSetupError(settings({
+      localLlmModel: 'qwen3.5:4b',
+      localEmbedModel: 'bge-m3',
+    }), {
+      downloadedLocalModelIds: [],
+      localModelFileExists: (modelName) => {
+        checked.push(modelName);
+        return modelName === 'qwen3.5:4b' || modelName === 'bge-m3';
+      },
+    });
+
+    expect(error).toBeNull();
+    expect(checked).toEqual(['qwen3.5:4b', 'bge-m3']);
+  });
+
   it('requires cloud api and chat model for cloud mode', () => {
     const error = getRagModelSetupError(settings({
       llmProvider: 'openai',

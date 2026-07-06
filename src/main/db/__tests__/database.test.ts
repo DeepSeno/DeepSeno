@@ -59,6 +59,7 @@ describe('VoiceBrainDB', () => {
     expect(rec.file_name).toBe('meeting.wav');
     expect(rec.duration_seconds).toBe(3600);
     expect(rec.status).toBe('pending');
+    expect(rec.status_updated_at).toBeTruthy();
   });
 
   it('should update recording status', () => {
@@ -70,6 +71,89 @@ describe('VoiceBrainDB', () => {
     db.updateRecordingStatus(id, 'completed');
     const rec = db.getRecording(id)!;
     expect(rec.status).toBe('completed');
+    expect(rec.status_updated_at).toBeTruthy();
+  });
+
+  it('should order recordings by latest status update', () => {
+    const olderActiveId = db.insertRecording({
+      file_path: '/video/old-active.mp4',
+      file_name: 'old-active.mp4',
+      status: 'processing',
+      status_updated_at: '2026-07-07T00:47:15.000Z',
+      media_type: 'video',
+    });
+    const newerIdButOlderStatusId = db.insertRecording({
+      file_path: '/video/new-completed.mp4',
+      file_name: 'new-completed.mp4',
+      status: 'completed',
+      status_updated_at: '2026-07-07T00:40:00.000Z',
+      media_type: 'video',
+    });
+
+    const rows = db.getAllRecordings();
+
+    expect(rows.map((row) => row.id).slice(0, 2)).toEqual([olderActiveId, newerIdButOlderStatusId]);
+  });
+
+  it('should find recordings by original source path after playback path changes', () => {
+    const id = db.insertRecording({
+      file_path: '/output/videos/demo.mp4',
+      source_file_path: '/imports/demo.mov',
+      file_name: 'demo.mov',
+      media_type: 'video',
+    });
+
+    expect(db.getRecordingByPath('/imports/demo.mov')?.id).toBe(id);
+    expect(db.getRecordingBySourcePath('/imports/demo.mov')?.id).toBe(id);
+    expect(db.getRecordingByFileNameAndType('demo.mov', 'video')?.id).toBe(id);
+  });
+
+  it('should mark stuck recordings as interrupted during recovery', () => {
+    const id = db.insertRecording({
+      file_path: '/audio/stuck.wav',
+      file_name: 'stuck.wav',
+      status: 'processing',
+    });
+
+    expect(db.recoverStuckRecordings()).toBe(1);
+    expect(db.getRecording(id)?.status).toBe('interrupted');
+  });
+
+  it('should recover failed empty recordings when their queue task was interrupted', () => {
+    const id = db.insertRecording({
+      file_path: '/audio/interrupted.wav',
+      file_name: 'interrupted.wav',
+      status: 'failed',
+    });
+    db.getRawDb().prepare(`
+      INSERT INTO task_queue (id, file_path, recording_id, status, progress, retry_count, max_retries, created_at, updated_at)
+      VALUES ('task-interrupted', '/audio/interrupted.wav', ?, 'interrupted', 20, 0, 2, ?, ?)
+    `).run(id, new Date().toISOString(), new Date().toISOString());
+
+    expect(db.recoverStuckRecordings()).toBe(1);
+    expect(db.getRecording(id)?.status).toBe('interrupted');
+  });
+
+  it('should not relabel real failed recordings that already have content', () => {
+    const id = db.insertRecording({
+      file_path: '/audio/failed-with-content.wav',
+      file_name: 'failed-with-content.wav',
+      status: 'failed',
+    });
+    db.insertSegment({
+      recording_id: id,
+      start_time: 0,
+      end_time: 1,
+      raw_text: 'partial content',
+      clean_text: 'partial content',
+    });
+    db.getRawDb().prepare(`
+      INSERT INTO task_queue (id, file_path, recording_id, status, progress, retry_count, max_retries, created_at, updated_at)
+      VALUES ('task-interrupted-with-content', '/audio/failed-with-content.wav', ?, 'interrupted', 20, 0, 2, ?, ?)
+    `).run(id, new Date().toISOString(), new Date().toISOString());
+
+    expect(db.recoverStuckRecordings()).toBe(0);
+    expect(db.getRecording(id)?.status).toBe('failed');
   });
 
   it('should delete a recording with all recording-scoped related rows', () => {

@@ -1,24 +1,7 @@
 import { OpenAIClient } from './openai-client';
 import type { LLMClient } from './llm-client';
 import type { AppSettings } from '../settings';
-
-/**
- * Map Ollama-style model names to GGUF filenames.
- */
-const MODEL_NAME_MAP: Record<string, string> = {
-  'qwen3.5:4b': 'Qwen3.5-4B-Q4_K_M',
-  'qwen3.5:9b': 'Qwen3.5-9B-Q4_K_M',
-  'qwen3.5:27b': 'Qwen3.5-27B-Q4_K_M',
-  'qwen3.5:35b': 'Qwen3.5-35B-A3B-Q4_K_M',
-  'qwen3.5:122b': 'Qwen3.5-122B-A10B-Q4_K_M',
-  'bge-m3': 'bge-m3-Q8_0',
-};
-
-function normalizeLocalModelName(model: string): string {
-  const trimmed = model.trim();
-  const basename = trimmed.split(/[\\/]/).filter(Boolean).pop() || trimmed;
-  return basename.replace(/\.gguf$/i, '');
-}
+import { toLocalModelApiName } from './model-names';
 
 /**
  * Create the right LLM client based on current settings.
@@ -47,9 +30,9 @@ export function getLLMModel(settings: AppSettings): string {
   }
   if (settings.llmProvider === 'local') {
     const model = settings.localLlmModel || '';
-    if (model) return normalizeLocalModelName(model);
+    if (model) return toLocalModelApiName(model);
     const llmModel = settings.llmModel || 'qwen3.5:4b';
-    return MODEL_NAME_MAP[llmModel] || llmModel;
+    return toLocalModelApiName(llmModel);
   }
   return settings.llmModel || 'qwen3.5:4b';
 }
@@ -64,8 +47,8 @@ export function getEmbedModel(settings: AppSettings): string {
   }
   if (settings.llmProvider === 'local') {
     const model = settings.localEmbedModel || '';
-    if (model) return normalizeLocalModelName(model);
-    return MODEL_NAME_MAP['bge-m3'] || 'bge-m3-Q8_0';
+    if (model) return toLocalModelApiName(model);
+    return toLocalModelApiName('bge-m3');
   }
   return settings.embedModel || 'bge-m3';
 }

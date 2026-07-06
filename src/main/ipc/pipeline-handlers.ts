@@ -2,11 +2,12 @@ import { ipcMain } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import type { IpcContext } from './context';
-import { FileWatcher } from '../watcher';
+import { FileWatcher, isSupportedWatchFile } from '../watcher';
 import { loadSettings } from '../settings';
 import { getLocalDataDir, getTempDir } from '../paths';
 import { requireString, requireId, ValidationError } from './validate';
 import { isSqliteCorruptionError, makeRepairFailureMessage } from '../db/sqlite-recovery';
+import { toPipelineEnqueueResponse } from './pipeline-enqueue-result';
 
 let fileWatcher: FileWatcher | null = null;
 
@@ -17,19 +18,35 @@ let fileWatcher: FileWatcher | null = null;
  */
 function copyToImportsIfNeeded(filePath: string): string {
   const dataDir = getLocalDataDir();
+  const resolvedDataDir = path.resolve(dataDir);
 
   // Already inside data dir (e.g. imports/) — no copy needed
   // NOTE: watchDir files ARE copied so the DB path survives if the user
   // moves or deletes the original from their watch folder.
   const normalized = path.resolve(filePath);
-  if (normalized.startsWith(path.resolve(dataDir))) return filePath;
+  const relativeToDataDir = path.relative(resolvedDataDir, normalized);
+  if (relativeToDataDir === '' || (!relativeToDataDir.startsWith('..') && !path.isAbsolute(relativeToDataDir))) {
+    return filePath;
+  }
 
   const importsDir = path.join(dataDir, 'imports');
   fs.mkdirSync(importsDir, { recursive: true });
 
-  // Use original filename, add suffix if collision
+  // Use original filename. If the same file was imported before, reuse the
+  // existing imported copy so downstream de-duplication sees the same path.
   let dest = path.join(importsDir, path.basename(filePath));
   if (fs.existsSync(dest)) {
+    try {
+      const srcStat = fs.statSync(filePath);
+      const destStat = fs.statSync(dest);
+      if (srcStat.size === destStat.size) {
+        console.log(`[Pipeline] Reusing existing import: ${path.basename(filePath)}`);
+        return dest;
+      }
+    } catch {
+      // Fall through to suffixing when either side cannot be inspected.
+    }
+
     const ext = path.extname(filePath);
     const base = path.basename(filePath, ext);
     dest = path.join(importsDir, `${base}_${Date.now()}${ext}`);
@@ -46,7 +63,7 @@ export function registerPipelineHandlers(ctx: IpcContext): void {
       const validPath = requireString(filePath, 'filePath', 1000);
       const safePath = copyToImportsIfNeeded(validPath);
       const task = ctx.getProcessor().enqueue(safePath);
-      return { id: task.id, status: task.status };
+      return toPipelineEnqueueResponse(task);
     } catch (err: any) {
       if (err instanceof ValidationError) return { id: '', status: 'failed', error: err.message, code: err.code };
       return { id: '', status: 'failed', error: err.message || 'Failed to enqueue file' };
@@ -155,8 +172,8 @@ export function registerPipelineHandlers(ctx: IpcContext): void {
       const rec = ctx.getDb().getRecording(validId);
       if (!rec) return { ok: false, error: 'Recording not found' };
       originalStatus = rec.status;
-      // Clean old data and reuse recording ID
-      const task = ctx.getProcessor().enqueueReprocess(rec.file_path, validId);
+      const inputPath = rec.source_file_path || rec.file_path;
+      const task = ctx.getProcessor().enqueueReprocess(inputPath, validId);
       return { ok: true, taskId: task.id };
     } catch (err: any) {
       if (isSqliteCorruptionError(err)) {
@@ -166,7 +183,8 @@ export function registerPipelineHandlers(ctx: IpcContext): void {
           try {
             const rec = ctx.getDb().getRecording(validId);
             if (!rec) return { ok: false, error: 'Recording not found after repair', recovery: repair };
-            const task = ctx.getProcessor().enqueueReprocess(rec.file_path, validId);
+            const inputPath = rec.source_file_path || rec.file_path;
+            const task = ctx.getProcessor().enqueueReprocess(inputPath, validId);
             return { ok: true, taskId: task.id, recovery: repair };
           } catch (retryErr: any) {
             console.error('[pipeline:reprocess] Retry after repair failed:', retryErr);
@@ -267,7 +285,7 @@ export async function startFileWatching(ctx: IpcContext): Promise<void> {
       console.log(`[FileWatcher] Skipping system audio file: ${basename}`);
       return;
     }
-    console.log(`[FileWatcher] New audio file detected: ${filePath}`);
+    console.log(`[FileWatcher] New supported file detected: ${filePath}`);
     proc.enqueue(filePath);
   }, [importsDir, tempDir]);
   await fileWatcher.start();
@@ -275,64 +293,42 @@ export async function startFileWatching(ctx: IpcContext): Promise<void> {
 
   const database = ctx.getDb();
 
-  // Auto-recovery: re-enqueue recordings stuck in transient states.
-  // Only recover 'processing'/'pending'/'recording'/'post_processing' — NOT 'failed'.
-  // 'failed' recordings already finished with an error and should be retried manually.
+  // Crash recovery: never auto-reprocess stuck recordings on startup.
+  // Reprocessing clears and rebuilds derived data, so doing it automatically can
+  // duplicate large imports or wipe usable previous results after a restart.
+  // Keep the recording visible as interrupted and let the user retry explicitly.
   const recoverableStatuses = ['processing', 'pending', 'recording', 'post_processing'] as const;
-  let requeued = 0;
   let skippedMissing = 0;
-  let markedFailed = 0;
+  let markedInterrupted = 0;
   for (const status of recoverableStatuses) {
     const recs = database.getRecordingsByStatus(status);
     for (const rec of recs) {
       if (!fs.existsSync(rec.file_path)) {
-        database.updateRecordingStatus(rec.id, 'failed');
+        database.updateRecordingStatus(rec.id, 'interrupted');
         skippedMissing++;
         continue;
       }
-      // Only auto-retry recordings that are reasonably sized (< 2 hours).
-      // Very large recordings that previously failed to complete likely need
-      // manual attention — mark them as failed to break the retry loop.
-      const duration = rec.duration_seconds || 0;
-      if (duration > 7200) {
-        console.log(`[FileWatcher] Skipping auto-recovery for ${rec.file_name} (${Math.round(duration / 60)}min) — too long, marking failed`);
-        database.updateRecordingStatus(rec.id, 'failed');
-        markedFailed++;
-        continue;
-      }
-      // Limit auto-recovery retries to prevent crash loops (e.g. ONNX native crash on bad audio)
-      const retryCount = (rec as any).reprocess_count || 0;
-      if (retryCount >= 2) {
-        console.log(`[FileWatcher] Skipping auto-recovery for ${rec.file_name} — exceeded max retries (${retryCount}), marking failed`);
-        database.updateRecordingStatus(rec.id, 'failed');
-        markedFailed++;
-        continue;
-      }
       try {
-        proc.enqueueReprocess(rec.file_path, rec.id);
-        requeued++;
+        database.updateRecordingStatus(rec.id, 'interrupted');
+        markedInterrupted++;
       } catch (err) {
-        console.error(`[FileWatcher] Failed to reprocess ${rec.file_name}:`, err);
-        database.updateRecordingStatus(rec.id, 'failed');
-        markedFailed++;
+        console.error(`[FileWatcher] Failed to mark interrupted recording ${rec.file_name}:`, err);
       }
     }
   }
-  if (requeued > 0 || skippedMissing > 0 || markedFailed > 0) {
-    console.log(`[FileWatcher] Auto-recovery: requeued ${requeued}, missing ${skippedMissing}, too-long ${markedFailed}`);
+  if (skippedMissing > 0 || markedInterrupted > 0) {
+    console.log(`[FileWatcher] Crash recovery: interrupted ${markedInterrupted}, missing ${skippedMissing}`);
   }
 
   // Scan watch directory for truly new files (no recording in DB at all)
   // Delay scan to let files that are still being copied stabilize
-  const MEDIA_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.mov', '.mkv', '.avi', '.wmv']);
   const STABLE_AGE_MS = 3000; // file must not have been modified in last 3 seconds
 
   const files = fs.readdirSync(settings.watchDir);
   const now = Date.now();
 
   for (const file of files) {
-    const ext = path.extname(file).toLowerCase();
-    if (!MEDIA_EXTENSIONS.has(ext)) continue;
+    if (!isSupportedWatchFile(file)) continue;
     // Skip files already handled by their own pipelines
     if (file.startsWith('LIVE-') || file.startsWith('FEISHU-') || file.startsWith('REC-') || file.startsWith('SYSAUDIO-')) continue;
 

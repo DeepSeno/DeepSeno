@@ -17,7 +17,9 @@ import { requireString, requireUrl, ValidationError } from './validate';
 import { getDefaultPrompts } from '../llm/default-prompts';
 import { findModel, getDownloadUrl } from '../llm/gguf-model-catalog';
 import { type GGUFDownloadState, ggufDownloadStateStore } from '../llm/gguf-download-state';
+import { hasGGUFMagic, readGGUFFileInfo, validateGGUFFilePath } from '../llm/gguf-model-files';
 import { prepareLlamaRouterRuntime } from '../llm/llama-router-runtime';
+import { toLocalModelApiName } from '../llm/model-names';
 
 // Module-level state for tracking active downloads (survives page navigation)
 let sherpaDlState: { model: string; completed: number; total: number; status: string } | null = null;
@@ -52,6 +54,46 @@ function updateGGUFState(
   return state;
 }
 
+function getPartialDownloadSize(filePath: string): number {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 0 ? stat.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function parseContentRangeTotal(contentRange: string | null): number | null {
+  if (!contentRange) return null;
+  const match = /\/(\d+)$/.exec(contentRange.trim());
+  if (!match) return null;
+  const total = Number.parseInt(match[1], 10);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+function promoteValidatedDownload(tmpPath: string, destPath: string): void {
+  const backupPath = `${destPath}.previous`;
+  try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch { /* ignore */ }
+
+  let movedExisting = false;
+  if (fs.existsSync(destPath)) {
+    fs.renameSync(destPath, backupPath);
+    movedExisting = true;
+  }
+
+  try {
+    fs.renameSync(tmpPath, destPath);
+    if (movedExisting) {
+      try { fs.unlinkSync(backupPath); } catch { /* ignore */ }
+    }
+  } catch (err) {
+    if (movedExisting && fs.existsSync(backupPath) && !fs.existsSync(destPath)) {
+      try { fs.renameSync(backupPath, destPath); } catch { /* ignore */ }
+    }
+    throw err;
+  }
+}
+
 /** Download a GGUF file from HuggingFace (or mirror) with progress reporting. */
 async function downloadGGUF(
   modelId: string,
@@ -65,51 +107,169 @@ async function downloadGGUF(
   const modelsDir = getLLMModelsDir();
   const destPath = path.join(modelsDir, entry.fileName);
   const tmpPath = destPath + '.downloading';
+  fs.mkdirSync(modelsDir, { recursive: true });
+
+  if (force) {
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+  }
 
   // Skip if already fully downloaded
   if (!force && fs.existsSync(destPath)) {
-    const stat = fs.statSync(destPath);
-    if (stat.size >= entry.fileSizeBytes * 0.95) {
-      console.log(`[GGUF] Model already downloaded: ${entry.fileName} (${stat.size} bytes)`);
+    const validation = validateGGUFFilePath(destPath, entry.fileSizeBytes);
+    if (validation.ok) {
+      console.log(`[GGUF] Model already downloaded: ${entry.fileName} (${validation.size} bytes)`);
       return { success: true };
     }
+    console.warn(`[GGUF] Existing model is invalid, redownloading: ${entry.fileName} (${validation.error})`);
   }
 
-  // Pick mirror: default → ModelScope (works in China and globally)
-  const mirror = '';
-  const url = getDownloadUrl(entry, mirror);
-  console.log(`[GGUF] Downloading ${entry.id} from ${mirror || 'modelscope'}: ${url}`);
+  const mirrors = ['', 'hf-mirror', 'ghfast'];
+  const errors: string[] = [];
 
-  try {
-    const res = await fetch(url, {
-      signal,
-      headers: { 'User-Agent': 'DeepSeno/1.0' },
-    });
+  for (const mirror of mirrors) {
+    const url = getDownloadUrl(entry, mirror);
+    const mirrorLabel = mirror || 'modelscope';
+    const resumeFrom = force ? 0 : getPartialDownloadSize(tmpPath);
+    const headers: Record<string, string> = { 'User-Agent': 'DeepSeno/1.0' };
+    if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
 
-    if (!res.ok) {
-      // Try fallback mirror: ModelScope → hf-mirror → ghfast
-      const fallbackMirror = mirror === '' ? 'hf-mirror' : mirror === 'hf-mirror' ? 'ghfast' : 'hf-mirror';
-      const fallbackUrl = getDownloadUrl(entry, fallbackMirror);
-      console.warn(`[GGUF] ${mirror} returned ${res.status}, trying ${fallbackMirror}: ${fallbackUrl}`);
-      const res2 = await fetch(fallbackUrl, {
+    console.log(`[GGUF] Downloading ${entry.id} from ${mirrorLabel}: ${url}${resumeFrom > 0 ? ` (resume from ${resumeFrom})` : ''}`);
+
+    try {
+      let res = await fetch(url, {
         signal,
-        headers: { 'User-Agent': 'DeepSeno/1.0' },
+        headers,
       });
-      if (!res2.ok) {
-        return { success: false, error: `Download failed: HTTP ${res2.status}` };
-      }
-      return await streamToFile(res2, tmpPath, destPath, entry, ctx, signal);
-    }
 
-    return await streamToFile(res, tmpPath, destPath, entry, ctx, signal);
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      // Clean up partial download
-      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* */ }
-      return { success: false, error: 'cancelled' };
+      if (res.status === 416 && resumeFrom > 0) {
+        const validation = validateGGUFFilePath(tmpPath, entry.fileSizeBytes);
+        if (validation.ok) {
+          promoteValidatedDownload(tmpPath, destPath);
+          return { success: true };
+        }
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        res = await fetch(url, {
+          signal,
+          headers: { 'User-Agent': 'DeepSeno/1.0' },
+        });
+      }
+
+      if (!res.ok) {
+        errors.push(`${mirrorLabel}: HTTP ${res.status}`);
+        continue;
+      }
+
+      const shouldAppend = resumeFrom > 0 && res.status === 206;
+      if (resumeFrom > 0 && !shouldAppend) {
+        console.warn(`[GGUF] ${mirrorLabel} ignored Range request, restarting ${entry.fileName}`);
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      }
+
+      const result = await streamToFile(
+        res,
+        tmpPath,
+        destPath,
+        entry,
+        ctx,
+        signal,
+        shouldAppend ? resumeFrom : 0,
+      );
+      if (result.success) return result;
+      errors.push(`${mirrorLabel}: ${result.error || 'Download failed'}`);
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        return { success: false, error: 'cancelled' };
+      }
+      errors.push(`${mirrorLabel}: ${err.message || 'Download failed'}`);
     }
-    return { success: false, error: err.message || 'Download failed' };
   }
+
+  return {
+    success: false,
+    error: errors.length > 0 ? errors.join(' | ') : 'Download failed',
+  };
+}
+
+function createDownloadErrorPreview(filePath: string): string {
+  const info = readGGUFFileInfo(filePath);
+  if (!info?.header) return '';
+  if (hasGGUFMagic(info.header)) return '';
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const sample = Buffer.alloc(160);
+      const bytesRead = fs.readSync(fd, sample, 0, sample.length, 0);
+      const text = sample.subarray(0, bytesRead).toString('utf8').replace(/\s+/g, ' ').trim();
+      return text ? `: ${text.slice(0, 120)}` : '';
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
+function isEmbedModelName(modelName: string): boolean {
+  const normalized = toLocalModelApiName(modelName).toLowerCase();
+  return normalized.includes('bge') || findModel(modelName)?.type === 'embed';
+}
+
+async function smokeTestLocalModel(baseUrl: string, modelName: string, signal: AbortSignal): Promise<void> {
+  const apiModel = toLocalModelApiName(modelName);
+  if (isEmbedModelName(modelName)) {
+    const res = await fetch(`${baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: apiModel, input: 'hello' }),
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Embedding smoke test failed: HTTP ${res.status} ${await res.text()}`);
+    }
+    const data: any = await res.json();
+    const embedding = data.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || embedding.length === 0) {
+      throw new Error('Embedding smoke test returned an empty vector');
+    }
+    return;
+  }
+
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: apiModel,
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 8,
+      temperature: 0,
+      stream: false,
+      chat_template_kwargs: { enable_thinking: false },
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`Chat smoke test failed: HTTP ${res.status} ${await res.text()}`);
+  }
+  const data: any = await res.json();
+  const msg = data.choices?.[0]?.message;
+  if (!msg?.content && !msg?.reasoning_content) {
+    throw new Error('Chat smoke test returned an empty response');
+  }
+}
+
+async function refreshLocalRouterAfterModelChange(ctx: IpcContext): Promise<void> {
+  const settings = loadSettings();
+  if (settings.llmProvider !== 'local') return;
+
+  const server = ensureLlamaServer();
+  const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
+  const { port } = await server.startRouter(modelsDir, {
+    maxModels: 2,
+    flashAttn: true,
+    presetPath,
+  });
+  updateSettings({ llamaServerPort: port });
+  ctx.resetLLMClient();
 }
 
 /** Stream HTTP response body to a temp file, rename on completion. */
@@ -120,13 +280,20 @@ async function streamToFile(
   entry: { id: string; fileName: string; fileSizeBytes: number },
   ctx: IpcContext,
   signal?: AbortSignal,
+  resumeFrom = 0,
 ): Promise<{ success: boolean; error?: string }> {
   const contentLength = res.headers.get('content-length');
-  const totalBytes = contentLength ? parseInt(contentLength, 10) : entry.fileSizeBytes;
+  const rangeTotal = parseContentRangeTotal(res.headers.get('content-range'));
+  const responseBytes = contentLength ? parseInt(contentLength, 10) : 0;
+  const totalBytes = Math.max(
+    rangeTotal || 0,
+    responseBytes > 0 ? resumeFrom + responseBytes : 0,
+    entry.fileSizeBytes,
+  );
 
   const reader = res.body!.getReader();
-  const ws = fs.createWriteStream(tmpPath);
-  let completed = 0;
+  const ws = fs.createWriteStream(tmpPath, { flags: resumeFrom > 0 ? 'a' : 'w' });
+  let completed = resumeFrom;
   let lastEmit = 0;
 
   // Catch stream errors to prevent uncaught exceptions from crashing the process
@@ -188,9 +355,18 @@ async function streamToFile(
       ws.on('error', reject);
     });
 
-    // Rename temp → final
-    if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-    fs.renameSync(tmpPath, destPath);
+    const validation = validateGGUFFilePath(tmpPath, entry.fileSizeBytes);
+    if (!validation.ok) {
+      const preview = createDownloadErrorPreview(tmpPath);
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      return {
+        success: false,
+        error: `${validation.error || 'Model verification failed'}${preview}`,
+      };
+    }
+
+    promoteValidatedDownload(tmpPath, destPath);
+    completed = validation.size;
 
     console.log(`[GGUF] Download complete: ${entry.fileName} (${completed} bytes)`);
 
@@ -204,7 +380,6 @@ async function streamToFile(
   } catch (err: any) {
     reader.cancel().catch(() => {});
     ws.destroy();
-    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* */ }
     throw err;
   }
 }
@@ -308,6 +483,9 @@ export function registerSystemHandlers(ctx: IpcContext): void {
     const needsLLMReset =
       partial.llmProvider !== undefined ||
       partial.llmModel !== undefined ||
+      partial.embedModel !== undefined ||
+      partial.localLlmModel !== undefined ||
+      partial.localEmbedModel !== undefined ||
       partial.cloudApiUrl !== undefined ||
       partial.cloudApiKey !== undefined ||
       partial.cloudModel !== undefined ||
@@ -359,19 +537,9 @@ export function registerSystemHandlers(ctx: IpcContext): void {
           const chatModel = getLLMModel(s);
           const embedModel = getEmbedModel(s);
           const base = `http://127.0.0.1:${port}/v1`;
-          const body = (model: string) => JSON.stringify({
-            model,
-            messages: [{ role: 'user', content: 'hi' }],
-            max_tokens: 1,
-            stream: false,
-          });
           for (const model of [chatModel, embedModel]) {
             try {
-              await fetch(`${base}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: body(model),
-              });
+              await smokeTestLocalModel(base, model, AbortSignal.timeout(30_000));
             } catch { /* ignore */ }
           }
         }).catch((err) => {
@@ -432,7 +600,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
           return 'Cloud API';
         }
 
-        const ok = await ctx.getLLM().isAvailable();
+        const ok = await ctx.getLLM().isAvailable(getLLMModel(settings));
         if (!ok) throw new Error('not running');
         return 'Local';
       })(),
@@ -541,14 +709,9 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   ipcMain.handle('system:listModels', async () => {
     try {
       const modelsDir = getLLMModelsDir();
-      const { getDownloadedGGUFModelIds } = await import('../llm/gguf-model-files');
+      const { getDownloadedGGUFModelIds, readGGUFFileInfo } = await import('../llm/gguf-model-files');
       return getDownloadedGGUFModelIds((fileName) => {
-        try {
-          const stat = fs.statSync(path.join(modelsDir, fileName));
-          return stat.size;
-        } catch {
-          return null;
-        }
+        return readGGUFFileInfo(path.join(modelsDir, fileName));
       });
     } catch {
       return [];
@@ -598,6 +761,11 @@ export function registerSystemHandlers(ctx: IpcContext): void {
             completed: current?.completed && current.completed > 0 ? current.completed : entry.fileSizeBytes,
             total: current?.total && current.total > 0 ? current.total : entry.fileSizeBytes,
           });
+          try {
+            await refreshLocalRouterAfterModelChange(ctx);
+          } catch (err) {
+            console.error('[PullModel] Failed to refresh llama-server after download:', err);
+          }
           return { success: true, model: entry.id };
         }
 
@@ -643,6 +811,55 @@ export function registerSystemHandlers(ctx: IpcContext): void {
     activeDownload.promise = promise;
     activeGGUFFileDownloads.set(fileKey, { controller, model: entry.id, promise });
     return promise;
+  });
+
+  ipcMain.handle('system:testLocal', async (_event, modelName?: string) => {
+    try {
+      const settings = loadSettings();
+      const requestedModel = typeof modelName === 'string' && modelName.trim()
+        ? requireString(modelName, 'modelName', 200)
+        : settings.localLlmModel || settings.llmModel || 'qwen3.5:4b';
+      const entry = findModel(requestedModel);
+      if (entry) {
+        const filePath = path.join(getLLMModelsDir(), entry.fileName);
+        const validation = validateGGUFFilePath(filePath, entry.fileSizeBytes);
+        if (!validation.ok) {
+          return { success: false, error: validation.error || 'Model file is not ready' };
+        }
+      }
+
+      const server = ensureLlamaServer();
+      let status = server.getStatus();
+      if (!status.running || !status.port) {
+        const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
+        const started = await server.startRouter(modelsDir, {
+          maxModels: 2,
+          flashAttn: true,
+          presetPath,
+        });
+        updateSettings({ llamaServerPort: started.port });
+        status = server.getStatus();
+      }
+
+      if (!status.port) {
+        return { success: false, error: 'llama-server port is not available' };
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 120_000);
+      try {
+        await smokeTestLocalModel(`http://127.0.0.1:${status.port}/v1`, requestedModel, controller.signal);
+      } finally {
+        clearTimeout(timer);
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      const message = err?.name === 'AbortError'
+        ? 'Model test timed out'
+        : err?.message || String(err);
+      return { success: false, error: message };
+    }
   });
 
   ipcMain.handle('system:cancelPull', async (_event, modelName?: string) => {
@@ -844,7 +1061,8 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
   ipcMain.handle('system:openPath', async (_event, dirPath: string) => {
     const safePath = requireString(dirPath, 'dirPath', 1000);
-    await shell.openPath(safePath);
+    const error = await shell.openPath(safePath);
+    if (error) throw new Error(error);
   });
 
   ipcMain.handle('system:getDataDir', () => {

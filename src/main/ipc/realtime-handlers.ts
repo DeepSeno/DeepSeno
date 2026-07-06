@@ -867,6 +867,7 @@ export async function startRealtimeTranscription(ctx: IpcContext, scene: Recordi
 
     const recordingId = database.insertRecording({
       file_path: wavPath,
+      source_file_path: wavPath,
       file_name: baseFileName,
       recorded_at: new Date().toISOString(),
       status: 'recording',

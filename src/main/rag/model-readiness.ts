@@ -1,8 +1,8 @@
-import fs from 'fs';
 import path from 'path';
 import type { AppSettings } from '../settings';
 import { getLLMModelsDir } from '../paths';
-import { getDownloadedGGUFModelIds } from '../llm/gguf-model-files';
+import { getDownloadedGGUFModelIds, readGGUFFileInfo, validateGGUFFilePath } from '../llm/gguf-model-files';
+import { toLocalModelApiName } from '../llm/model-names';
 import { looksLikeModelNotFound } from '../llm/openai-client';
 
 export const RAG_MODEL_SETUP_MESSAGE =
@@ -29,21 +29,18 @@ interface ReadinessOptions {
 function defaultDownloadedLocalModelIds(): string[] {
   const modelsDir = getLLMModelsDir();
   return getDownloadedGGUFModelIds((fileName) => {
-    try {
-      return fs.statSync(path.join(modelsDir, fileName)).size;
-    } catch {
-      return null;
-    }
+    return readGGUFFileInfo(path.join(modelsDir, fileName));
   });
 }
 
 function defaultLocalModelFileExists(modelName: string): boolean {
   const modelsDir = getLLMModelsDir();
-  const base = modelName.replace(/\.gguf$/i, '');
+  const apiName = toLocalModelApiName(modelName);
+  const base = apiName.replace(/\.gguf$/i, '');
   const basename = path.basename(base);
   const candidates = new Set([
-    modelName,
-    `${modelName}.gguf`,
+    apiName,
+    `${apiName}.gguf`,
     base,
     `${base}.gguf`,
     basename,
@@ -52,11 +49,8 @@ function defaultLocalModelFileExists(modelName: string): boolean {
 
   for (const candidate of candidates) {
     const filePath = path.isAbsolute(candidate) ? candidate : path.join(modelsDir, candidate);
-    try {
-      if (fs.statSync(filePath).size > 0) return true;
-    } catch {
-      // Try next candidate.
-    }
+    const validation = validateGGUFFilePath(filePath, 1);
+    if (validation.ok) return true;
   }
   return false;
 }

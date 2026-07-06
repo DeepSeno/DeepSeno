@@ -28,6 +28,10 @@ describe('create-client model names', () => {
       localLlmModel: '/tmp/deepseno/models/Qwen3.5-4B-Q4_K_M.gguf',
     }))).toBe('Qwen3.5-4B-Q4_K_M');
 
+    expect(getLLMModel(settings({
+      localLlmModel: 'qwen3.5:4b:latest',
+    }))).toBe('Qwen3.5-4B-Q4_K_M');
+
     expect(getEmbedModel(settings({
       localEmbedModel: String.raw`C:\Users\me\AppData\DeepSeno\models\bge-m3-Q8_0.gguf`,
     }))).toBe('bge-m3-Q8_0');

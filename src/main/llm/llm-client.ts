@@ -64,6 +64,6 @@ export interface LLMClient {
   generateJSON<T>(options: LocalGenerateOptions): Promise<T>;
   chatWithTools?(options: ChatWithToolsOptions): Promise<ChatWithToolsResult>;
   embed(model: string, input: string): Promise<number[]>;
-  isAvailable(): Promise<boolean>;
+  isAvailable(model?: string): Promise<boolean>;
   listModels(): Promise<string[]>;
 }

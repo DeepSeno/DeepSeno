@@ -166,9 +166,11 @@ vi.mock('../db/database', () => {
     updateSegmentSentiment: vi.fn(),
     getAllRecordings: vi.fn(() => []),
     getRecordingByPath: vi.fn(() => undefined),
+    getRecordingByFileNameAndType: vi.fn(() => undefined),
     getRawDb: vi.fn(() => mockRawDb),
     setRecordingTags: vi.fn(),
     updateRecordingFilePath: vi.fn(),
+    updateRecordingSourceFilePath: vi.fn(),
     buildVocabularyPromptBlock: vi.fn(() => ''),
   };
   return {
@@ -407,6 +409,8 @@ describe('Processor', () => {
     mockDb.getSegmentsByDate.mockReturnValue([]);
     mockDb.getSegmentIdsByRecording.mockReturnValue([]);
     mockDb.getAllRecordings.mockReturnValue([]);
+    mockDb.getRecordingByPath.mockReturnValue(undefined);
+    mockDb.getRecordingByFileNameAndType.mockReturnValue(undefined);
     mockDb.getSegment.mockReturnValue(null);
     mockDb.getRecording.mockReturnValue({
       id: 1, file_path: `${TMP_DIR}/test.wav`, file_name: 'test.wav',
@@ -516,6 +520,93 @@ describe('Processor', () => {
       const task1 = processor.enqueue(`${TMP_DIR}/test_dedup.wav`);
       const task2 = processor.enqueue(`${TMP_DIR}/test_dedup.wav`);
       expect(task1.id).toBe(task2.id);
+    });
+
+    it('creates a pending recording as soon as a video is enqueued', () => {
+      const queue = processor.getTaskQueue();
+      queue.pause();
+      mockDb.insertRecording.mockReturnValueOnce(123);
+
+      const task = processor.enqueue(`${TMP_DIR}/test_early_video.mp4`);
+
+      expect(task.recordingId).toBe(123);
+      expect(task.status).toBe('pending');
+      expect(mockDb.insertRecording).toHaveBeenCalledWith(expect.objectContaining({
+        file_path: `${TMP_DIR}/test_early_video.mp4`,
+        source_file_path: `${TMP_DIR}/test_early_video.mp4`,
+        file_name: 'test_early_video.mp4',
+        media_type: 'video',
+        status: 'pending',
+      }));
+      expect(mockDb.updateRecordingStatus).not.toHaveBeenCalledWith(123, 'processing');
+    });
+
+    it('does not create a second pending recording for duplicate active enqueue', () => {
+      const queue = processor.getTaskQueue();
+      queue.pause();
+      mockDb.insertRecording.mockReturnValueOnce(124);
+
+      const task1 = processor.enqueue(`${TMP_DIR}/test_duplicate_early_video.mp4`);
+      const task2 = processor.enqueue(`${TMP_DIR}/test_duplicate_early_video.mp4`);
+
+      expect(task2.id).toBe(task1.id);
+      expect(mockDb.insertRecording).toHaveBeenCalledTimes(1);
+    });
+
+    it('deduplicates reprocess by recording id without clearing data before processing starts', () => {
+      const queue = processor.getTaskQueue();
+      queue.pause();
+
+      const task1 = processor.enqueueReprocess(`${TMP_DIR}/test_reprocess.wav`, 42);
+      const task2 = processor.enqueueReprocess(`${TMP_DIR}/test_reprocess_retry.wav`, 42);
+
+      expect(task2.id).toBe(task1.id);
+      expect(task1.recordingId).toBe(42);
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(42, 'pending');
+      expect(mockDb.clearRecordingData).not.toHaveBeenCalled();
+      expect(mockDb.getSegmentIdsByRecording).not.toHaveBeenCalled();
+    });
+
+    it('reuses an existing video recording instead of inserting a duplicate', () => {
+      const queue = processor.getTaskQueue();
+      queue.pause();
+      mockDb.getRecordingByFileNameAndType.mockReturnValueOnce({
+        id: 99,
+        file_path: `${VB_TEST_BASE}/output/videos/test_existing_video.mp4`,
+        source_file_path: null,
+        file_name: 'test_existing_video.mp4',
+        media_type: 'video',
+        status: 'interrupted',
+      });
+
+      const task = processor.enqueue(`${TMP_DIR}/test_existing_video.mp4`);
+
+      expect(task.recordingId).toBe(99);
+      expect(mockDb.insertRecording).not.toHaveBeenCalled();
+      expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(99, 'pending');
+      expect(mockDb.clearRecordingData).not.toHaveBeenCalled();
+    });
+
+    it('skips normal enqueue when the same recording is already completed', () => {
+      const queue = processor.getTaskQueue();
+      queue.pause();
+      mockDb.getRecordingByPath.mockReturnValueOnce({
+        id: 100,
+        file_path: `${VB_TEST_BASE}/output/videos/test_done.mp4`,
+        source_file_path: `${TMP_DIR}/test_done.mp4`,
+        file_name: 'test_done.mp4',
+        media_type: 'video',
+        status: 'completed',
+      });
+
+      const task = processor.enqueue(`${TMP_DIR}/test_done.mp4`);
+
+      expect(task.status).toBe('failed');
+      expect(task.error).toBe('Recording already processed');
+      expect(processor.getTaskQueue().getAll()).toHaveLength(0);
+      expect(mockDb.insertRecording).not.toHaveBeenCalled();
+      expect(mockDb.updateRecordingStatus).not.toHaveBeenCalledWith(100, 'pending');
+      expect(mockDb.clearRecordingData).not.toHaveBeenCalled();
     });
   });
 

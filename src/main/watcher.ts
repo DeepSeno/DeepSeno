@@ -1,7 +1,13 @@
 import chokidar, { type FSWatcher } from 'chokidar';
 import path from 'path';
+import { SUPPORTED_EXTENSIONS } from './pipeline/media-type';
 
-const MEDIA_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.mov', '.mkv', '.avi', '.wmv']);
+const WATCH_EXTENSIONS = new Set(SUPPORTED_EXTENSIONS);
+
+export function isSupportedWatchFile(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return WATCH_EXTENSIONS.has(ext);
+}
 
 export class FileWatcher {
   private watcher: FSWatcher | null = null;
@@ -19,8 +25,7 @@ export class FileWatcher {
       ignored: this.ignoreDirs.map(d => path.join(d, '**')),
     });
     this.watcher.on('add', (filePath: string) => {
-      const ext = path.extname(filePath).toLowerCase();
-      if (MEDIA_EXTENSIONS.has(ext)) {
+      if (isSupportedWatchFile(filePath)) {
         try {
           this.onNewFile(filePath);
         } catch (err) {

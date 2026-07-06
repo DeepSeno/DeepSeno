@@ -8,6 +8,7 @@ import GeneralSection from './settings/GeneralSection';
 import RecordingSection from './settings/RecordingSection';
 import SystemSection from './settings/SystemSection';
 import Help from './Help';
+import { openDirectoryPath } from './settings/open-directory';
 
 export default function SettingsPage() {
   const { t, lang, setLang } = useI18n();
@@ -49,9 +50,13 @@ export default function SettingsPage() {
     return ok;
   }, [api, s, toast]);
 
-  const handleOpenExternal = useCallback((path: string) => {
-    try { api.openExternal(path); } catch {}
-  }, [api]);
+  const handleOpenDirectory = useCallback(async (path: string) => {
+    try {
+      await openDirectoryPath(api, path);
+    } catch (err) {
+      toast('error', s.open_folder_failed || s.open_folder, err instanceof Error ? err.message : String(err));
+    }
+  }, [api, s.open_folder, s.open_folder_failed, toast]);
 
   // ─── Loading state ───────────────────────────────────────────
   if (!settings) {
@@ -131,7 +136,7 @@ export default function SettingsPage() {
             onDirChange={handleDirChange}
             onLangChange={handleLangChange}
             currentLang={lang}
-            onOpenExternal={handleOpenExternal}
+            onOpenDirectory={handleOpenDirectory}
           />
         )}
 

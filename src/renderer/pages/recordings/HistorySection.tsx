@@ -38,6 +38,25 @@ function MediaTypeIcon({ mediaType }: { mediaType: string }) {
   }
 }
 
+export function canOpenHistoryItem(item: Pick<HistoryItem, 'status'>): boolean {
+  return item.status === 'done';
+}
+
+export function getHistoryStatusLabel(item: Pick<HistoryItem, 'status'>, r: Translations['rec']): string {
+  if (item.status === 'done') return r.status_success;
+  if (item.status === 'cancelled') return r.status_cancelled;
+  if (item.status === 'interrupted') return (r as any).status_interrupted || 'Interrupted';
+  if (item.status === 'error') return r.status_error;
+  return r.status_active;
+}
+
+function getHistoryStatusBadgeClass(status: string): string {
+  if (status === 'done') return 'kz-badge--success';
+  if (status === 'cancelled' || status === 'interrupted') return 'kz-badge--warn';
+  if (status === 'error') return 'kz-badge--danger';
+  return 'kz-badge--info';
+}
+
 interface FilterDef {
   key: string;
   label: string;
@@ -118,21 +137,23 @@ export default function HistorySection({
           ) : (
             <>
               {/* Recording rows first */}
-              {filteredHistory.map((item, i) => (
-                <div
-                  key={item.recordingId}
-                  onClick={() => onRecordingClick(item.recordingId)}
-                  className="kz-row-hover kz-anim-in group"
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '100px 1fr auto auto',
-                    gap: 16,
-                    alignItems: 'center',
-                    padding: '14px 20px',
-                    borderTop: i ? '1px solid var(--line-soft)' : 0,
-                    animationDelay: `${Math.min(i, 8) * 24}ms`,
-                  }}
-                >
+              {filteredHistory.map((item, i) => {
+                const canOpen = canOpenHistoryItem(item);
+                return (
+                  <div
+                    key={item.recordingId}
+                    onClick={() => { if (canOpen) onRecordingClick(item.recordingId); }}
+                    className={`${canOpen ? 'kz-row-hover' : ''} kz-anim-in group`}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '100px 1fr auto auto',
+                      gap: 16,
+                      alignItems: 'center',
+                      padding: '14px 20px',
+                      borderTop: i ? '1px solid var(--line-soft)' : 0,
+                      animationDelay: `${Math.min(i, 8) * 24}ms`,
+                    }}
+                  >
                   <span className="kz-mono kz-text-mute" style={{ fontSize: 10.5, letterSpacing: 0.08, whiteSpace: 'nowrap' }}>{item.id}</span>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -175,23 +196,9 @@ export default function HistorySection({
                     </div>
                   </div>
                   <span
-                    className={`kz-badge ${
-                      item.status === 'done'
-                        ? 'kz-badge--success'
-                        : item.status === 'cancelled'
-                          ? 'kz-badge--warn'
-                          : item.status === 'error'
-                            ? 'kz-badge--danger'
-                            : 'kz-badge--info'
-                    } kz-badge--dot`}
+                    className={`kz-badge ${getHistoryStatusBadgeClass(item.status)} kz-badge--dot`}
                   >
-                    {item.status === 'done'
-                      ? r.status_success
-                      : item.status === 'cancelled'
-                        ? r.status_cancelled
-                        : item.status === 'error'
-                          ? r.status_error
-                          : r.status_active}
+                    {getHistoryStatusLabel(item, r)}
                   </span>
                   {/* Action buttons — icon-only ghost (matches design: reprocess + open + delete) */}
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
@@ -221,14 +228,16 @@ export default function HistorySection({
                         >
                           <History size={13} />
                         </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); onRecordingClick(item.recordingId); }}
-                          className="kz-btn kz-btn--ghost kz-btn--sm"
-                          title={r.view}
-                          style={{ padding: '0 6px' }}
-                        >
-                          <ExternalLink size={13} />
-                        </button>
+                        {canOpen && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onRecordingClick(item.recordingId); }}
+                            className="kz-btn kz-btn--ghost kz-btn--sm"
+                            title={r.view}
+                            style={{ padding: '0 6px' }}
+                          >
+                            <ExternalLink size={13} />
+                          </button>
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); onDeleteRequest(item.recordingId); }}
                           className="kz-btn kz-btn--ghost kz-btn--sm"
@@ -240,8 +249,9 @@ export default function HistorySection({
                       </>
                     )}
                   </div>
-                </div>
-              ))}
+                  </div>
+                );
+              })}
               {/* Text Note rows */}
               {filteredNotes.map((note) => (
                 <div

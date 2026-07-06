@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import os from 'os';
+import { DatabaseSync } from 'node:sqlite';
 import { TaskQueue, type QueueTask } from '../task-queue';
 
 const TMP_DIR = os.tmpdir().replace(/\\/g, '/');
@@ -25,6 +26,26 @@ describe('TaskQueue', () => {
 
     await new Promise((r) => setTimeout(r, 50));
     expect(processor).toHaveBeenCalledTimes(1);
+  });
+
+  it('should deduplicate reprocess tasks by recording id', () => {
+    const q = new TaskQueue();
+    const task1 = q.addReprocess(`${TMP_DIR}/first.wav`, 42);
+    const task2 = q.addReprocess(`${TMP_DIR}/second.wav`, 42);
+
+    expect(task2.id).toBe(task1.id);
+    expect(task2.filePath).toBe(`${TMP_DIR}/first.wav`);
+    expect(q.getAll()).toHaveLength(1);
+  });
+
+  it('should deduplicate reprocess tasks by file path', () => {
+    const q = new TaskQueue();
+    const task1 = q.addReprocess(`${TMP_DIR}/same.wav`, 42);
+    const task2 = q.addReprocess(`${TMP_DIR}/same.wav`, 43);
+
+    expect(task2.id).toBe(task1.id);
+    expect(task2.recordingId).toBe(42);
+    expect(q.getAll()).toHaveLength(1);
   });
 
   it('should emit completed when the processor marks the task completed', async () => {
@@ -89,6 +110,111 @@ describe('TaskQueue', () => {
     expect(task.status).toBe('cancelled');
     expect(cancelled).toHaveBeenCalledTimes(1);
     expect(q.getAll()).toHaveLength(0);
+  });
+
+  it('should start the next pending task immediately after active task cancellation', async () => {
+    const q = new TaskQueue();
+    const started: string[] = [];
+    let releaseSlowTask: (() => void) | null = null;
+
+    q.setProcessor((task: QueueTask) => {
+      started.push(task.filePath);
+      if (task.filePath.endsWith('/slow-cancel.wav')) {
+        return new Promise<void>((resolve) => { releaseSlowTask = resolve; });
+      }
+      return Promise.resolve();
+    });
+
+    const slowTask = q.add(`${TMP_DIR}/slow-cancel.wav`);
+    const nextTask = q.add(`${TMP_DIR}/next-after-cancel.wav`);
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toEqual([slowTask.filePath]);
+
+    expect(q.cancel(slowTask.id)).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toEqual([slowTask.filePath, nextTask.filePath]);
+
+    releaseSlowTask?.();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(nextTask.status).toBe('completed');
+  });
+
+  it('should keep active tasks interrupted during shutdown abort', async () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE task_queue (
+        id TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL,
+        recording_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        progress REAL DEFAULT 0,
+        error TEXT,
+        notes TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retries INTEGER NOT NULL DEFAULT 2,
+        media_type TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    const q = new TaskQueue();
+    q.setDb(db);
+    q.setProcessor((_task, signal) => new Promise<void>((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        const err = new Error('Task cancelled by user');
+        err.name = 'TaskCancelledError';
+        reject(err);
+      }, { once: true });
+    }));
+
+    const task = q.add(`${TMP_DIR}/shutdown.wav`);
+    await new Promise((r) => setTimeout(r, 10));
+
+    q.markActiveAsInterrupted();
+    q.dispose();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const row = db.prepare('SELECT status, error FROM task_queue WHERE id = ?').get(task.id) as { status: string; error: string };
+    expect(row.status).toBe('interrupted');
+    expect(row.error).toContain('interrupted by app shutdown');
+    db.close();
+  });
+
+  it('should relabel legacy restart-interrupted failures during restore', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE task_queue (
+        id TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL,
+        recording_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        progress REAL DEFAULT 0,
+        error TEXT,
+        notes TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retries INTEGER NOT NULL DEFAULT 2,
+        media_type TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO task_queue (id, file_path, status, progress, error, retry_count, max_retries, created_at, updated_at)
+      VALUES ('legacy-interrupted', ?, 'failed', 60, 'Task interrupted by app restart. Click retry to reprocess.', 0, 2, ?, ?)
+    `).run(`${TMP_DIR}/legacy.wav`, now, now);
+
+    const q = new TaskQueue();
+    q.setDb(db);
+    q.restoreFromDb();
+
+    const row = db.prepare('SELECT status, error FROM task_queue WHERE id = ?').get('legacy-interrupted') as { status: string; error: string };
+    expect(row.status).toBe('interrupted');
+    expect(row.error).toContain('Reprocess the recording from history');
+    expect(q.getAll()).toHaveLength(0);
+    db.close();
   });
 
   it('should not let progress updates revive a cancelled task', () => {

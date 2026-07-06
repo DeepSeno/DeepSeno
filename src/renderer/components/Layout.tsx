@@ -6,6 +6,7 @@ import { useApi } from '../hooks/useApi';
 import type { SyncStatus } from '../hooks/useApi';
 import { useNotifications } from './NotificationCenter';
 import { SITE_BASE_URL } from '../config';
+import { isAlreadyProcessedEnqueue, isFailedEnqueue, isSkippedEnqueue } from '../utils/enqueueResult';
 import Header from './Header';
 import Sidebar from './Sidebar';
 import { ShortcutPanel } from './ShortcutPanel';
@@ -177,6 +178,7 @@ export default function Layout() {
     const files = Array.from(e.dataTransfer.files);
     let enqueued = 0;
     let skipped = 0;
+    let alreadyProcessed = 0;
     let tooLarge = 0;
     for (const file of files) {
       const ext = file.name.split('.').pop()?.toLowerCase() || '';
@@ -191,7 +193,10 @@ export default function Layout() {
         }
         try {
           const result = await api.enqueue(filePath);
-          if (result?.status === 'failed') {
+          if (isAlreadyProcessedEnqueue(result)) {
+            skipped++;
+            alreadyProcessed++;
+          } else if (isFailedEnqueue(result) || isSkippedEnqueue(result)) {
             console.warn('[Layout] Enqueue failed:', result.error);
             skipped++;
           } else {
@@ -207,6 +212,8 @@ export default function Layout() {
     }
     if (enqueued > 0) {
       toast('success', `${enqueued} ${t.rec.files_queued}`, t.rec.drop_title);
+    } else if (alreadyProcessed > 0 && alreadyProcessed === skipped && tooLarge === 0) {
+      toast('info', `${alreadyProcessed} ${(t.rec as any).files_already_processed || t.rec.files_skipped}`);
     } else if (files.length > 0 && tooLarge === 0 && skipped === 0) {
       toast('error', t.rec.drop_formats);
     }

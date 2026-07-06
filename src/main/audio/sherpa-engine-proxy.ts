@@ -145,16 +145,38 @@ export class SherpaEngineProxy {
   async transcribeAudioBatch(
     paths: string[],
     onEach?: () => void,
+    signal?: AbortSignal,
   ): Promise<SherpaTranscribeResult[]> {
+    if (signal?.aborted) throw createCancelledError();
+
     const promises = paths.map((audioPath) =>
       this.callBatch('transcribeAudio', { audioPath }).then((r) => {
+        if (signal?.aborted) throw createCancelledError();
         if (onEach) {
           try { onEach(); } catch { /* ignore callback errors */ }
         }
         return r;
       }),
     );
-    return Promise.all(promises);
+
+    const all = Promise.all(promises);
+    if (!signal) return all;
+
+    return new Promise<SherpaTranscribeResult[]>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => signal.removeEventListener('abort', onAbort);
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn();
+      };
+      const onAbort = () => settle(() => reject(createCancelledError()));
+
+      signal.addEventListener('abort', onAbort, { once: true });
+      all.then((result) => settle(() => resolve(result)))
+        .catch((err) => settle(() => reject(err)));
+    });
   }
 
   /**

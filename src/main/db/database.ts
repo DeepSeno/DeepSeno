@@ -7,10 +7,12 @@ const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS recordings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_path TEXT NOT NULL,
+  source_file_path TEXT,
   file_name TEXT NOT NULL,
   duration_seconds INTEGER,
   recorded_at DATETIME,
   processed_at DATETIME,
+  status_updated_at DATETIME,
   status TEXT DEFAULT 'pending'
 );
 
@@ -99,10 +101,12 @@ CREATE INDEX IF NOT EXISTS idx_channel_messages_session ON channel_messages(sess
 
 export interface RecordingData {
   file_path: string;
+  source_file_path?: string;
   file_name: string;
   duration_seconds?: number;
   recorded_at?: string;
   processed_at?: string;
+  status_updated_at?: string;
   status?: string;
   capture_scene?: string;
   media_type?: string;
@@ -152,10 +156,12 @@ export interface DailySummaryData {
 export interface RecordingRow {
   id: number;
   file_path: string;
+  source_file_path?: string | null;
   file_name: string;
   duration_seconds: number | null;
   recorded_at: string | null;
   processed_at: string | null;
+  status_updated_at: string | null;
   status: string;
   capture_scene: string | null;
   media_type: string;
@@ -846,6 +852,14 @@ export class VoiceBrainDB {
 
     // Migration: add capture_scene column for system audio recording scenes
     this.safeAddColumn("ALTER TABLE recordings ADD COLUMN capture_scene TEXT DEFAULT 'dictation'");
+    this.safeAddColumn("ALTER TABLE recordings ADD COLUMN source_file_path TEXT");
+    this.safeAddColumn("ALTER TABLE recordings ADD COLUMN status_updated_at TEXT");
+    this.db.prepare(`
+      UPDATE recordings
+      SET status_updated_at = COALESCE(processed_at, recorded_at, datetime('now'))
+      WHERE status_updated_at IS NULL
+    `).run();
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_recordings_status_updated_at ON recordings(status_updated_at DESC)');
 
     // Migration: add source column to segments for dual-stream recording
     this.safeAddColumn("ALTER TABLE segments ADD COLUMN source TEXT DEFAULT 'mic'");
@@ -1303,6 +1317,8 @@ export class VoiceBrainDB {
       CREATE INDEX IF NOT EXISTS idx_text_notes_channel_id ON text_notes(channel_id);
       CREATE INDEX IF NOT EXISTS idx_text_notes_created_at ON text_notes(created_at);
       CREATE INDEX IF NOT EXISTS idx_task_queue_status ON task_queue(status);
+      CREATE INDEX IF NOT EXISTS idx_recordings_source_file_path ON recordings(source_file_path);
+      CREATE INDEX IF NOT EXISTS idx_recordings_file_name_media_type ON recordings(file_name, media_type);
       CREATE INDEX IF NOT EXISTS idx_memory_documents_date ON memory_documents(date);
       CREATE INDEX IF NOT EXISTS idx_speaker_match_suggestions_status ON speaker_match_suggestions(status);
       CREATE INDEX IF NOT EXISTS idx_person_match_suggestions_status ON person_match_suggestions(status);
@@ -1385,16 +1401,19 @@ export class VoiceBrainDB {
   // ─── Recordings ──────────────────────────────────────────────
 
   insertRecording(data: RecordingData): number {
+    const statusUpdatedAt = data.status_updated_at ?? new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO recordings (file_path, file_name, duration_seconds, recorded_at, processed_at, status, capture_scene, media_type, page_count, word_count)
-      VALUES (@file_path, @file_name, @duration_seconds, @recorded_at, @processed_at, @status, @capture_scene, @media_type, @page_count, @word_count)
+      INSERT INTO recordings (file_path, source_file_path, file_name, duration_seconds, recorded_at, processed_at, status_updated_at, status, capture_scene, media_type, page_count, word_count)
+      VALUES (@file_path, @source_file_path, @file_name, @duration_seconds, @recorded_at, @processed_at, @status_updated_at, @status, @capture_scene, @media_type, @page_count, @word_count)
     `);
     const result = stmt.run({
       file_path: data.file_path,
+      source_file_path: data.source_file_path ?? null,
       file_name: data.file_name,
       duration_seconds: data.duration_seconds ?? null,
       recorded_at: data.recorded_at ?? null,
       processed_at: data.processed_at ?? null,
+      status_updated_at: statusUpdatedAt,
       status: data.status ?? 'pending',
       capture_scene: data.capture_scene ?? 'dictation',
       media_type: data.media_type ?? 'audio',
@@ -1407,13 +1426,19 @@ export class VoiceBrainDB {
   updateRecording(id: number, data: Partial<Pick<RecordingData, 'status' | 'processed_at' | 'duration_seconds' | 'media_type' | 'page_count' | 'word_count' | 'capture_scene'>>): void {
     const fields: string[] = [];
     const values: any[] = [];
+    let statusChanged = false;
     for (const [key, val] of Object.entries(data)) {
       if (val !== undefined) {
         fields.push(`${key} = ?`);
         values.push(val);
+        if (key === 'status') statusChanged = true;
       }
     }
     if (fields.length === 0) return;
+    if (statusChanged) {
+      fields.push('status_updated_at = ?');
+      values.push(new Date().toISOString());
+    }
     values.push(id);
     this.db.prepare(`UPDATE recordings SET ${fields.join(', ')} WHERE id = ?`).run(...values);
   }
@@ -1423,7 +1448,20 @@ export class VoiceBrainDB {
   }
 
   getRecordingByPath(filePath: string): RecordingRow | undefined {
-    return this.db.prepare('SELECT * FROM recordings WHERE file_path = ?').get(filePath) as RecordingRow | undefined;
+    return this.db.prepare('SELECT * FROM recordings WHERE file_path = ? OR source_file_path = ? ORDER BY id DESC LIMIT 1').get(filePath, filePath) as RecordingRow | undefined;
+  }
+
+  getRecordingBySourcePath(filePath: string): RecordingRow | undefined {
+    return this.db.prepare('SELECT * FROM recordings WHERE source_file_path = ? ORDER BY id DESC LIMIT 1').get(filePath) as RecordingRow | undefined;
+  }
+
+  getRecordingByFileNameAndType(fileName: string, mediaType: string): RecordingRow | undefined {
+    return this.db.prepare(`
+      SELECT * FROM recordings
+      WHERE file_name = ? AND media_type = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(fileName, mediaType) as RecordingRow | undefined;
   }
 
   getRecordingsByStatus(status: string): RecordingRow[] {
@@ -1452,7 +1490,7 @@ export class VoiceBrainDB {
         ORDER BY start_time ASC, id ASC
         LIMIT 1
       )
-      ORDER BY r.id DESC
+      ORDER BY COALESCE(r.status_updated_at, r.processed_at, r.recorded_at) DESC, r.id DESC
     `).all() as RecordingWithStats[];
   }
 
@@ -1486,6 +1524,12 @@ export class VoiceBrainDB {
   updateRecordingFilePath(id: number, filePath: string): void {
     this.db
       .prepare('UPDATE recordings SET file_path = ? WHERE id = ?')
+      .run(filePath, id);
+  }
+
+  updateRecordingSourceFilePath(id: number, filePath: string): void {
+    this.db
+      .prepare('UPDATE recordings SET source_file_path = ? WHERE id = ?')
       .run(filePath, id);
   }
 
@@ -1723,14 +1767,15 @@ export class VoiceBrainDB {
   }
 
   updateRecordingStatus(id: number, status: string): void {
+    const now = new Date().toISOString();
     if (status === 'completed') {
       this.db
-        .prepare('UPDATE recordings SET status = ?, processed_at = ? WHERE id = ?')
-        .run(status, new Date().toISOString(), id);
+        .prepare('UPDATE recordings SET status = ?, processed_at = ?, status_updated_at = ? WHERE id = ?')
+        .run(status, now, now, id);
     } else {
       this.db
-        .prepare('UPDATE recordings SET status = ? WHERE id = ?')
-        .run(status, id);
+        .prepare('UPDATE recordings SET status = ?, status_updated_at = ? WHERE id = ?')
+        .run(status, now, id);
     }
   }
 
@@ -1746,13 +1791,32 @@ export class VoiceBrainDB {
 
   /** Reset any recordings stuck in active statuses (e.g. after a crash). Returns count. */
   recoverStuckRecordings(): number {
-    const result = this.db
-      .prepare("UPDATE recordings SET status = 'failed' WHERE status IN ('processing', 'pending', 'recording', 'post_processing')")
-      .run();
-    if (result.changes > 0) {
-      console.log(`[DB] Recovered ${result.changes} stuck recording(s) from active statuses → 'failed'`);
+    const now = new Date().toISOString();
+    const activeResult = this.db
+      .prepare("UPDATE recordings SET status = 'interrupted', status_updated_at = ? WHERE status IN ('processing', 'pending', 'recording', 'post_processing')")
+      .run(now);
+    const failedInterruptedResult = this.db.prepare(`
+      UPDATE recordings
+      SET status = 'interrupted', status_updated_at = ?
+      WHERE status = 'failed'
+        AND NOT EXISTS (
+          SELECT 1 FROM segments s WHERE s.recording_id = recordings.id
+        )
+        AND EXISTS (
+          SELECT 1 FROM task_queue tq
+          WHERE tq.status = 'interrupted'
+            AND (
+              tq.recording_id = recordings.id
+              OR tq.file_path = recordings.file_path
+              OR (recordings.source_file_path IS NOT NULL AND tq.file_path = recordings.source_file_path)
+            )
+        )
+    `).run(now);
+    const changes = Number(activeResult.changes) + Number(failedInterruptedResult.changes);
+    if (changes > 0) {
+      console.log(`[DB] Recovered ${changes} stuck recording(s) → 'interrupted'`);
     }
-    return Number(result.changes);
+    return changes;
   }
 
   /**
@@ -2065,12 +2129,15 @@ export class VoiceBrainDB {
 
   deleteRecording(id: number): void {
     const tx = transaction(this.db, () => {
-      const rec = this.db.prepare('SELECT file_path FROM recordings WHERE id = ?')
-        .get(id) as { file_path?: string } | undefined;
+      const rec = this.db.prepare('SELECT file_path, source_file_path FROM recordings WHERE id = ?')
+        .get(id) as { file_path?: string; source_file_path?: string | null } | undefined;
 
       // Delete recording-scoped queue/projection data first. Some tables were
       // created before ON DELETE CASCADE was consistently used, so be explicit.
-      try { this.db.prepare('DELETE FROM task_queue WHERE recording_id = ? OR file_path = ?').run(id, rec?.file_path ?? ''); } catch { /* table may not exist */ }
+      try {
+        this.db.prepare('DELETE FROM task_queue WHERE recording_id = ? OR file_path = ? OR file_path = ?')
+          .run(id, rec?.file_path ?? '', rec?.source_file_path ?? '');
+      } catch { /* table may not exist */ }
       try { this.db.prepare('DELETE FROM compilation_queue WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
       try { this.db.prepare('DELETE FROM meeting_notes WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }
       try { this.db.prepare('DELETE FROM speaker_match_suggestions WHERE recording_id = ?').run(id); } catch { /* table may not exist */ }

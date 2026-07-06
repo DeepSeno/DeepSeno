@@ -9,7 +9,7 @@ interface GeneralSectionProps {
   onDirChange: (field: 'watchDir' | 'outputDir') => void;
   onLangChange: (lang: 'en' | 'zh') => void;
   currentLang: 'en' | 'zh';
-  onOpenExternal: (path: string) => void;
+  onOpenDirectory: (path: string) => void;
 }
 
 export default function GeneralSection({
@@ -19,7 +19,7 @@ export default function GeneralSection({
   onDirChange,
   onLangChange,
   currentLang,
-  onOpenExternal,
+  onOpenDirectory,
 }: GeneralSectionProps) {
   return (
     <div>
@@ -63,14 +63,14 @@ export default function GeneralSection({
               {settings.watchDir || s.not_set}
             </div>
             <div className="kz-text-mute" style={{ fontSize: 11.5, marginTop: 2 }}>
-              {s.watch_dir_hint || 'Audio files placed here will be automatically processed'}
+              {s.watch_dir_hint || 'Supported files placed here will be automatically processed'}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
             <button onClick={() => onDirChange('watchDir')} className="kz-btn kz-btn--sm">{s.change}</button>
             {settings.watchDir && (
               <button
-                onClick={() => onOpenExternal(settings.watchDir)}
+                onClick={() => onOpenDirectory(settings.watchDir)}
                 className="kz-btn kz-btn--sm kz-btn--ghost"
                 title={s.open_folder}
               >
@@ -108,7 +108,7 @@ export default function GeneralSection({
             <button onClick={() => onDirChange('outputDir')} className="kz-btn kz-btn--sm">{s.change}</button>
             {settings.outputDir && (
               <button
-                onClick={() => onOpenExternal(settings.outputDir)}
+                onClick={() => onOpenDirectory(settings.outputDir)}
                 className="kz-btn kz-btn--sm kz-btn--ghost"
                 title={s.open_folder}
               >

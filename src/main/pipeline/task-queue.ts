@@ -26,6 +26,8 @@ export interface QueueTask {
   error?: string;
   notes?: string; // Human-readable status detail (e.g. optimization failure reason)
   mediaType?: string; // 'audio' | 'video' | 'pdf' | 'docx' | 'text'
+  /** Internal nested pipeline task that should append to existing recording data. */
+  appendToRecording?: boolean;
   retryCount: number;
   maxRetries: number;
   createdAt: Date;
@@ -64,6 +66,11 @@ function isTerminalStatus(status: QueueTask['status']): boolean {
 function isCancellationError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return err.name === 'TaskCancelledError' || /cancelled by user|canceled by user/i.test(err.message);
+}
+
+function isInterruptionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.name === 'TaskInterruptedError' || /interrupted by app/i.test(err.message);
 }
 
 // Maximum time (ms) a single task is allowed to run before being force-failed.
@@ -112,12 +119,16 @@ export class TaskQueue extends EventEmitter {
     this.processNext();
   }
 
+  private findActiveTask(filePath: string, recordingId?: number): QueueTask | undefined {
+    return this.queue.find((t) => {
+      if (isTerminalStatus(t.status)) return false;
+      if (recordingId != null && t.recordingId === recordingId) return true;
+      return t.filePath === filePath;
+    });
+  }
+
   add(filePath: string): QueueTask {
-    const existing = this.queue.find(
-      (t) =>
-        t.filePath === filePath &&
-        !isTerminalStatus(t.status),
-    );
+    const existing = this.findActiveTask(filePath);
     if (existing) return existing;
 
     const task: QueueTask = {
@@ -139,6 +150,9 @@ export class TaskQueue extends EventEmitter {
 
   /** Add a reprocess task that reuses an existing recording ID. */
   addReprocess(filePath: string, recordingId: number): QueueTask {
+    const existing = this.findActiveTask(filePath, recordingId);
+    if (existing) return existing;
+
     const task: QueueTask = {
       id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       filePath,
@@ -164,12 +178,14 @@ export class TaskQueue extends EventEmitter {
 
     // Cancel currently processing task
     if (this.currentTaskId === taskId && this.abortController) {
-      this.abortController.abort();
+      const controller = this.abortController;
+      controller.abort('cancelled');
       task.status = 'cancelled';
       task.error = 'Cancelled by user';
       task.notes = 'Cancelled by user';
       this.persistTaskNow(task);
       this.emit('task:cancelled', task);
+      this.releaseCurrentTaskSlot(task.id, controller);
       return true;
     }
 
@@ -222,12 +238,13 @@ export class TaskQueue extends EventEmitter {
 
     this.processing = true;
     this.currentTaskId = task.id;
-    this.abortController = new AbortController();
+    const controller = new AbortController();
+    this.abortController = controller;
     let timeout: ReturnType<typeof setTimeout> | null = null;
 
     try {
       // Race the task against a timeout to prevent indefinite hangs
-      const taskPromise = this.processFunc(task, this.abortController.signal);
+      const taskPromise = this.processFunc(task, controller.signal);
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new Error(
           `Task timed out after ${TASK_TIMEOUT_MS / 60000} minutes. ` +
@@ -253,7 +270,14 @@ export class TaskQueue extends EventEmitter {
         this.emit('task:completed', task);
       }
     } catch (err: any) {
-      if (isCancellationError(err)) {
+      if (isInterruptionError(err)) {
+        if (!isTerminalStatus(task.status)) {
+          task.status = 'interrupted';
+          task.error = 'Interrupted by app shutdown';
+          task.notes = 'Interrupted by app shutdown';
+          this.persistTaskNow(task);
+        }
+      } else if (isCancellationError(err)) {
         if (!isTerminalStatus(task.status)) {
           task.status = 'cancelled';
           task.error = 'Cancelled by user';
@@ -293,11 +317,21 @@ export class TaskQueue extends EventEmitter {
       }
     } finally {
       if (timeout) clearTimeout(timeout);
-      this.processing = false;
-      this.currentTaskId = null;
-      this.abortController = null;
-      this.processNext();
+      if (this.currentTaskId === task.id && this.abortController === controller) {
+        this.processing = false;
+        this.currentTaskId = null;
+        this.abortController = null;
+        this.processNext();
+      }
     }
+  }
+
+  private releaseCurrentTaskSlot(taskId: string, controller: AbortController): void {
+    if (this.currentTaskId !== taskId || this.abortController !== controller) return;
+    this.processing = false;
+    this.currentTaskId = null;
+    this.abortController = null;
+    this.processNext();
   }
 
   /** Force-reset stuck queue state (e.g. after a crash recovery). */
@@ -344,6 +378,10 @@ export class TaskQueue extends EventEmitter {
 
   getById(taskId: string): QueueTask | undefined {
     return this.queue.find((t) => t.id === taskId);
+  }
+
+  getActiveByRecordingOrPath(filePath: string, recordingId?: number): QueueTask | undefined {
+    return this.findActiveTask(filePath, recordingId);
   }
 
   getAll(): QueueTask[] {
@@ -491,19 +529,30 @@ export class TaskQueue extends EventEmitter {
 
   /** Restore tasks from the database after app restart. Call after setDb(). */
   restoreFromDb(): void {
-    // Mark ALL non-terminal tasks as failed immediately on restore.
-    // This prevents crash loops: if a task caused the app to crash,
-    // it won't be re-processed on next startup. Users can manually
-    // retry individual tasks from the UI.
+    // Mark ALL non-terminal tasks as interrupted immediately on restore.
+    // This prevents crash loops and avoids implicit re-processing on startup.
+    // Users can manually reprocess the recording from history.
     if (this.db) {
       try {
         const result = this.db.prepare(`
           UPDATE task_queue
-          SET status = 'failed', error = 'Task interrupted by app restart. Click retry to reprocess.', updated_at = ?
-          WHERE status NOT IN ('completed', 'failed', 'cancelled')
+          SET status = 'interrupted', error = 'Task interrupted by app restart. Reprocess the recording from history.', updated_at = ?
+          WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
         `).run(new Date().toISOString());
         if (result.changes > 0) {
-          console.log(`[TaskQueue] Marked ${result.changes} interrupted task(s) as failed`);
+          console.log(`[TaskQueue] Marked ${result.changes} task(s) as interrupted`);
+        }
+        const legacyResult = this.db.prepare(`
+          UPDATE task_queue
+          SET status = 'interrupted',
+              error = 'Task interrupted by app restart. Reprocess the recording from history.',
+              notes = COALESCE(notes, 'Task interrupted by app restart. Reprocess the recording from history.'),
+              updated_at = ?
+          WHERE status = 'failed'
+            AND error LIKE 'Task interrupted by app restart%'
+        `).run(new Date().toISOString());
+        if (legacyResult.changes > 0) {
+          console.log(`[TaskQueue] Relabeled ${legacyResult.changes} legacy restart-interrupted task(s)`);
         }
       } catch (err: any) {
         console.error('[TaskQueue] Failed to mark interrupted tasks:', err.message);
@@ -529,7 +578,6 @@ export class TaskQueue extends EventEmitter {
 
   /** Mark all currently active (non-terminal) tasks as interrupted in the DB. Call on app exit. */
   markActiveAsInterrupted(): void {
-    if (!this.db) return;
     // First flush any pending writes
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
@@ -537,12 +585,23 @@ export class TaskQueue extends EventEmitter {
     }
     this.flushDirty();
 
+    const message = 'Task interrupted by app shutdown. Reprocess the recording from history.';
+    for (const task of this.queue) {
+      if (isTerminalStatus(task.status)) continue;
+      task.status = 'interrupted';
+      task.error = message;
+      task.notes = message;
+      task.progress = Math.max(0, task.progress);
+      this.persistTaskNow(task);
+    }
+
+    if (!this.db) return;
     try {
       this.db.prepare(`
         UPDATE task_queue
-        SET status = 'interrupted', updated_at = ?
+        SET status = 'interrupted', error = COALESCE(error, ?), notes = COALESCE(notes, ?), updated_at = ?
         WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
-      `).run(new Date().toISOString());
+      `).run(message, message, new Date().toISOString());
       console.log('[TaskQueue] Marked active tasks as interrupted');
     } catch (err: any) {
       console.error('[TaskQueue] Failed to mark tasks as interrupted:', err.message);
@@ -556,7 +615,7 @@ export class TaskQueue extends EventEmitter {
       this.persistTimer = null;
     }
     if (this.abortController) {
-      try { this.abortController.abort(); } catch { /* already aborted */ }
+      try { this.abortController.abort('interrupted'); } catch { /* already aborted */ }
       this.abortController = null;
     }
     this.flushDirty();

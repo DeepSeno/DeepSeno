@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { execFile, execFileSync } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
-import { VoiceBrainDB } from '../db/database';
+import { VoiceBrainDB, type RecordingRow } from '../db/database';
 import { AudioPreprocessor } from '../audio/preprocessor';
 import { Transcriber } from '../audio/transcriber';
 import { Diarizer } from '../audio/diarizer';
@@ -48,6 +48,14 @@ class TaskCancelledError extends Error {
 
 function isTaskCancelledError(err: unknown): boolean {
   return err instanceof Error && err.name === 'TaskCancelledError';
+}
+
+function getAbortStatus(signal?: AbortSignal): 'cancelled' | 'interrupted' {
+  return signal?.reason === 'interrupted' ? 'interrupted' : 'cancelled';
+}
+
+function getFailureStatus(err: unknown, signal?: AbortSignal): 'cancelled' | 'interrupted' | 'failed' {
+  return isTaskCancelledError(err) ? getAbortStatus(signal) : 'failed';
 }
 
 /**
@@ -193,7 +201,7 @@ export class Processor {
   private throwIfCancelled(signal?: AbortSignal, recordingId?: number): void {
     if (!signal?.aborted) return;
     if (recordingId) {
-      try { this.db.updateRecordingStatus(recordingId, 'cancelled'); } catch { /* best-effort */ }
+      try { this.db.updateRecordingStatus(recordingId, getAbortStatus(signal)); } catch { /* best-effort */ }
     }
     throw new TaskCancelledError();
   }
@@ -284,21 +292,62 @@ export class Processor {
     }
   }
 
-  /** Add a file to the processing queue. If a recording already exists in DB, reprocess it instead of creating a duplicate. */
-  enqueue(filePath: string): QueueTask {
-    this.validateFileSize(filePath);
-    const existing = this.db.getRecordingByPath(filePath);
-    if (existing) {
-      // Recording already in DB — reprocess instead of creating a duplicate
-      return this.enqueueReprocess(filePath, existing.id);
+  private findExistingRecordingForInput(filePath: string, mediaType?: string | null): RecordingRow | undefined {
+    const byPath = this.db.getRecordingByPath(filePath);
+    if (byPath) return byPath;
+
+    const type = mediaType || detectMediaType(filePath);
+    if (type === 'video' || type === 'image') {
+      const byName = this.db.getRecordingByFileNameAndType?.(path.basename(filePath), type);
+      if (byName && !byName.source_file_path && byName.status !== 'completed') return byName;
     }
-    return this.taskQueue.add(filePath);
+
+    return undefined;
   }
 
-  /** Reprocess an existing recording: clear old data, reuse recording ID. */
-  enqueueReprocess(filePath: string, recordingId: number): QueueTask {
-    this.validateFileSize(filePath);
-    // Clean vector store entries for old segments before clearing DB data
+  private makeAlreadyProcessedTask(filePath: string, recording: RecordingRow): QueueTask {
+    return {
+      id: `recording_${recording.id}_already_processed`,
+      filePath,
+      recordingId: recording.id,
+      mediaType: detectMediaType(filePath) || recording.media_type || 'audio',
+      status: 'failed',
+      progress: 100,
+      error: 'Recording already processed',
+      notes: 'Recording already processed',
+      retryCount: 0,
+      maxRetries: 0,
+      createdAt: new Date(),
+    };
+  }
+
+  private rememberSourceFilePath(recordingId: number, filePath: string): void {
+    try {
+      this.db.updateRecordingSourceFilePath(recordingId, filePath);
+    } catch (err: any) {
+      console.warn(`[Processor] Failed to update source_file_path for recording ${recordingId}: ${err?.message || err}`);
+    }
+  }
+
+  private createPendingRecordingForInput(filePath: string, mediaType: string): number {
+    let recordedAt: string | undefined;
+    try {
+      recordedAt = fs.statSync(filePath).mtime.toISOString();
+    } catch {
+      // File access has already been validated; timestamp is only metadata.
+    }
+
+    return this.db.insertRecording({
+      file_path: filePath,
+      source_file_path: filePath,
+      file_name: path.basename(filePath),
+      media_type: mediaType,
+      recorded_at: recordedAt,
+      status: 'pending',
+    });
+  }
+
+  private clearRecordingForReprocess(recordingId: number): void {
     if (this.queryEngine) {
       const oldSegIds = this.db.getSegmentIdsByRecording(recordingId);
       if (oldSegIds.length > 0) {
@@ -306,6 +355,37 @@ export class Processor {
       }
     }
     this.db.clearRecordingData(recordingId);
+  }
+
+  /** Add a file to the processing queue. If a recording already exists in DB, reprocess it instead of creating a duplicate. */
+  enqueue(filePath: string): QueueTask {
+    this.validateFileSize(filePath);
+    const mediaType = detectMediaType(filePath) || 'audio';
+    const existing = this.findExistingRecordingForInput(filePath, mediaType);
+    if (existing) {
+      const active = this.taskQueue.getActiveByRecordingOrPath(filePath, existing.id);
+      if (active) return active;
+      if (existing.status === 'completed') {
+        return this.makeAlreadyProcessedTask(filePath, existing);
+      }
+      // Recording already in DB — reuse it instead of creating a duplicate.
+      return this.enqueueReprocess(filePath, existing.id);
+    }
+
+    const active = this.taskQueue.getActiveByRecordingOrPath(filePath);
+    if (active) return active;
+
+    const recordingId = this.createPendingRecordingForInput(filePath, mediaType);
+    return this.taskQueue.addReprocess(filePath, recordingId);
+  }
+
+  /** Reprocess an existing recording: reuse recording ID and clear old data when processing starts. */
+  enqueueReprocess(filePath: string, recordingId: number): QueueTask {
+    this.validateFileSize(filePath);
+    const active = this.taskQueue.getActiveByRecordingOrPath(filePath, recordingId);
+    if (active) return active;
+
+    this.rememberSourceFilePath(recordingId, filePath);
     this.db.updateRecordingStatus(recordingId, 'pending');
     return this.taskQueue.addReprocess(filePath, recordingId);
   }
@@ -442,14 +522,18 @@ export class Processor {
     // 1. Insert recording into database (or reuse existing for reprocess)
     let recordingId: number;
     if (task.recordingId) {
-      // Reprocessing: reuse existing recording ID (data already cleared by enqueueReprocess)
       recordingId = task.recordingId;
+      if (!task.appendToRecording) {
+        this.clearRecordingForReprocess(recordingId);
+        this.rememberSourceFilePath(recordingId, filePath);
+      }
     } else {
       // Guard: check DB for existing recording to prevent duplicates
-      const existingRec = this.db.getRecordingByPath(filePath);
+      const existingRec = this.findExistingRecordingForInput(filePath, 'audio');
       if (existingRec) {
         recordingId = existingRec.id;
-        this.db.clearRecordingData(recordingId);
+        this.clearRecordingForReprocess(recordingId);
+        this.rememberSourceFilePath(recordingId, filePath);
         console.log(`[Processor] Reusing existing recording #${recordingId} for ${fileName}`);
       } else {
         // Try to extract recorded_at from filename (e.g. R20260218-083551.WAV)
@@ -468,6 +552,7 @@ export class Processor {
         }
         recordingId = this.db.insertRecording({
           file_path: filePath,
+          source_file_path: filePath,
           file_name: fileName,
           recorded_at: recordedAt,
         });
@@ -612,7 +697,7 @@ export class Processor {
         });
         let transcriptResults: any[];
         try {
-          transcriptResults = await engine.transcribeAudioBatch(segmentFiles, () => asrReporter.advance());
+          transcriptResults = await engine.transcribeAudioBatch(segmentFiles, () => asrReporter.advance(), signal);
           this.throwIfCancelled(signal, recordingId);
         } catch (err: any) {
           if (isTaskCancelledError(err)) throw err;
@@ -1269,7 +1354,7 @@ export class Processor {
         }
       })();
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
+      this.db.updateRecordingStatus(recordingId, getFailureStatus(err, signal));
       throw err;
     }
   }
@@ -1301,17 +1386,20 @@ export class Processor {
     let recordingId: number;
     if (task.recordingId) {
       recordingId = task.recordingId;
-      this.db.clearRecordingData(recordingId);
+      this.clearRecordingForReprocess(recordingId);
+      this.rememberSourceFilePath(recordingId, filePath);
       console.log(`[Processor] Reusing existing recording #${recordingId} for ${fileName}`);
     } else {
-      const existingRec = this.db.getRecordingByPath(filePath);
+      const existingRec = this.findExistingRecordingForInput(filePath, mediaType);
       if (existingRec) {
         recordingId = existingRec.id;
-        this.db.clearRecordingData(recordingId);
+        this.clearRecordingForReprocess(recordingId);
+        this.rememberSourceFilePath(recordingId, filePath);
         console.log(`[Processor] Reusing existing recording #${recordingId} for ${fileName}`);
       } else {
         recordingId = this.db.insertRecording({
           file_path: filePath,
+          source_file_path: filePath,
           file_name: fileName,
           media_type: mediaType,
         });
@@ -1459,7 +1547,7 @@ export class Processor {
       this.runPostCompletionEnrichment(recordingId, segmentIds, 'Document');
       console.log(`[Processor] Document pipeline completed for: ${fileName}`);
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
+      this.db.updateRecordingStatus(recordingId, getFailureStatus(err, signal));
       throw err;
     }
   }
@@ -1536,12 +1624,14 @@ export class Processor {
       let recordedAt: string | undefined;
       if (task.recordingId) {
         recordingId = task.recordingId;
-        this.db.clearRecordingData(recordingId);
+        this.clearRecordingForReprocess(recordingId);
+        this.rememberSourceFilePath(recordingId, originalPath);
       } else {
-        const existingRec = this.db.getRecordingByPath(originalPath);
+        const existingRec = this.findExistingRecordingForInput(originalPath, 'video');
         if (existingRec) {
           recordingId = existingRec.id;
-          this.db.clearRecordingData(recordingId);
+          this.clearRecordingForReprocess(recordingId);
+          this.rememberSourceFilePath(recordingId, originalPath);
         } else {
           try {
             const stat = fs.statSync(originalPath);
@@ -1549,6 +1639,7 @@ export class Processor {
           } catch { /* ignore */ }
           recordingId = this.db.insertRecording({
             file_path: webVideoPath,
+            source_file_path: originalPath,
             file_name: fileName,
             media_type: 'video',
             recorded_at: recordedAt,
@@ -1558,6 +1649,7 @@ export class Processor {
       task.recordingId = recordingId;
       // Update file_path to transcoded version for playback
       this.db.updateRecordingFilePath(recordingId, webVideoPath);
+      this.rememberSourceFilePath(recordingId, originalPath);
       this.db.updateRecordingStatus(recordingId, 'processing');
       this.throwIfCancelled(signal, recordingId);
 
@@ -1666,6 +1758,7 @@ export class Processor {
         filePath: audioPath,
         mediaType: 'audio',
         recordingId,
+        appendToRecording: true,
       }, signal);
       this.throwIfCancelled(signal, recordingId);
       task.recordingId = recordingId;
@@ -1693,9 +1786,10 @@ export class Processor {
       task.filePath = originalPath;
       if (recordingId) task.recordingId = recordingId;
       if (isTaskCancelledError(err)) {
-        console.log(`[Processor] Video pipeline cancelled for ${fileName}`);
+        const status = getAbortStatus(signal);
+        console.log(`[Processor] Video pipeline ${status} for ${fileName}`);
         if (recordingId) {
-          try { this.db.updateRecordingStatus(recordingId, 'cancelled'); } catch { /* ignore */ }
+          try { this.db.updateRecordingStatus(recordingId, status); } catch { /* ignore */ }
         }
         throw err;
       }
@@ -1840,17 +1934,20 @@ export class Processor {
     let recordingId: number;
     if (task.recordingId) {
       recordingId = task.recordingId;
-      this.db.clearRecordingData(recordingId);
+      this.clearRecordingForReprocess(recordingId);
+      this.rememberSourceFilePath(recordingId, originalPath);
       console.log(`[Processor] Reusing existing recording #${recordingId} for ${fileName}`);
     } else {
-      const existingRec = this.db.getRecordingByPath(originalPath);
+      const existingRec = this.findExistingRecordingForInput(originalPath, 'image');
       if (existingRec) {
         recordingId = existingRec.id;
-        this.db.clearRecordingData(recordingId);
+        this.clearRecordingForReprocess(recordingId);
+        this.rememberSourceFilePath(recordingId, originalPath);
         console.log(`[Processor] Reusing existing recording #${recordingId} for ${fileName}`);
       } else {
         recordingId = this.db.insertRecording({
           file_path: originalPath,
+          source_file_path: originalPath,
           file_name: fileName,
           media_type: 'image',
         });
@@ -1874,6 +1971,7 @@ export class Processor {
 
       // Update file_path to output location (original temp file may be cleaned up)
       this.db.updateRecordingFilePath(recordingId, destPath);
+      this.rememberSourceFilePath(recordingId, originalPath);
 
       // 3. Read image, resize if needed, and encode to base64
       this.taskQueue.updateTask(task.id, { status: 'transcribing', progress: 20, notes: 'Analyzing image with AI...' });
@@ -2019,7 +2117,7 @@ export class Processor {
       this.runPostCompletionEnrichment(recordingId, segmentIds, 'Image');
       console.log(`[Processor] Image pipeline completed for: ${fileName}`);
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
+      this.db.updateRecordingStatus(recordingId, getFailureStatus(err, signal));
       throw err;
     }
   }
@@ -2053,17 +2151,20 @@ export class Processor {
     let recordingId: number;
     if (task.recordingId) {
       recordingId = task.recordingId;
-      this.db.clearRecordingData(recordingId);
+      this.clearRecordingForReprocess(recordingId);
+      this.rememberSourceFilePath(recordingId, dirPath);
       console.log(`[Processor] Reusing existing recording #${recordingId} for ${groupName}`);
     } else {
-      const existingRec = this.db.getRecordingByPath(dirPath);
+      const existingRec = this.findExistingRecordingForInput(dirPath, 'image');
       if (existingRec) {
         recordingId = existingRec.id;
-        this.db.clearRecordingData(recordingId);
+        this.clearRecordingForReprocess(recordingId);
+        this.rememberSourceFilePath(recordingId, dirPath);
         console.log(`[Processor] Reusing existing recording #${recordingId} for ${groupName}`);
       } else {
         recordingId = this.db.insertRecording({
           file_path: dirPath,
+          source_file_path: dirPath,
           file_name: groupName,
           media_type: 'image',
         });
@@ -2268,7 +2369,7 @@ export class Processor {
       this.runPostCompletionEnrichment(recordingId, allSegmentIds, 'Image group');
       console.log(`[Processor] Image group pipeline completed for: ${groupName} (${totalImages} images)`);
     } catch (err) {
-      this.db.updateRecordingStatus(recordingId, isTaskCancelledError(err) ? 'cancelled' : 'failed');
+      this.db.updateRecordingStatus(recordingId, getFailureStatus(err, signal));
       throw err;
     }
   }

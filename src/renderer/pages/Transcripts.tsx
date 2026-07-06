@@ -14,6 +14,7 @@ import LoadingSkeleton from './transcripts/LoadingSkeleton';
 import SummaryQAPanel from './transcripts/SummaryQAPanel';
 import type { Conversation, Message, ExtractedItem, SearchResult, LiveSegment } from './transcripts/types';
 import { classifyContent } from './transcripts/types';
+import { getLibraryListDateMeta } from './transcripts/listDate';
 import { deriveRecordingTitle } from '../utils/recordingTitle';
 
 const LEFT_PANEL_STORAGE_KEY = 'deepseno-transcripts-left-panel-width';
@@ -81,6 +82,7 @@ export default function Transcripts() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const activeMediaRef = useRef<HTMLMediaElement | null>(null);
   const progressRef = useRef<HTMLDivElement>(null);
+  const mediaLoadSeqRef = useRef(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -191,6 +193,23 @@ export default function Transcripts() {
 
   useEffect(() => { liveRecordingIdRef.current = liveRecordingId; }, [liveRecordingId]);
 
+  const resolveVideoMediaUrl = useCallback(async (recordingId: number): Promise<string> => {
+    try {
+      let status = await api.lanServerGetStatus();
+      if (!status.running) {
+        const started = await api.lanServerStart();
+        if (started.success) status = { ...status, ...started, running: true };
+      }
+      if (status.running && status.port && status.token) {
+        const token = encodeURIComponent(status.token);
+        return `http://127.0.0.1:${status.port}/api/recordings/${recordingId}/media?token=${token}`;
+      }
+    } catch (err) {
+      console.warn('[Transcripts] LAN video media URL fallback:', err);
+    }
+    return `media://audio/${recordingId}`;
+  }, [api]);
+
   const handleLeftDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     leftDragging.current = true;
@@ -226,6 +245,7 @@ export default function Transcripts() {
   }, [getMaxRightPanelWidth, rightPanelWidth]);
 
   const loadRecordingData = useCallback(async (recordingId: number, durationSec?: number, recordedAt?: string | null, mediaType?: string) => {
+    const loadSeq = ++mediaLoadSeqRef.current;
     const isDoc = ['pdf', 'docx', 'text', 'image'].includes(mediaType || '');
     try {
       const segments = await api.getSegmentsByRecording(recordingId);
@@ -266,13 +286,24 @@ export default function Transcripts() {
           activeMediaRef.current = vid;
           if (audio) { audio.pause(); audio.src = ''; }
           setIsPlaying(false); setCurrentTime(0); setDuration(durationSec && durationSec > 0 ? durationSec : 0); setAudioLoaded(false); setAudioError(false);
-          vid.src = `media://audio/${recordingId}`;
+          const src = await resolveVideoMediaUrl(recordingId);
+          if (loadSeq !== mediaLoadSeqRef.current || activeMediaRef.current !== vid) return;
+          vid.src = src;
           vid.load();
         } else {
           // Video ref not yet mounted — retry after next render
           setTimeout(() => {
             const v = videoRef.current;
-            if (v) { activeMediaRef.current = v; if (audio) { audio.pause(); audio.src = ''; } v.src = `media://audio/${recordingId}`; v.load(); setDuration(durationSec && durationSec > 0 ? durationSec : 0); }
+            if (v) {
+              activeMediaRef.current = v;
+              if (audio) { audio.pause(); audio.src = ''; }
+              void resolveVideoMediaUrl(recordingId).then((src) => {
+                if (loadSeq !== mediaLoadSeqRef.current || activeMediaRef.current !== v) return;
+                v.src = src;
+                v.load();
+                setDuration(durationSec && durationSec > 0 ? durationSec : 0);
+              });
+            }
           }, 100);
         }
       } else if (audio && !isDoc) {
@@ -290,26 +321,21 @@ export default function Transcripts() {
         activeMediaRef.current = null;
       }
     } catch (err) { console.error('[Transcripts]', err); }
-  }, [api, lang, tr.speaker_label]);
+  }, [api, lang, resolveVideoMediaUrl, tr.speaker_label]);
 
   const loadConversations = useCallback(async () => {
     try {
-      const recordings = await api.getRecordings();
+      const recordings = (await api.getRecordings()).filter((rec: RecordingRow) => rec.status === 'completed');
       if (recordings.length > 0) {
-        const today = new Date(); today.setHours(0, 0, 0, 0);
-        const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+        const now = new Date();
+        const locale = lang === 'zh' ? 'zh-CN' : 'en-US';
         const convs = recordings.map((rec: RecordingRow) => {
-          const recDate = rec.recorded_at ? new Date(rec.recorded_at) : new Date(rec.processed_at || Date.now());
-          recDate.setHours(0, 0, 0, 0);
-          let dateGroup = 'earlier';
-          if (recDate.getTime() >= today.getTime()) dateGroup = 'today';
-          else if (recDate.getTime() >= yesterday.getTime()) dateGroup = 'yesterday';
+          const dateMeta = getLibraryListDateMeta(rec, locale, now);
           const dur = rec.duration_seconds || 0;
           const spk = rec.speaker_count || 0;
           const mt = rec.media_type || undefined;
           const autoCategory = classifyContent(dur, spk, mt);
-          const localDate = `${recDate.getFullYear()}-${String(recDate.getMonth() + 1).padStart(2, '0')}-${String(recDate.getDate()).padStart(2, '0')}`;
-          return { id: `CONV-${String(rec.id).padStart(3, '0')}`, recordingId: rec.id, time: rec.recorded_at ? new Date(rec.recorded_at).toLocaleTimeString(lang === 'zh' ? 'zh-CN' : 'en-US', { hour: '2-digit', minute: '2-digit' }) : '', title: deriveRecordingTitle(rec), duration: dur ? formatDuration(dur) : '', durationSeconds: dur, speakers: spk, date: dateGroup, actualDate: localDate, recordedAt: rec.recorded_at || null, mediaType: mt, category: (rec.custom_category as any) || autoCategory, pageCount: rec.page_count || undefined, wordCount: rec.word_count || undefined };
+          return { id: `CONV-${String(rec.id).padStart(3, '0')}`, recordingId: rec.id, time: dateMeta.time, title: deriveRecordingTitle(rec), duration: dur ? formatDuration(dur) : '', durationSeconds: dur, speakers: spk, date: dateMeta.dateGroup, actualDate: dateMeta.actualDate, recordedAt: rec.recorded_at || null, mediaType: mt, category: (rec.custom_category as any) || autoCategory, pageCount: rec.page_count || undefined, wordCount: rec.word_count || undefined };
         });
         setConversations(convs);
         const recordingParam = searchParams.get('recording');
@@ -319,6 +345,11 @@ export default function Transcripts() {
           if (idx >= 0) { setSelectedConv(idx); await loadRecordingData(convs[idx].recordingId, convs[idx].durationSeconds, convs[idx].recordedAt, convs[idx].mediaType); setLoading(false); return; }
         }
         if (recordings[0]) await loadRecordingData(recordings[0].id, recordings[0].duration_seconds ?? undefined, recordings[0].recorded_at, recordings[0].media_type || undefined);
+      } else {
+        setConversations([]);
+        setMessages([]);
+        setExtractedItems([]);
+        setMeetingNotes(null);
       }
     } catch (err) { console.error('[Transcripts]', err); }
     setLoading(false);

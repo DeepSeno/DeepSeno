@@ -65,7 +65,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[UnhandledRejection]', reason);
 });
 
-import { app, BrowserWindow, protocol, net, globalShortcut, ipcMain, session, clipboard, Menu, Tray, nativeImage, screen, systemPreferences, shell, dialog, desktopCapturer, autoUpdater as nativeAutoUpdater } from 'electron';
+import { app, BrowserWindow, protocol, globalShortcut, ipcMain, session, clipboard, Menu, Tray, nativeImage, screen, systemPreferences, shell, dialog, desktopCapturer, autoUpdater as nativeAutoUpdater } from 'electron';
 
 // Enable remote debugging only in non-packaged (dev) builds for agent-browser.
 // Never expose the CDP port in production, otherwise any local process could take over the app.
@@ -76,7 +76,7 @@ import type { RecordingScene } from '../src/main/audio/recording-scene';
 import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
-import { pathToFileURL } from 'url';
+import { createFileResponse } from './media-protocol';
 
 /**
  * Resolve FFmpeg binary path via FFmpegManager.
@@ -104,7 +104,7 @@ import { TaskScheduler } from '../src/main/scheduler/task-scheduler';
 import { TaskExecutor } from '../src/main/scheduler/task-executor';
 import { seedPredefinedTasks } from '../src/main/scheduler/seed-tasks';
 import { loadSettings, updateSettings } from '../src/main/settings';
-import { createLLMClient, getLLMModel } from '../src/main/llm/create-client';
+import { createLLMClient, getLLMModel, getEmbedModel } from '../src/main/llm/create-client';
 import { LanServer } from '../src/main/server/lan-server';
 import { RelayTunnel } from '../src/main/server/relay-tunnel';
 import { PairingManager } from '../src/main/server/relay-pairing';
@@ -1209,7 +1209,9 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Register custom protocol for serving audio files securely
+  // Register custom protocol for serving local media files securely.
+  // HTML media elements seek by issuing Range requests; serve 206 responses
+  // here instead of delegating to file:// so desktop video scrubbing works.
   protocol.handle('media', (request) => {
     const url = new URL(request.url);
     const pathParts = url.pathname.replace(/^\/+/, '').split('/');
@@ -1223,7 +1225,7 @@ app.whenReady().then(async () => {
       if (!filePath || !fs.existsSync(filePath)) {
         return new Response('Audio file not found', { status: 404 });
       }
-      return net.fetch(pathToFileURL(filePath).href);
+      return createFileResponse(filePath, request);
     }
 
     if (url.hostname === 'image' || pathParts[0] === 'image') {
@@ -1248,13 +1250,13 @@ app.whenReady().then(async () => {
           return new Response('Image index out of range', { status: 404 });
         }
         const imgPath = path.join(filePath, images[idx]);
-        return net.fetch(pathToFileURL(imgPath).href);
+        return createFileResponse(imgPath, request);
       }
       // Single image file — only index 0 (or omitted) is valid
       if (imageIndex !== undefined && imageIndex > 0) {
         return new Response('Image index out of range', { status: 404 });
       }
-      return net.fetch(pathToFileURL(filePath).href);
+      return createFileResponse(filePath, request);
     }
 
     // Serve document files (PDF, DOCX, TXT) by recording ID
@@ -1267,7 +1269,7 @@ app.whenReady().then(async () => {
       if (!filePath || !fs.existsSync(filePath)) {
         return new Response('Document file not found', { status: 404 });
       }
-      return net.fetch(pathToFileURL(filePath).href);
+      return createFileResponse(filePath, request);
     }
 
     return new Response('Not found', { status: 404 });
@@ -1277,33 +1279,30 @@ app.whenReady().then(async () => {
    *  Sequential loading avoids dual I/O + Metal shader compilation stalls. */
   async function prewarmLLM(port: number) {
     const s = loadSettings();
-    const modelMap: Record<string, string> = {
-      'qwen3.5:4b': 'Qwen3.5-4B-Q4_K_M',
-      'qwen3.5:9b': 'Qwen3.5-9B-Q4_K_M',
-      'qwen3.5:27b': 'Qwen3.5-27B-Q4_K_M',
-      'qwen3.5:35b': 'Qwen3.5-35B-A3B-Q4_K_M',
-      'qwen3.5:122b': 'Qwen3.5-122B-A10B-Q4_K_M',
-      'bge-m3': 'bge-m3-Q8_0',
-    };
-    const chatModel = modelMap[s.llmModel] || 'Qwen3.5-4B-Q4_K_M';
-    const embedModel = 'bge-m3-Q8_0';
+    const chatModel = getLLMModel(s);
+    const embedModel = getEmbedModel(s);
     const base = `http://127.0.0.1:${port}/v1`;
-    const body = (model: string) => JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: 'hi' }],
-      max_tokens: 1,
-      stream: false,
-    });
     // Load chat model first, then embedding — sequential avoids system freeze
-    for (const model of [chatModel, embedModel]) {
-      try {
-        await fetch(`${base}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: body(model),
-        });
-      } catch { /* fire-and-forget, ignore errors */ }
-    }
+    try {
+      await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: chatModel,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+          stream: false,
+          chat_template_kwargs: { enable_thinking: false },
+        }),
+      });
+    } catch { /* fire-and-forget, ignore errors */ }
+    try {
+      await fetch(`${base}/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: embedModel, input: 'hi' }),
+      });
+    } catch { /* fire-and-forget, ignore errors */ }
   }
 
   // ─── Bundled llama-server (local provider) ──────────────────
@@ -1662,7 +1661,7 @@ app.whenReady().then(async () => {
       (async () => {
         const settings = loadSettings();
         if (settings.llmProvider !== 'openai') {
-          const embedModel = settings.embedModel || 'bge-m3';
+          const embedModel = getEmbedModel(settings);
           client.warmup(embedModel, 4096).catch(() => {});
         }
       })(),

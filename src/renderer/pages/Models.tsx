@@ -11,7 +11,7 @@ import BehaviorSection from './settings/models/BehaviorSection';
 import AdvancedSection from './settings/models/AdvancedSection';
 import type { LocalInstallStage, LocalModelStatus } from './settings/models/types';
 import { isModelInstalled, mergeInstalledModelStatuses } from './settings/models/model-status';
-import { LOCAL_MODEL_TEST_TIMEOUT_MS, shouldRestartLocalServerAfterTest, toLocalModelApiName } from './settings/models/local-model-test';
+import { shouldRestartLocalServerAfterTest } from './settings/models/local-model-test';
 
 export type { LocalInstallStage, LocalModelStatus };
 
@@ -350,63 +350,15 @@ export default function Models() {
     const shouldRestoreSelectedModel = shouldRestartLocalServerAfterTest(model, selectedModel);
     setLocalTesting(true);
     try {
-      // Ensure llama-server is running
-      let status = await api.llamaStatus();
-      if (!status.running) {
-        const result = await api.llamaStart();
-        if (!result.success) {
-          throw new Error(result.error || 'Failed to start llama-server');
-        }
-        status = await api.llamaStatus();
+      const result = await api.testLocal(model);
+      await checkLlamaServer();
+      if (!result.success) {
+        throw new Error(result.error || s.model_smoke_test_failed || 'Model test failed');
       }
-
-      // Send test request — model name is specified in the request body
-      const port = status.port;
-      setLlamaServerStatus({ running: status.running, port: status.port });
-      if (!port) throw new Error('llama-server port not available');
-
-      const apiModel = toLocalModelApiName(model);
-
-      // Send a test request via the running server
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), LOCAL_MODEL_TEST_TIMEOUT_MS);
-      let res: Response;
-      try {
-        res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: apiModel,
-            messages: [{ role: 'user', content: 'hi' }],
-            max_tokens: 5,
-            temperature: 0,
-          }),
-          signal: controller.signal,
-        });
-      } catch (err: any) {
-        if (err?.name === 'AbortError') {
-          throw new Error(s.model_smoke_test_timeout || 'Model test timed out');
-        }
-        throw err;
-      } finally {
-        window.clearTimeout(timer);
-      }
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-      const msg = data.choices?.[0]?.message;
-      const hasContent = msg?.content || msg?.reasoning_content;
-      if (hasContent) {
-        setLocalModelStatuses((prev) => ({ ...prev, [model]: 'done' }));
-        setLocalModelErrors((prev) => { const next = { ...prev }; delete next[model]; return next; });
-        setRecentlyTested(model);
-        setTimeout(() => setRecentlyTested((prev) => prev === model ? null : prev), 3000);
-      } else {
-        throw new Error('Empty response from model');
-      }
+      setLocalModelStatuses((prev) => ({ ...prev, [model]: 'done' }));
+      setLocalModelErrors((prev) => { const next = { ...prev }; delete next[model]; return next; });
+      setRecentlyTested(model);
+      setTimeout(() => setRecentlyTested((prev) => prev === model ? null : prev), 3000);
     } catch (err: any) {
       const msg = err?.message || 'Unknown error';
       setLocalModelStatuses((prev) => ({ ...prev, [model]: 'error' }));

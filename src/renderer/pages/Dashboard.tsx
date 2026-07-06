@@ -26,6 +26,7 @@ import {
   toLocalDateStr,
 } from './dashboard/index';
 import { deriveRecordingTitle } from '../utils/recordingTitle';
+import { isAlreadyProcessedEnqueue, isFailedEnqueue, isSkippedEnqueue } from '../utils/enqueueResult';
 import { isModelInstalled } from './settings/models/model-status';
 
 const IMPORT_FILTERS = [
@@ -286,11 +287,15 @@ export default function Dashboard() {
 
       let enqueued = 0;
       let skipped = 0;
+      let alreadyProcessed = 0;
       let lastError = '';
       for (const filePath of filePaths) {
         try {
           const result = await api.enqueue(filePath);
-          if (result?.status === 'failed') {
+          if (isAlreadyProcessedEnqueue(result)) {
+            skipped++;
+            alreadyProcessed++;
+          } else if (isFailedEnqueue(result) || isSkippedEnqueue(result)) {
             skipped++;
             lastError = result.error || r.unknown_error;
           } else {
@@ -304,6 +309,8 @@ export default function Dashboard() {
 
       if (enqueued > 0) {
         toast('success', `${enqueued} ${r.files_queued}`, skipped > 0 ? `${skipped} ${r.files_skipped}` : undefined);
+      } else if (alreadyProcessed > 0 && alreadyProcessed === skipped) {
+        toast('info', `${alreadyProcessed} ${(r as any).files_already_processed || r.files_skipped}`);
       } else if (skipped > 0) {
         toast('error', r.pipeline_failed, lastError || r.drop_formats);
       }

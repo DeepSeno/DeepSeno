@@ -7,6 +7,20 @@ function stripThinkTags(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 }
 
+function parseOpenAIStreamLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('data:')) return '';
+  const payload = trimmed.slice('data:'.length).trim();
+  if (!payload || payload === '[DONE]') return '';
+  try {
+    const data: any = JSON.parse(payload);
+    const content = data.choices?.[0]?.delta?.content;
+    return typeof content === 'string' ? content : '';
+  } catch {
+    return '';
+  }
+}
+
 export function looksLikeModelNotFound(text: string): boolean {
   return /(model|模型)/i.test(text) &&
     /(not found|does not exist|not exist|no such|unknown model|invalid model|不存在|未找到)/i.test(text);
@@ -142,6 +156,13 @@ export class OpenAIClient implements LLMClient {
       const decoder = new TextDecoder();
       let buffer = '';
       let fullText = '';
+      const processLine = (line: string) => {
+        const content = parseOpenAIStreamLine(line);
+        if (content) {
+          fullText += content;
+          onChunk(content);
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -151,21 +172,10 @@ export class OpenAIClient implements LLMClient {
         buffer = lines.pop()!;
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.slice(6).trim();
-          if (payload === '[DONE]') continue;
-          try {
-            const data: any = JSON.parse(payload);
-            const content = data.choices?.[0]?.delta?.content;
-            if (content) {
-              fullText += content;
-              onChunk(content);
-            }
-          } catch {
-            // skip malformed SSE lines
-          }
+          processLine(line);
         }
       }
+      if (buffer.trim()) processLine(buffer);
       return stripThinkTags(fullText);
     } finally {
       clearTimeout(timer);

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { FileWatcher } from '../watcher';
+import { FileWatcher, isSupportedWatchFile } from '../watcher';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -20,7 +20,17 @@ describe('FileWatcher', () => {
     }
   });
 
-  it('should detect new audio files', async () => {
+  it('detects supported file extensions', () => {
+    expect(isSupportedWatchFile('/path/to/file.wav')).toBe(true);
+    expect(isSupportedWatchFile('/path/to/file.pdf')).toBe(true);
+    expect(isSupportedWatchFile('/path/to/file.docx')).toBe(true);
+    expect(isSupportedWatchFile('/path/to/file.txt')).toBe(true);
+    expect(isSupportedWatchFile('/path/to/file.md')).toBe(true);
+    expect(isSupportedWatchFile('/path/to/file.png')).toBe(true);
+    expect(isSupportedWatchFile('/path/to/file.xyz')).toBe(false);
+  });
+
+  it('should detect new supported files', async () => {
     makeTmpDir();
     const detected: string[] = [];
     watcher = new FileWatcher(tmpDir, (filePath) => {
@@ -31,18 +41,17 @@ describe('FileWatcher', () => {
     // Give chokidar a moment to initialize
     await new Promise((r) => setTimeout(r, 500));
 
-    // Write a .wav file
-    const wavFile = path.join(tmpDir, 'test.wav');
-    fs.writeFileSync(wavFile, Buffer.alloc(100));
+    const pdfFile = path.join(tmpDir, 'test.pdf');
+    fs.writeFileSync(pdfFile, Buffer.alloc(100));
 
     // Wait for awaitWriteFinish stabilityThreshold + extra buffer
     await new Promise((r) => setTimeout(r, 4000));
 
     expect(detected.length).toBe(1);
-    expect(detected[0]).toContain('test.wav');
+    expect(detected[0]).toContain('test.pdf');
   }, 10000);
 
-  it('should ignore non-audio files', async () => {
+  it('should ignore unsupported files', async () => {
     makeTmpDir();
     const detected: string[] = [];
     watcher = new FileWatcher(tmpDir, (filePath) => {
@@ -52,8 +61,7 @@ describe('FileWatcher', () => {
 
     await new Promise((r) => setTimeout(r, 500));
 
-    // Write a .txt file — should be ignored
-    fs.writeFileSync(path.join(tmpDir, 'readme.txt'), 'hello');
+    fs.writeFileSync(path.join(tmpDir, 'readme.xyz'), 'hello');
 
     await new Promise((r) => setTimeout(r, 4000));
 

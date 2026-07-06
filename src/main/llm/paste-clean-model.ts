@@ -1,4 +1,5 @@
 import { createLLMClient, getLLMModel } from './create-client';
+import { toLocalModelApiName, toLocalModelApiNameSet } from './model-names';
 import type { AppSettings } from '../settings';
 
 const LIGHT_MODEL = 'qwen3.5:4b';
@@ -33,6 +34,9 @@ export async function resolvePasteCleanModel(
 
   // User explicitly set pasteCleanModel → use it directly
   if (settings.pasteCleanModel) {
+    const pasteCleanModel = settings.llmProvider === 'openai'
+      ? settings.pasteCleanModel
+      : toLocalModelApiName(settings.pasteCleanModel);
     // For local Local, verify model exists
     if (settings.llmProvider !== 'openai') {
       try {
@@ -44,7 +48,7 @@ export async function resolvePasteCleanModel(
           cachedModels = models;
           cacheExpiry = Date.now() + CACHE_TTL;
         }
-        if (!models.includes(settings.pasteCleanModel)) {
+        if (!toLocalModelApiNameSet(models).has(pasteCleanModel)) {
           console.warn(`[paste-clean] "${settings.pasteCleanModel}" not found locally, falling back to ${mainModel}`);
           return { model: mainModel };
         }
@@ -52,10 +56,10 @@ export async function resolvePasteCleanModel(
         console.warn(`[paste-clean] Cannot verify "${settings.pasteCleanModel}", falling back to ${mainModel}`);
         return { model: mainModel };
       }
-      return { model: settings.pasteCleanModel, keepAlive: '5m' };
+      return { model: pasteCleanModel, keepAlive: '5m' };
     }
     // Cloud provider — use the user-specified model name directly
-    return { model: settings.pasteCleanModel };
+    return { model: pasteCleanModel };
   }
 
   // Cloud API — use main cloud model
@@ -64,7 +68,8 @@ export async function resolvePasteCleanModel(
   }
 
   // Local Local: check if main model is heavy enough to benefit from a lighter model
-  const isHeavy = HEAVY_MODEL_PATTERNS.some((p) => mainModel.includes(p));
+  const mainModelLower = mainModel.toLowerCase();
+  const isHeavy = HEAVY_MODEL_PATTERNS.some((p) => mainModelLower.includes(p));
   if (!isHeavy) {
     return { model: mainModel };
   }
@@ -80,12 +85,13 @@ export async function resolvePasteCleanModel(
       cacheExpiry = Date.now() + CACHE_TTL;
     }
 
-    if (!models.includes(LIGHT_MODEL)) {
+    const lightApiModel = toLocalModelApiName(LIGHT_MODEL);
+    if (!toLocalModelApiNameSet(models).has(lightApiModel)) {
       console.log(`[paste-clean] ${LIGHT_MODEL} not installed, falling back to ${mainModel}`);
       return { model: mainModel };
     }
 
-    return { model: LIGHT_MODEL, keepAlive: '5m' };
+    return { model: lightApiModel, keepAlive: '5m' };
   } catch {
     return { model: mainModel };
   }

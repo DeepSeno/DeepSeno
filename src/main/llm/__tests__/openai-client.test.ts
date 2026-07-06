@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIClient } from '../openai-client';
 
-describe('OpenAIClient.isAvailable', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
+describe('OpenAIClient.isAvailable', () => {
   it('accepts providers that expose /models', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
@@ -62,5 +62,29 @@ describe('OpenAIClient.isAvailable', () => {
 
     await expect(client.isAvailable()).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenAIClient.generateStream', () => {
+  it('flushes a final SSE data frame without a trailing newline', async () => {
+    const payload = 'data: {"choices":[{"delta":{"content":"hello"}}]}';
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(stream, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new OpenAIClient('https://api.example.com/v1', 'key');
+    const chunks: string[] = [];
+    const result = await client.generateStream(
+      { model: 'test-model', prompt: 'hello' },
+      (chunk) => chunks.push(chunk),
+    );
+
+    expect(chunks).toEqual(['hello']);
+    expect(result).toBe('hello');
   });
 });

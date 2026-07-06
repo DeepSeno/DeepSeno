@@ -26,6 +26,8 @@ export const STATUS_TO_STEP: Record<string, number> = {
   indexing: 6,
   completed: 6,
   failed: -1,
+  cancelled: -1,
+  interrupted: -1,
 };
 
 export const PIPELINE_STEPS = [
@@ -91,6 +93,20 @@ export interface HistoryItem {
   mediaType: string;
   pageCount?: number;
   wordCount?: number;
+  statusUpdatedAt?: string | null;
+}
+
+function historyItemStatusTime(item: Pick<HistoryItem, 'statusUpdatedAt'>): number {
+  const value = item.statusUpdatedAt ? Date.parse(item.statusUpdatedAt) : NaN;
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function sortHistoryItemsForDisplay<T extends Pick<HistoryItem, 'recordingId' | 'statusUpdatedAt'>>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const statusTimeDiff = historyItemStatusTime(b) - historyItemStatusTime(a);
+    if (statusTimeDiff !== 0) return statusTimeDiff;
+    return b.recordingId - a.recordingId;
+  });
 }
 
 export interface TextNoteItem {

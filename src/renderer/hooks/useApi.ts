@@ -203,6 +203,7 @@ export interface RecordingRow {
   duration_seconds: number | null;
   recorded_at: string | null;
   processed_at: string | null;
+  status_updated_at?: string | null;
   status: string;
   speaker_count: number;
   extracted_count: number;
@@ -546,6 +547,14 @@ export interface PipelineReprocessResult {
   recovery?: PipelineRecoveryResult;
 }
 
+export interface PipelineEnqueueResult {
+  id: string;
+  status: string;
+  error?: string;
+  reason?: string;
+  recordingId?: number;
+}
+
 // ─── API Interface ───────────────────────────────────────
 
 export interface VoiceBrainApi {
@@ -555,7 +564,7 @@ export interface VoiceBrainApi {
   selectDirectory: () => Promise<string | null>;
 
   // Pipeline
-  enqueue: (filePath: string) => Promise<{ id: string; status: string; error?: string }>;
+  enqueue: (filePath: string) => Promise<PipelineEnqueueResult>;
   getQueue: () => Promise<Array<{
     id: string;
     filePath: string;
