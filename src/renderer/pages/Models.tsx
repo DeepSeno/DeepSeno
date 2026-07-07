@@ -10,7 +10,7 @@ import EnginesSection from './settings/models/EnginesSection';
 import BehaviorSection from './settings/models/BehaviorSection';
 import AdvancedSection from './settings/models/AdvancedSection';
 import type { LocalInstallStage, LocalModelStatus } from './settings/models/types';
-import { isModelInstalled, mergeInstalledModelStatuses } from './settings/models/model-status';
+import { isModelInstalled, mergeInstalledModelStatuses, toSelectableModelId } from './settings/models/model-status';
 import { shouldRestartLocalServerAfterTest } from './settings/models/local-model-test';
 
 export type { LocalInstallStage, LocalModelStatus };
@@ -69,7 +69,6 @@ export default function Models() {
   const [svModelStatus, setSvModelStatus] = useState<'checking' | 'ready' | 'missing' | 'downloading' | 'error'>('checking');
   const [svDownloadProgress, setSvDownloadProgress] = useState(0);
   const [svError, setSvError] = useState<string | null>(null);
-  const [svMirror, setSvMirror] = useState<'' | 'modelscope' | 'hf-mirror' | 'ghfast'>('modelscope');
 
   // ─── Hardware info for model recommendations ───────────────
   const [totalMemoryGB, setTotalMemoryGB] = useState(0);
@@ -194,9 +193,16 @@ export default function Models() {
   }, [api, applyLocalModelPullState]);
 
   useEffect(() => {
-    const llm = settings?.llmModel || 'qwen3.5:4b';
+    const llm = toSelectableModelId(settings?.llmModel || 'qwen3.5:4b');
     setLocalModelStatuses((prev) => mergeInstalledModelStatuses(prev, localModels, llm));
   }, [localModels, settings?.llmModel]);
+
+  useEffect(() => {
+    const llm = settings?.llmModel;
+    if (llm && toSelectableModelId(llm) !== llm) {
+      updateField({ llmModel: toSelectableModelId(llm) });
+    }
+  }, [settings?.llmModel, updateField]);
 
   // ─── Core callbacks ──────────────────────────────────────────
   const checkLlamaServer = useCallback(async () => {
@@ -266,7 +272,7 @@ export default function Models() {
     setSvDownloadProgress(0);
     setSvError(null);
     try {
-      const result = await api.downloadSherpaModels(svMirror, force);
+      const result = await api.downloadSherpaModels('modelscope', force);
       if (result.success) {
         setSvModelStatus('ready');
         toast('success', s.sherpa_download_done);
@@ -282,7 +288,7 @@ export default function Models() {
       setSvError(err.message || s.sherpa_download_fail);
       toast('error', s.sherpa_download_fail, err.message);
     }
-  }, [api, toast, svMirror, svModelStatus]);
+  }, [api, toast, svModelStatus]);
 
   const handleCancelSenseVoice = useCallback(() => {
     api.cancelSherpaDownload();
@@ -345,7 +351,7 @@ export default function Models() {
   }, [api, toast, checkLocal]);
 
   const handleTestLocal = useCallback(async (modelName?: string) => {
-    const selectedModel = settings?.llmModel || 'qwen3.5:4b';
+    const selectedModel = toSelectableModelId(settings?.llmModel || 'qwen3.5:4b');
     const model = modelName || selectedModel;
     const shouldRestoreSelectedModel = shouldRestartLocalServerAfterTest(model, selectedModel);
     setLocalTesting(true);
@@ -393,7 +399,7 @@ export default function Models() {
   // ─── Readiness computation ─────────────────────────────────
   const localReady = localStatus === 'connected';
   const localEngineReady = llamaServerStatus.running && Boolean(llamaServerStatus.port);
-  const llmModel = settings?.llmModel || 'qwen3.5:4b';
+  const llmModel = toSelectableModelId(settings?.llmModel || 'qwen3.5:4b');
   const llmReady = settings?.llmProvider === 'openai'
     ? Boolean(settings?.cloudModel?.trim()) && cloudStatus === 'connected'
     : settings?.llmProvider === 'local'
@@ -438,8 +444,6 @@ export default function Models() {
     svError,
     onDownloadSenseVoice: handleDownloadSenseVoice,
     onCancelSenseVoice: handleCancelSenseVoice,
-    mirror: svMirror,
-    onMirrorChange: setSvMirror,
     localInstallStage,
     localModelStatuses,
     localModelErrors,

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import { GGUF_CATALOG } from './gguf-model-catalog';
 
-export const GGUF_COMPLETE_RATIO = 0.95;
+export const GGUF_COMPLETE_RATIO = 1;
 const GGUF_MAGIC = 'GGUF';
 
 export interface GGUFFileInfo {
@@ -16,7 +16,7 @@ export interface GGUFFileValidation {
 }
 
 export function isCompleteGGUFFile(actualBytes: number, expectedBytes: number): boolean {
-  return actualBytes >= expectedBytes * GGUF_COMPLETE_RATIO;
+  return actualBytes === expectedBytes;
 }
 
 export function hasGGUFMagic(header?: Uint8Array | null): boolean {
@@ -66,7 +66,7 @@ export function validateGGUFFilePath(filePath: string, expectedBytes: number): G
     return {
       ok: false,
       size: info.size,
-      error: `Downloaded file is incomplete (${info.size} bytes, expected about ${expectedBytes} bytes)`,
+      error: `Downloaded file size mismatch (${info.size} bytes, expected ${expectedBytes} bytes)`,
     };
   }
   return { ok: true, size: info.size };

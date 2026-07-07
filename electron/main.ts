@@ -96,7 +96,7 @@ function getFFmpegBinPath(): string {
 // Do NOT use --no-proxy-server or --proxy-bypass-list here — they interfere
 // with session.setProxy() and prevent net.fetch from reaching external APIs.
 import { autoUpdater } from 'electron-updater';
-import { registerIpcHandlers, cleanupIpc, startFileWatching, getRecordingFilePath, enqueueForProcessing, getQueryEngine, getTaskQueue, getProcessor, initFeishuBot, stopFeishuBot, getFeishuBot, getSyncManager, startRealtimeTranscription, stopRealtimeTranscription, prewarmTranscriber, getSegmentTextForRecording, hasPendingSegmentOptimizations, awaitAndMergeSegmentOptimizations, pasteClean, triggerPostProcessing, getCurrentScene, stopChannels, getDingTalkChannel, getWeChatChannel, getMessageRouter, stopPlugins, getPluginEngine, getSherpaEngine, setDownloadManager, getAgentExecutor, getKnowledgeCompiler, getInsightEngine } from '../src/main/ipc-handlers';
+import { registerIpcHandlers, cleanupIpc, startFileWatching, getRecordingFilePath, enqueueForProcessing, getQueryEngine, getTaskQueue, getProcessor, initFeishuBot, stopFeishuBot, getFeishuBot, getSyncManager, startRealtimeTranscription, stopRealtimeTranscription, prewarmTranscriber, getSegmentTextForRecording, hasPendingSegmentOptimizations, awaitAndMergeSegmentOptimizations, pasteClean, triggerPostProcessing, getCurrentScene, stopChannels, getDingTalkChannel, getWeChatChannel, getMessageRouter, stopPlugins, getPluginEngine, getSherpaEngine, setDownloadManager, getAgentExecutor, getKnowledgeCompiler, getInsightEngine, resetLLMClients } from '../src/main/ipc-handlers';
 import { BackgroundDownloadManager } from '../src/main/download-manager';
 import { VoiceBrainDB } from '../src/main/db/database';
 import { getDbPath } from '../src/main/paths';
@@ -1375,6 +1375,7 @@ app.whenReady().then(async () => {
       }).then(({ port }) => {
         console.log(`[main] llama-server (router) on port ${port}`);
         updateSettings({ llamaServerPort: port });
+        resetLLMClients();
         // Pre-warm: trigger model loading in background so first user request is fast
         prewarmLLM(port).catch(() => {});
       }).catch(err => {

@@ -5,11 +5,18 @@ export const QWEN_MODEL_IDS = [
   'qwen3.5:9b',
   'qwen3.5:27b',
   'qwen3.5:35b',
-  'qwen3.5:122b',
 ];
+
+const DEPRECATED_UI_MODEL_FALLBACKS: Record<string, string> = {
+  'qwen3.5:122b': 'qwen3.5:35b',
+};
 
 function normalizeModelId(modelId: string): string {
   return modelId.endsWith(':latest') ? modelId.slice(0, -':latest'.length) : modelId;
+}
+
+export function toSelectableModelId(modelId: string): string {
+  return DEPRECATED_UI_MODEL_FALLBACKS[normalizeModelId(modelId)] || modelId;
 }
 
 export function isModelInstalled(downloadedModels: string[], modelId: string): boolean {
@@ -22,7 +29,7 @@ export function mergeInstalledModelStatuses(
   downloadedModels: string[],
   selectedModel: string,
 ): Record<string, LocalModelStatus> {
-  const toCheck = new Set([...QWEN_MODEL_IDS, selectedModel || 'qwen3.5:4b', 'bge-m3']);
+  const toCheck = new Set([...QWEN_MODEL_IDS, toSelectableModelId(selectedModel || 'qwen3.5:4b'), 'bge-m3']);
   const next = { ...previous };
 
   for (const model of toCheck) {

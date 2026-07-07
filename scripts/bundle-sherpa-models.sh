@@ -26,10 +26,11 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # Model definitions: key="url|filename|min_size_bytes"
-# Sources: hf-mirror (China-accessible HuggingFace mirror) for models not on ModelScope
+# Sources: ModelScope for confirmed equivalent files. pyannote reverb-v2 stays on
+# hf-mirror until an equivalent ModelScope ONNX file is confirmed.
 MODELS=(
-  "sensevoice/tokens.txt|https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt|tokens.txt|1000"
-  "vad/silero_vad.onnx|https://hf-mirror.com/csukuangfj/vad/resolve/main/silero_vad.onnx|silero_vad.onnx|50000"
+  "sensevoice/tokens.txt|https://modelscope.cn/api/v1/models/pengzhendong/sherpa-onnx-sense-voice-zh-en-ja-ko-yue/repo?Revision=master&FilePath=tokens.txt|tokens.txt|1000"
+  "vad/silero_vad.onnx|https://modelscope.cn/api/v1/models/pengzhendong/silero-vad/repo?Revision=master&FilePath=v4/silero_vad.onnx|silero_vad.onnx|50000"
   "pyannote/model.int8.onnx|https://hf-mirror.com/csukuangfj/sherpa-onnx-reverb-diarization-v2/resolve/main/model.int8.onnx|model.int8.onnx|1000000"
 )
 

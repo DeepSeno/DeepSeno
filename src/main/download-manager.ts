@@ -185,12 +185,11 @@ export class BackgroundDownloadManager {
       this.update('sherpa-models', { progress: pct });
     };
 
-    // Default: modelscope → hf-mirror → ghfast → direct
+    // User-facing downloads are pinned to ModelScope. SherpaModelManager keeps
+    // an internal HF fallback only for pyannote reverb-v2 until an equivalent
+    // ModelScope ONNX file is confirmed.
     const sources: Array<{ mirror: import('./audio/sherpa-model-manager').ModelMirror; label: string }> = [
       { mirror: 'modelscope', label: 'ModelScope' },
-      { mirror: 'hf-mirror', label: 'hf-mirror' },
-      { mirror: 'ghfast', label: 'ghfast' },
-      { mirror: '', label: 'direct' },
     ];
 
     const errors: string[] = [];

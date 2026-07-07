@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Download, CheckCircle2, XCircle, Loader2, Clock, Cpu, HardDrive, Monitor, Server } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useApi, ModelPullProgress, HardwareInfo } from '../../hooks/useApi';
-import Select from '../Select';
 
 interface ModelInfo {
   name: string;
@@ -35,7 +34,7 @@ function shouldRestorePullState(state: ModelPullProgress): boolean {
 }
 
 export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommendedModel }: Props) {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const api = useApi();
   const w = t.wizard;
 
@@ -44,8 +43,8 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
   const [hwLoading, setHwLoading] = useState(true);
 
   const [MODELS, setModels] = useState<ModelInfo[]>([
-    { name: 'qwen3.5:4b', label: 'Qwen3.5-4B (LLM)', size: '~3.4 GB', isLocal: true },
-    { name: 'bge-m3', label: 'bge-m3 (Embeddings)', size: '~1.2 GB', isLocal: true },
+    { name: 'qwen3.5:4b', label: 'Qwen3.5-4B (LLM)', size: '~2.7 GB', isLocal: true },
+    { name: 'bge-m3', label: 'bge-m3 (Embeddings)', size: '~0.6 GB', isLocal: true },
     { name: 'sherpa-onnx', label: 'sherpa-onnx (ASR/VAD/Speaker)', size: '~406 MB', isLocal: false },
   ]);
 
@@ -55,7 +54,6 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
   const downloadingRef = useRef(false);
   const downloadedRef = useRef<string[]>([]);
   const pullUpdatedAtRef = useRef<Record<string, number>>({});
-  const [sherpaMirror, setSherpaMirror] = useState<'' | 'modelscope' | 'hf-mirror' | 'ghfast'>('modelscope');
 
   // Local install state
   const [localStage, setLocalStage] = useState<LocalStage>('checking');
@@ -100,27 +98,29 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
       try {
         const hw = await api.detectHardware();
         setHardware(hw);
-        if (hw.recommendedLlmModel) {
-          onRecommendedModel?.(hw.recommendedLlmModel);
+        const recommendedModel = hw.recommendedLlmModel === 'qwen3.5:122b'
+          ? 'qwen3.5:35b'
+          : hw.recommendedLlmModel;
+        if (recommendedModel) {
+          onRecommendedModel?.(recommendedModel);
         }
 
         // Auto-select the recommended LLM model based on hardware
-        if (hw.recommendedLlmModel && hw.recommendedLlmModel !== 'qwen3.5:4b') {
+        if (recommendedModel && recommendedModel !== 'qwen3.5:4b') {
           const sizeMap: Record<string, string> = {
-            'qwen3.5:4b': '~3.4 GB',
-            'qwen3.5:9b': '~6.6 GB',
-            'qwen3.5:27b': '~17 GB',
-            'qwen3.5:35b': '~24 GB',
-            'qwen3.5:122b': '~81 GB',
+            'qwen3.5:4b': '~2.7 GB',
+            'qwen3.5:9b': '~5.7 GB',
+            'qwen3.5:27b': '~16.8 GB',
+            'qwen3.5:35b': '~22.0 GB',
           };
           setModels([
             {
-              name: hw.recommendedLlmModel,
-              label: `${hw.recommendedLlmModel} (LLM)`,
-              size: sizeMap[hw.recommendedLlmModel] || '~? GB',
+              name: recommendedModel,
+              label: `${recommendedModel} (LLM)`,
+              size: sizeMap[recommendedModel] || '~? GB',
               isLocal: true,
             },
-            { name: 'bge-m3', label: 'bge-m3 (Embeddings)', size: '~1.2 GB', isLocal: true },
+            { name: 'bge-m3', label: 'bge-m3 (Embeddings)', size: '~0.6 GB', isLocal: true },
           ]);
         }
       } catch (err) {
@@ -247,7 +247,7 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
               continue;
             }
           } else if (model.name === 'sherpa-onnx') {
-            const result = await api.downloadSherpaModels(sherpaMirror);
+            const result = await api.downloadSherpaModels('modelscope');
             if (!result.success) {
               setStatuses((prev) => ({ ...prev, [model.name]: 'error' }));
               continue;
@@ -526,23 +526,11 @@ export default function StepModels({ onModelsReady, onSkip: _onSkip, onRecommend
         </p>
       )}
 
-      {/* Mirror Source Selector — only show when downloads are queued and not in progress */}
+      {/* Download source indicator */}
       {(hasQueued || needsLocalInstall) && !downloading && (
         <div className="flex items-center justify-center gap-2 mt-3 kz-text-soft" style={{ fontSize: '12px' }}>
-          <span className="kz-mono">{lang === 'zh' ? '语音模型下载源' : 'ASR Model Source'}</span>
-          <Select
-            value={sherpaMirror}
-            onChange={(v) => setSherpaMirror(v as any)}
-            className="kz-mono"
-            style={{ width: 200, height: 28, fontSize: 11.5 }}
-            ariaLabel={lang === 'zh' ? '语音模型下载源' : 'ASR Model Source'}
-            options={[
-              { value: 'modelscope', label: lang === 'zh' ? 'ModelScope（推荐）' : 'ModelScope (recommended)' },
-              { value: 'hf-mirror', label: lang === 'zh' ? 'HF Mirror 镜像' : 'HF Mirror' },
-              { value: 'ghfast', label: lang === 'zh' ? 'GitHub 加速代理' : 'GitHub Proxy' },
-              { value: '', label: lang === 'zh' ? 'GitHub 直连' : 'GitHub Direct' },
-            ]}
-          />
+          <span className="kz-mono">{t.settings.download_source}</span>
+          <span className="kz-badge kz-badge--info kz-mono">{t.settings.source_modelscope}</span>
         </div>
       )}
     </div>

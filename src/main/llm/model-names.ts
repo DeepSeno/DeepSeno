@@ -7,7 +7,7 @@ export const LOCAL_MODEL_NAME_MAP: Record<string, string> = {
   'qwen3.5:9b': 'Qwen3.5-9B-Q4_K_M',
   'qwen3.5:27b': 'Qwen3.5-27B-Q4_K_M',
   'qwen3.5:35b': 'Qwen3.5-35B-A3B-Q4_K_M',
-  'qwen3.5:122b': 'Qwen3.5-122B-A10B-Q4_K_M',
+  'qwen3.5:122b': 'Qwen3.5-35B-A3B-Q4_K_M',
   'bge-m3': 'bge-m3-Q8_0',
 };
 

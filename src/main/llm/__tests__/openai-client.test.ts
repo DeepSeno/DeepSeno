@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OpenAIClient } from '../openai-client';
+import { isLocalOpenAIBaseUrl, OpenAIClient } from '../openai-client';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -62,6 +62,39 @@ describe('OpenAIClient.isAvailable', () => {
 
     await expect(client.isAvailable()).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenAIClient request timeouts', () => {
+  it('recognizes local llama-server base URLs', () => {
+    expect(isLocalOpenAIBaseUrl('http://127.0.0.1:8080/v1')).toBe(true);
+    expect(isLocalOpenAIBaseUrl('http://localhost:8080/v1')).toBe(true);
+    expect(isLocalOpenAIBaseUrl('http://[::1]:8080/v1')).toBe(true);
+    expect(isLocalOpenAIBaseUrl('https://api.example.com/v1')).toBe(false);
+  });
+
+  it('does not add an internal timeout signal for local model generation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'ok' } }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new OpenAIClient('http://127.0.0.1:8080/v1', '');
+
+    await expect(client.generate({ model: 'Qwen3.5-4B-Q4_K_M', prompt: 'hi' })).resolves.toBe('ok');
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+  });
+
+  it('keeps a timeout signal for cloud generation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'ok' } }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new OpenAIClient('https://api.example.com/v1', 'key');
+
+    await expect(client.generate({ model: 'cloud-model', prompt: 'hi' })).resolves.toBe('ok');
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
   });
 });
 

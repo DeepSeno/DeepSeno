@@ -101,6 +101,10 @@ export function getProcessor() {
   } catch { return null; }
 }
 
+export function resetLLMClients(): void {
+  ctx?.resetLLMClient();
+}
+
 export async function startFileWatching(): Promise<void> {
   if (ctx) return _startFileWatching(ctx);
 }

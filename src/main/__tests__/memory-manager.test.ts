@@ -36,6 +36,18 @@ describe('MemoryManager', () => {
   });
 
   describe('addFact', () => {
+    it('uses the hot-swapped embedding client after local router refresh', async () => {
+      const refreshedEmbed = {
+        embed: vi.fn().mockResolvedValue([0.4, 0.5, 0.6]),
+      };
+
+      manager.updateLLMClient(mockLLM, refreshedEmbed as any);
+      await manager.addFact('刷新后的事实', 'general', 0.8, [1]);
+
+      expect(refreshedEmbed.embed).toHaveBeenCalledWith('bge-m3', '刷新后的事实');
+      expect(mockLLM.embed).not.toHaveBeenCalled();
+    });
+
     it('inserts new fact when no similar memory exists', async () => {
       const id = await manager.addFact('张总是合伙人', 'person', 0.9, [1]);
       expect(id).toBe(1);

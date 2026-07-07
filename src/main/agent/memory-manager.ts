@@ -21,6 +21,11 @@ export class MemoryManager {
     private embedClient?: LLMClient,
   ) {}
 
+  updateLLMClient(llmClient: LLMClient, embedClient?: LLMClient): void {
+    this.llmClient = llmClient;
+    this.embedClient = embedClient;
+  }
+
   // ─── Existing: addFact (unchanged) ───────────────────────
 
   /**

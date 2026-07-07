@@ -24,6 +24,7 @@ import { LicenseManager } from '../licensing/license-manager';
 import { SherpaEngineProxy } from '../audio/sherpa-engine-proxy';
 import { BackgroundDownloadManager } from '../download-manager';
 import { LlamaServerManager } from '../llm/llama-server-manager';
+import { appendAppLog } from '../logging/log-bus';
 
 // ─── IpcContext Interface ──────────────────────────────────
 
@@ -99,26 +100,79 @@ function getEmbedLLM(): LLMClient {
   return embedLLM;
 }
 
-/** Reset cached LLM client (call when llmProvider or cloud settings change). */
+function logInferenceRefresh(
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  details?: unknown,
+): void {
+  appendAppLog(level, 'main', 'local-inference', message, details);
+}
+
+/** Reset cached LLM clients and hot-swap every singleton that holds them. */
 function resetLLMClient(): void {
-  local = null;
-  embedLLM = null;
-  queryEngine = null; // QueryEngine holds a reference to the old client
+  const settings = loadSettings();
+  const nextLLM = createLLMClient(settings);
+  const nextEmbedLLM = createEmbedClient(settings);
+  const nextLLMModel = getLLMModel(settings);
+  const nextEmbedModel = getEmbedModel(settings);
+
+  logInferenceRefresh('info', 'Refreshing cached LLM clients and dependent services', {
+    provider: settings.llmProvider,
+    llamaServerPort: settings.llamaServerPort,
+    llmModel: nextLLMModel,
+    embedModel: nextEmbedModel,
+    hasProcessor: Boolean(processor),
+    hasQueryEngine: Boolean(queryEngine),
+    hasMemoryManager: Boolean(memoryManagerInstance),
+    hasKnowledgeCompiler: Boolean(knowledgeCompilerInstance),
+    hasInsightEngine: Boolean(insightEngineInstance),
+  });
+
+  local = nextLLM;
+  embedLLM = nextEmbedLLM;
+  queryEngine = null; // QueryEngine holds references to the old clients
+
   // Hot-swap the processor's internal LLM client instead of destroying it
-  // (destroying would lose TaskQueue event wiring and MemoryManager reference)
+  // (destroying would lose TaskQueue event wiring and queued work).
   if (processor) {
-    const settings = loadSettings();
-    const newClient = createLLMClient(settings);
-    const newModel = getLLMModel(settings);
-    processor.updateLLMClient(newClient, newModel);
+    processor.updateLLMClient(nextLLM, nextLLMModel);
   }
+
+  if (memoryManagerInstance) {
+    memoryManagerInstance.updateLLMClient(nextLLM, nextEmbedLLM);
+  }
+
   // Hot-swap KnowledgeCompiler's LLM client too
   if (knowledgeCompilerInstance) {
-    const settings = loadSettings();
-    const newClient = createLLMClient(settings);
-    const newEmbedClient = createEmbedClient(settings);
-    knowledgeCompilerInstance.updateLLMClient(newClient, newEmbedClient);
+    knowledgeCompilerInstance.updateLLMClient(nextLLM, nextEmbedLLM);
   }
+
+  if (insightEngineInstance) {
+    insightEngineInstance.setLLM(nextLLM, nextLLMModel, nextEmbedModel, nextEmbedLLM);
+    if (vectorStore) {
+      insightEngineInstance.setVectorStore(vectorStore);
+    }
+  }
+
+  if (processor) {
+    const refreshedQueryEngine = getQueryEngine();
+    processor.setQueryEngine(refreshedQueryEngine);
+    if (memoryManagerInstance) {
+      processor.setMemoryManager(memoryManagerInstance);
+      refreshedQueryEngine.setMemoryManager(memoryManagerInstance);
+    }
+    if (knowledgeCompilerInstance) {
+      processor.setKnowledgeCompiler(knowledgeCompilerInstance);
+    }
+  }
+
+  logInferenceRefresh('info', 'Cached LLM clients and dependent services refreshed', {
+    provider: settings.llmProvider,
+    llamaServerPort: settings.llamaServerPort,
+    llmModel: nextLLMModel,
+    embedModel: nextEmbedModel,
+    queryEngineRebuilt: Boolean(queryEngine),
+  });
 }
 
 function getVectorStore(): VectorStore {

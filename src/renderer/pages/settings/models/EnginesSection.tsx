@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   Cpu,
   RefreshCw,
@@ -13,6 +13,7 @@ import Select from '../../../components/Select';
 import { useI18n } from '../../../i18n';
 import type { ModelsSectionProps } from './types';
 import { getLocalModelTestButtonClass } from './local-model-test';
+import { toSelectableModelId } from './model-status';
 
 function toPercent(completed: number, total: number): number {
   if (!total || total <= 0) return 0;
@@ -58,10 +59,9 @@ interface ModelCatalogEntry {
 
 const MODEL_CATALOG: ModelCatalogEntry[] = [
   { name: 'qwen3.5:4b',   fileGB: 2.7, runGB: 6,  perf: 70, arch: 'dense' },
-  { name: 'qwen3.5:9b',   fileGB: 6.6, runGB: 10, perf: 78, arch: 'dense' },
-  { name: 'qwen3.5:27b',  fileGB: 17,  runGB: 22, perf: 86, arch: 'dense' },
-  { name: 'qwen3.5:35b',  fileGB: 24,  runGB: 30, perf: 85, arch: 'moe' },
-  { name: 'qwen3.5:122b', fileGB: 81,  runGB: 88, perf: 90, arch: 'moe' },
+  { name: 'qwen3.5:9b',   fileGB: 5.7, runGB: 10, perf: 78, arch: 'dense' },
+  { name: 'qwen3.5:27b',  fileGB: 16.8, runGB: 22, perf: 86, arch: 'dense' },
+  { name: 'qwen3.5:35b',  fileGB: 22.0, runGB: 30, perf: 85, arch: 'moe' },
 ];
 
 const SYSTEM_OVERHEAD_GB = 6;
@@ -87,8 +87,6 @@ export default function EnginesSection(props: ModelsSectionProps) {
     svError,
     onDownloadSenseVoice,
     onCancelSenseVoice,
-    mirror,
-    onMirrorChange,
     localInstallStage,
     localModelStatuses,
     localModelErrors,
@@ -137,8 +135,15 @@ export default function EnginesSection(props: ModelsSectionProps) {
     ]),
   ];
 
-  const llmModel = settings.llmModel || 'qwen3.5:4b';
+  const rawLlmModel = settings.llmModel || 'qwen3.5:4b';
+  const llmModel = toSelectableModelId(rawLlmModel);
   const runtimeReady = localInstallStage === 'already_installed';
+
+  useEffect(() => {
+    if (rawLlmModel !== llmModel) {
+      updateField({ llmModel });
+    }
+  }, [llmModel, rawLlmModel, updateField]);
 
   type ModelListItem = { name: string; size: string; tag?: 'recommended' | 'caution'; arch?: ModelArch; perf?: number };
   const llmListItems: ModelListItem[] = MODEL_CATALOG.map((m) => {
@@ -208,19 +213,7 @@ export default function EnginesSection(props: ModelsSectionProps) {
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 kz-text-mute" style={{ fontSize: 11.5 }}>
                     <span className="kz-serif-italic flex-shrink-0">{s.download_source}</span>
-                    <Select
-                      value={mirror}
-                      onChange={(v) => onMirrorChange(v as any)}
-                      className="kz-mono"
-                      ariaLabel={s.download_source}
-                      style={{ width: 168, height: 28, fontSize: 11.5 }}
-                      options={[
-                        { value: 'modelscope', label: s.source_modelscope },
-                        { value: 'hf-mirror', label: s.source_hf_mirror },
-                        { value: 'ghfast', label: s.source_ghfast },
-                        { value: '', label: s.source_github_direct },
-                      ]}
-                    />
+                    <span className="kz-badge kz-badge--info kz-mono">{s.source_modelscope}</span>
                   </div>
                   <button onClick={onDownloadSenseVoice} className="kz-btn kz-btn--sm flex-shrink-0">
                     {svModelStatus === 'error' ? <RefreshCw size={12} /> : <Download size={12} />}

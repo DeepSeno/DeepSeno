@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isModelInstalled, mergeInstalledModelStatuses } from '../model-status';
+import { isModelInstalled, mergeInstalledModelStatuses, toSelectableModelId } from '../model-status';
 
 describe('model status helpers', () => {
   it('matches downloaded model ids with or without latest suffix', () => {
@@ -34,5 +34,14 @@ describe('model status helpers', () => {
     const statuses = mergeInstalledModelStatuses({ 'qwen3.5:27b': 'error' }, [], 'qwen3.5:4b');
 
     expect(statuses['qwen3.5:27b']).toBe('error');
+  });
+
+  it('maps the deprecated 122B UI selection to 35B', () => {
+    expect(toSelectableModelId('qwen3.5:122b')).toBe('qwen3.5:35b');
+
+    const statuses = mergeInstalledModelStatuses({}, [], 'qwen3.5:122b');
+
+    expect(statuses['qwen3.5:122b']).toBeUndefined();
+    expect(statuses['qwen3.5:35b']).toBe('queued');
   });
 });

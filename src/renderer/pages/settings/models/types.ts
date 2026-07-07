@@ -45,8 +45,6 @@ export interface ModelsSectionProps {
   svError: string | null;
   onDownloadSenseVoice: () => void;
   onCancelSenseVoice: () => void;
-  mirror: '' | 'modelscope' | 'hf-mirror' | 'ghfast';
-  onMirrorChange: (mirror: '' | 'modelscope' | 'hf-mirror' | 'ghfast') => void;
 
   // Hardware
   totalMemoryGB: number;

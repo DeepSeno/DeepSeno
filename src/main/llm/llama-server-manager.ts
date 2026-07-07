@@ -167,18 +167,31 @@ export class LlamaServerManager {
   // ─── Health check ────────────────────────────────────────────
 
   private async waitForReady(port: number, timeoutMs = 60000): Promise<void> {
+    const startedAt = Date.now();
     const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
     while (Date.now() < deadline) {
+      attempts += 1;
       try {
         const res = await fetch(`http://127.0.0.1:${port}/health`, {
           signal: AbortSignal.timeout(2000),
         });
-        if (res.ok) return;
-      } catch {
+        if (res.ok) {
+          console.log(`[LlamaServer] health ready port=${port} attempts=${attempts} elapsedMs=${Date.now() - startedAt}`);
+          return;
+        }
+        if (attempts === 1 || attempts % 10 === 0) {
+          console.log(`[LlamaServer] health pending port=${port} attempt=${attempts} status=${res.status} elapsedMs=${Date.now() - startedAt}`);
+        }
+      } catch (err: any) {
+        if (attempts === 1 || attempts % 10 === 0) {
+          console.log(`[LlamaServer] health pending port=${port} attempt=${attempts} error=${err?.message || String(err)} elapsedMs=${Date.now() - startedAt}`);
+        }
         // Server not ready yet
       }
       await new Promise((r) => setTimeout(r, 500));
     }
+    console.error(`[LlamaServer] health failed port=${port} attempts=${attempts} timeoutMs=${timeoutMs}`);
     throw new Error(`llama-server did not become ready within ${timeoutMs}ms`);
   }
 
@@ -281,6 +294,7 @@ export class LlamaServerManager {
     this.port = await this.findFreePort();
     this.mode = 'router';
     this.currentModel = null;
+    console.log(`[LlamaServer] Router launch plan: port=${this.port} modelsDir=${modelsDir} maxModels=${options?.maxModels ?? 2} flashAttn=${options?.flashAttn !== false} presetPath=${options?.presetPath || '(none)'}`);
 
     const args: string[] = [
       '--host', '127.0.0.1',

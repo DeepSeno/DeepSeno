@@ -1,6 +1,29 @@
 import type { ChatWithToolsOptions, ChatWithToolsResult, LLMClient, LocalGenerateOptions } from './llm-client';
 
-const DEFAULT_TIMEOUT = 300_000;
+const CLOUD_REQUEST_TIMEOUT_MS = 300_000;
+const CLOUD_STREAM_TIMEOUT_MS = 600_000;
+
+export function isLocalOpenAIBaseUrl(baseUrl: string): boolean {
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+  } catch {
+    return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(baseUrl);
+  }
+}
+
+function createRequestAbort(timeoutMs: number | null, signal?: AbortSignal): { signal?: AbortSignal; cleanup: () => void } {
+  if (timeoutMs === null) {
+    return { signal, cleanup: () => {} };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+    cleanup: () => clearTimeout(timer),
+  };
+}
 
 /** Strip <think>...</think> blocks from thinking model output (Doubao-Seed, DeepSeek-R1, etc.). */
 function stripThinkTags(text: string): string {
@@ -45,11 +68,22 @@ export class OpenAIClient implements LLMClient {
     this.apiKey = apiKey;
   }
 
+  private getRequestTimeoutMs(stream = false): number | null {
+    return isLocalOpenAIBaseUrl(this.baseUrl)
+      ? null
+      : stream ? CLOUD_STREAM_TIMEOUT_MS : CLOUD_REQUEST_TIMEOUT_MS;
+  }
+
   async generate(options: LocalGenerateOptions): Promise<string> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
+    const timeoutMs = this.getRequestTimeoutMs(false);
+    const abort = createRequestAbort(timeoutMs);
+    const startedAt = Date.now();
+    const endpoint = timeoutMs === null ? 'local' : 'cloud';
     try {
-      console.log(`[OpenAI] generate → ${options.model} (${options.prompt.length} chars)`);
+      console.log(`[OpenAI] generate start model=${options.model} endpoint=${endpoint} timeoutMs=${timeoutMs ?? 'none'} promptChars=${options.prompt.length} imageCount=${options.images?.length || 0}`);
+      if (timeoutMs === null) {
+        console.log(`[OpenAI] local generate will wait for llama-server model loading until response is ready model=${options.model}`);
+      }
       const messages: Array<{ role: string; content: any }> = [];
       if (options.system) {
         messages.push({ role: 'system', content: options.system });
@@ -83,20 +117,26 @@ export class OpenAIClient implements LLMClient {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal: abort.signal,
       });
+      console.log(`[OpenAI] generate response model=${options.model} endpoint=${endpoint} status=${res.status} elapsedMs=${Date.now() - startedAt}`);
 
       if (!res.ok) {
-        throw new Error(`OpenAI generate failed: ${res.status} ${await res.text()}`);
+        const body = await res.text();
+        console.warn(`[OpenAI] generate failed response model=${options.model} status=${res.status} body=${body.slice(0, 300)}`);
+        throw new Error(`OpenAI generate failed: ${res.status} ${body}`);
       }
       const data: any = await res.json();
       // Strip reasoning_content (Volcengine) or <think> tags from thinking models
       const raw = data.choices?.[0]?.message?.content || '';
       const content = stripThinkTags(raw);
-      console.log(`[OpenAI] generate done (${content.length} chars)`);
+      console.log(`[OpenAI] generate done model=${options.model} endpoint=${endpoint} chars=${content.length} elapsedMs=${Date.now() - startedAt}`);
       return content;
+    } catch (err: any) {
+      console.warn(`[OpenAI] generate exception model=${options.model} endpoint=${endpoint} elapsedMs=${Date.now() - startedAt} error=${err?.message || String(err)}`);
+      throw err;
     } finally {
-      clearTimeout(timer);
+      abort.cleanup();
     }
   }
 
@@ -105,14 +145,17 @@ export class OpenAIClient implements LLMClient {
     onChunk: (text: string) => void,
     signal?: AbortSignal,
   ): Promise<string> {
-    const STREAM_TIMEOUT = 600_000; // 10 minutes
-    const internal = new AbortController();
-    const timer = setTimeout(() => internal.abort(), STREAM_TIMEOUT);
-    const combined = signal
-      ? AbortSignal.any([internal.signal, signal])
-      : internal.signal;
+    const timeoutMs = this.getRequestTimeoutMs(true);
+    const abort = createRequestAbort(timeoutMs, signal);
+    const startedAt = Date.now();
+    const endpoint = timeoutMs === null ? 'local' : 'cloud';
+    let firstChunkLogged = false;
 
     try {
+      console.log(`[OpenAI] stream start model=${options.model} endpoint=${endpoint} timeoutMs=${timeoutMs ?? 'none'} promptChars=${options.prompt.length} imageCount=${options.images?.length || 0} externalSignal=${Boolean(signal)}`);
+      if (timeoutMs === null) {
+        console.log(`[OpenAI] local stream will wait for llama-server model loading until first token is ready model=${options.model}`);
+      }
       const messages: Array<{ role: string; content: any }> = [];
       if (options.system) {
         messages.push({ role: 'system', content: options.system });
@@ -145,11 +188,14 @@ export class OpenAIClient implements LLMClient {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(body),
-        signal: combined,
+        signal: abort.signal,
       });
+      console.log(`[OpenAI] stream response model=${options.model} endpoint=${endpoint} status=${res.status} elapsedMs=${Date.now() - startedAt}`);
 
       if (!res.ok) {
-        throw new Error(`OpenAI stream failed: ${res.status} ${await res.text()}`);
+        const body = await res.text();
+        console.warn(`[OpenAI] stream failed response model=${options.model} status=${res.status} body=${body.slice(0, 300)}`);
+        throw new Error(`OpenAI stream failed: ${res.status} ${body}`);
       }
 
       const reader = res.body!.getReader();
@@ -159,6 +205,10 @@ export class OpenAIClient implements LLMClient {
       const processLine = (line: string) => {
         const content = parseOpenAIStreamLine(line);
         if (content) {
+          if (!firstChunkLogged) {
+            firstChunkLogged = true;
+            console.log(`[OpenAI] stream first chunk model=${options.model} endpoint=${endpoint} elapsedMs=${Date.now() - startedAt}`);
+          }
           fullText += content;
           onChunk(content);
         }
@@ -176,9 +226,14 @@ export class OpenAIClient implements LLMClient {
         }
       }
       if (buffer.trim()) processLine(buffer);
-      return stripThinkTags(fullText);
+      const result = stripThinkTags(fullText);
+      console.log(`[OpenAI] stream done model=${options.model} endpoint=${endpoint} chars=${result.length} elapsedMs=${Date.now() - startedAt}`);
+      return result;
+    } catch (err: any) {
+      console.warn(`[OpenAI] stream exception model=${options.model} endpoint=${endpoint} elapsedMs=${Date.now() - startedAt} error=${err?.message || String(err)}`);
+      throw err;
     } finally {
-      clearTimeout(timer);
+      abort.cleanup();
     }
   }
 
@@ -213,10 +268,16 @@ export class OpenAIClient implements LLMClient {
   }
 
   async chatWithTools(options: ChatWithToolsOptions): Promise<ChatWithToolsResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
+    const timeoutMs = this.getRequestTimeoutMs(false);
+    const abort = createRequestAbort(timeoutMs);
+    const startedAt = Date.now();
+    const endpoint = timeoutMs === null ? 'local' : 'cloud';
     try {
       const { model, messages, tools, temperature, num_ctx } = options;
+      console.log(`[OpenAI] chatWithTools start model=${model} endpoint=${endpoint} timeoutMs=${timeoutMs ?? 'none'} messages=${messages.length} tools=${tools.length}`);
+      if (timeoutMs === null) {
+        console.log(`[OpenAI] local chatWithTools will wait for llama-server model loading until response is ready model=${model}`);
+      }
       const openaiTools = tools.map((t) => ({
         type: 'function' as const,
         function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
@@ -250,9 +311,14 @@ export class OpenAIClient implements LLMClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.apiKey}` },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal: abort.signal,
       });
-      if (!res.ok) throw new Error(`OpenAI chat failed: ${res.status} ${await res.text()}`);
+      console.log(`[OpenAI] chatWithTools response model=${model} endpoint=${endpoint} status=${res.status} elapsedMs=${Date.now() - startedAt}`);
+      if (!res.ok) {
+        const body = await res.text();
+        console.warn(`[OpenAI] chatWithTools failed response model=${model} status=${res.status} body=${body.slice(0, 300)}`);
+        throw new Error(`OpenAI chat failed: ${res.status} ${body}`);
+      }
 
       const data: any = await res.json();
       const choice = data.choices?.[0]?.message;
@@ -275,26 +341,51 @@ export class OpenAIClient implements LLMClient {
           }
         }
       }
+      console.log(`[OpenAI] chatWithTools done model=${model} endpoint=${endpoint} contentChars=${content.length} toolCalls=${toolCalls.length} elapsedMs=${Date.now() - startedAt}`);
       return { content, toolCalls };
+    } catch (err: any) {
+      console.warn(`[OpenAI] chatWithTools exception model=${options.model} endpoint=${endpoint} elapsedMs=${Date.now() - startedAt} error=${err?.message || String(err)}`);
+      throw err;
     } finally {
-      clearTimeout(timer);
+      abort.cleanup();
     }
   }
 
   async embed(model: string, input: string): Promise<number[]> {
-    const res = await fetch(`${this.baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({ model, input }),
-    });
-    if (!res.ok) {
-      throw new Error(`OpenAI embed failed: ${res.status} ${await res.text()}`);
+    const timeoutMs = this.getRequestTimeoutMs(false);
+    const abort = createRequestAbort(timeoutMs);
+    const startedAt = Date.now();
+    const endpoint = timeoutMs === null ? 'local' : 'cloud';
+    try {
+      console.log(`[OpenAI] embed start model=${model} endpoint=${endpoint} timeoutMs=${timeoutMs ?? 'none'} inputChars=${input.length}`);
+      if (timeoutMs === null) {
+        console.log(`[OpenAI] local embed will wait for llama-server embedding model loading until response is ready model=${model}`);
+      }
+      const res = await fetch(`${this.baseUrl}/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({ model, input }),
+        signal: abort.signal,
+      });
+      console.log(`[OpenAI] embed response model=${model} endpoint=${endpoint} status=${res.status} elapsedMs=${Date.now() - startedAt}`);
+      if (!res.ok) {
+        const body = await res.text();
+        console.warn(`[OpenAI] embed failed response model=${model} status=${res.status} body=${body.slice(0, 300)}`);
+        throw new Error(`OpenAI embed failed: ${res.status} ${body}`);
+      }
+      const data: any = await res.json();
+      const embedding = data.data?.[0]?.embedding || [];
+      console.log(`[OpenAI] embed done model=${model} endpoint=${endpoint} dimensions=${Array.isArray(embedding) ? embedding.length : 0} elapsedMs=${Date.now() - startedAt}`);
+      return embedding;
+    } catch (err: any) {
+      console.warn(`[OpenAI] embed exception model=${model} endpoint=${endpoint} elapsedMs=${Date.now() - startedAt} error=${err?.message || String(err)}`);
+      throw err;
+    } finally {
+      abort.cleanup();
     }
-    const data: any = await res.json();
-    return data.data?.[0]?.embedding || [];
   }
 
   async isAvailable(model?: string): Promise<boolean> {

@@ -1,6 +1,6 @@
 import { toLocalModelApiName as toApiName } from '../../../../main/llm/model-names';
 
-export const LOCAL_MODEL_TEST_TIMEOUT_MS = 120_000;
+export const LOCAL_MODEL_TEST_TIMEOUT_MS = 30 * 60_000;
 
 export function toLocalModelApiName(modelName: string): string {
   return toApiName(modelName);

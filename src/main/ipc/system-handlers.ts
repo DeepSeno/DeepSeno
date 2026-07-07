@@ -18,9 +18,16 @@ import { getDefaultPrompts } from '../llm/default-prompts';
 import { findModel, getDownloadUrl } from '../llm/gguf-model-catalog';
 import { type GGUFDownloadState, ggufDownloadStateStore } from '../llm/gguf-download-state';
 import { hasGGUFMagic, readGGUFFileInfo, validateGGUFFilePath } from '../llm/gguf-model-files';
+import {
+  GGUF_DOWNLOAD_MAX_ATTEMPTS,
+  getGGUFDownloadRetryDelayMs,
+  isAbortError,
+  isRetryableHttpStatus,
+  isTransientDownloadError,
+} from '../llm/download-retry';
 import { prepareLlamaRouterRuntime } from '../llm/llama-router-runtime';
 import { toLocalModelApiName } from '../llm/model-names';
-import { appLogStore, logsToText } from '../logging/log-bus';
+import { appendAppLog, appLogStore, logsToText } from '../logging/log-bus';
 
 // Module-level state for tracking active downloads (survives page navigation)
 let sherpaDlState: { model: string; completed: number; total: number; status: string } | null = null;
@@ -53,6 +60,48 @@ function updateGGUFState(
   const state = ggufDownloadStateStore.update(model, patch);
   emitGGUFState(ctx, state);
   return state;
+}
+
+function logModelDownload(
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  details?: unknown,
+): void {
+  appendAppLog(level, 'main', 'model-download', message, details);
+}
+
+function logModelRouter(
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  details?: unknown,
+): void {
+  appendAppLog(level, 'main', 'model-router', message, details);
+}
+
+function logLocalModel(
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  details?: unknown,
+): void {
+  appendAppLog(level, 'main', 'local-model', message, details);
+}
+
+function errorLogDetails(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    return { name: err.name, message: err.message, stack: err.stack };
+  }
+  return { message: String(err) };
+}
+
+function responseHeaderDetails(res: Response): Record<string, string | number | boolean | null> {
+  return {
+    status: res.status,
+    ok: res.ok,
+    contentLength: res.headers.get('content-length'),
+    contentRange: res.headers.get('content-range'),
+    acceptRanges: res.headers.get('accept-ranges'),
+    contentType: res.headers.get('content-type'),
+  };
 }
 
 function getPartialDownloadSize(filePath: string): number {
@@ -95,7 +144,41 @@ function promoteValidatedDownload(tmpPath: string, destPath: string): void {
   }
 }
 
-/** Download a GGUF file from HuggingFace (or mirror) with progress reporting. */
+function createAbortError(): Error {
+  const abortError = new Error('cancelled');
+  abortError.name = 'AbortError';
+  return abortError;
+}
+
+function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      cleanup();
+      resolve();
+    }, ms);
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function isResumableGGUFPartial(filePath: string, expectedBytes: number): boolean {
+  const info = readGGUFFileInfo(filePath);
+  return Boolean(info && info.size > 0 && info.size < expectedBytes && hasGGUFMagic(info.header));
+}
+
+/** Download a GGUF file from ModelScope with progress reporting. */
 async function downloadGGUF(
   modelId: string,
   ctx: IpcContext,
@@ -110,7 +193,19 @@ async function downloadGGUF(
   const tmpPath = destPath + '.downloading';
   fs.mkdirSync(modelsDir, { recursive: true });
 
+  logModelDownload('info', 'GGUF download requested', {
+    modelId,
+    fileName: entry.fileName,
+    expectedBytes: entry.fileSizeBytes,
+    modelsDir,
+    force,
+  });
+
   if (force) {
+    logModelDownload('info', 'Force redownload requested; removing partial GGUF temp file', {
+      modelId,
+      tmpPath,
+    });
     try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
   }
 
@@ -119,72 +214,257 @@ async function downloadGGUF(
     const validation = validateGGUFFilePath(destPath, entry.fileSizeBytes);
     if (validation.ok) {
       console.log(`[GGUF] Model already downloaded: ${entry.fileName} (${validation.size} bytes)`);
+      logModelDownload('info', 'Existing GGUF file passed validation; skipping download', {
+        modelId,
+        fileName: entry.fileName,
+        actualBytes: validation.size,
+        expectedBytes: entry.fileSizeBytes,
+      });
+      if (fs.existsSync(tmpPath)) {
+        try {
+          fs.unlinkSync(tmpPath);
+          logModelDownload('info', 'Removed stale GGUF temp file because validated model already exists', {
+            modelId,
+            tmpPath,
+          });
+        } catch (err) {
+          logModelDownload('warn', 'Failed to remove stale GGUF temp file after validated model skip', {
+            modelId,
+            tmpPath,
+            ...errorLogDetails(err),
+          });
+        }
+      }
       return { success: true };
     }
     console.warn(`[GGUF] Existing model is invalid, redownloading: ${entry.fileName} (${validation.error})`);
+    logModelDownload('warn', 'Existing GGUF file failed validation; redownloading', {
+      modelId,
+      fileName: entry.fileName,
+      actualBytes: validation.size,
+      expectedBytes: entry.fileSizeBytes,
+      error: validation.error,
+    });
   }
 
-  const mirrors = ['', 'hf-mirror', 'ghfast'];
+  const sources = [{ mirror: 'modelscope', label: 'ModelScope' }];
   const errors: string[] = [];
 
-  for (const mirror of mirrors) {
-    const url = getDownloadUrl(entry, mirror);
-    const mirrorLabel = mirror || 'modelscope';
-    const resumeFrom = force ? 0 : getPartialDownloadSize(tmpPath);
-    const headers: Record<string, string> = { 'User-Agent': 'DeepSeno/1.0' };
-    if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
+  for (const source of sources) {
+    const url = getDownloadUrl(entry, source.mirror);
+    const mirrorLabel = source.label;
+    let lastError: string | undefined;
 
-    console.log(`[GGUF] Downloading ${entry.id} from ${mirrorLabel}: ${url}${resumeFrom > 0 ? ` (resume from ${resumeFrom})` : ''}`);
+    for (let attempt = 1; attempt <= GGUF_DOWNLOAD_MAX_ATTEMPTS; attempt++) {
+      const resumeFrom = getPartialDownloadSize(tmpPath);
+      const headers: Record<string, string> = { 'User-Agent': 'DeepSeno/1.0' };
+      if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
 
-    try {
-      let res = await fetch(url, {
-        signal,
-        headers,
-      });
-
-      if (res.status === 416 && resumeFrom > 0) {
-        const validation = validateGGUFFilePath(tmpPath, entry.fileSizeBytes);
-        if (validation.ok) {
-          promoteValidatedDownload(tmpPath, destPath);
-          return { success: true };
-        }
-        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-        res = await fetch(url, {
-          signal,
-          headers: { 'User-Agent': 'DeepSeno/1.0' },
-        });
-      }
-
-      if (!res.ok) {
-        errors.push(`${mirrorLabel}: HTTP ${res.status}`);
-        continue;
-      }
-
-      const shouldAppend = resumeFrom > 0 && res.status === 206;
-      if (resumeFrom > 0 && !shouldAppend) {
-        console.warn(`[GGUF] ${mirrorLabel} ignored Range request, restarting ${entry.fileName}`);
-        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-      }
-
-      const result = await streamToFile(
-        res,
+      console.log(`[GGUF] Downloading ${entry.id} from ${mirrorLabel}: ${url}${resumeFrom > 0 ? ` (resume from ${resumeFrom})` : ''}`);
+      logModelDownload('info', 'GGUF source selected', {
+        modelId: entry.id,
+        source: mirrorLabel,
+        url,
+        attempt,
+        maxAttempts: GGUF_DOWNLOAD_MAX_ATTEMPTS,
+        resumeFrom,
+        expectedBytes: entry.fileSizeBytes,
         tmpPath,
         destPath,
-        entry,
-        ctx,
-        signal,
-        shouldAppend ? resumeFrom : 0,
-      );
-      if (result.success) return result;
-      errors.push(`${mirrorLabel}: ${result.error || 'Download failed'}`);
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
-        return { success: false, error: 'cancelled' };
+      });
+
+      try {
+        let res = await fetch(url, {
+          signal,
+          headers,
+        });
+        logModelDownload('info', 'GGUF download response received', {
+          modelId: entry.id,
+          source: mirrorLabel,
+          attempt,
+          resumeFrom,
+          ...responseHeaderDetails(res),
+        });
+
+        if (res.status === 416 && resumeFrom > 0) {
+          logModelDownload('warn', 'GGUF server rejected resume range; validating partial file', {
+            modelId: entry.id,
+            attempt,
+            resumeFrom,
+            ...responseHeaderDetails(res),
+          });
+          const validation = validateGGUFFilePath(tmpPath, entry.fileSizeBytes);
+          if (validation.ok) {
+            logModelDownload('info', 'Partial GGUF file is complete after 416; promoting temp file', {
+              modelId: entry.id,
+              actualBytes: validation.size,
+              expectedBytes: entry.fileSizeBytes,
+            });
+            promoteValidatedDownload(tmpPath, destPath);
+            return { success: true };
+          }
+          logModelDownload('warn', 'Partial GGUF file failed validation after 416; restarting download', {
+            modelId: entry.id,
+            actualBytes: validation.size,
+            expectedBytes: entry.fileSizeBytes,
+            error: validation.error,
+          });
+          try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+          res = await fetch(url, {
+            signal,
+            headers: { 'User-Agent': 'DeepSeno/1.0' },
+          });
+          logModelDownload('info', 'GGUF restart response received after failed resume', {
+            modelId: entry.id,
+            source: mirrorLabel,
+            attempt,
+            ...responseHeaderDetails(res),
+          });
+        }
+
+        if (!res.ok) {
+          lastError = `HTTP ${res.status}`;
+          logModelDownload(isRetryableHttpStatus(res.status) ? 'warn' : 'error', 'GGUF download HTTP response is not OK', {
+            modelId: entry.id,
+            source: mirrorLabel,
+            attempt,
+            retryable: isRetryableHttpStatus(res.status),
+            ...responseHeaderDetails(res),
+          });
+          if (isRetryableHttpStatus(res.status) && attempt < GGUF_DOWNLOAD_MAX_ATTEMPTS) {
+            const delayMs = getGGUFDownloadRetryDelayMs(attempt);
+            logModelDownload('warn', 'GGUF download HTTP failure will be retried', {
+              modelId: entry.id,
+              source: mirrorLabel,
+              attempt,
+              nextAttempt: attempt + 1,
+              delayMs,
+              partialBytes: getPartialDownloadSize(tmpPath),
+            });
+            await delayWithAbort(delayMs, signal);
+            continue;
+          }
+          break;
+        }
+
+        const currentResumeFrom = getPartialDownloadSize(tmpPath);
+        const shouldAppend = currentResumeFrom > 0 && res.status === 206;
+        if (currentResumeFrom > 0 && !shouldAppend) {
+          console.warn(`[GGUF] ${mirrorLabel} ignored Range request, restarting ${entry.fileName}`);
+          logModelDownload('warn', 'GGUF server ignored Range request; restarting from zero', {
+            modelId: entry.id,
+            source: mirrorLabel,
+            attempt,
+            resumeFrom: currentResumeFrom,
+            status: res.status,
+          });
+          try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        }
+
+        const result = await streamToFile(
+          res,
+          tmpPath,
+          destPath,
+          entry,
+          ctx,
+          signal,
+          shouldAppend ? currentResumeFrom : 0,
+        );
+        if (result.success) return result;
+        lastError = result.error || 'Download failed';
+        logModelDownload(result.resumable ? 'warn' : 'error', 'GGUF stream finished but validation failed', {
+          modelId: entry.id,
+          source: mirrorLabel,
+          attempt,
+          resumable: Boolean(result.resumable),
+          completed: result.completed,
+          error: result.error,
+        });
+        if (result.resumable && attempt < GGUF_DOWNLOAD_MAX_ATTEMPTS) {
+          const delayMs = getGGUFDownloadRetryDelayMs(attempt);
+          updateGGUFState(ctx, entry.id, {
+            status: 'downloading',
+            completed: result.completed || getPartialDownloadSize(tmpPath),
+            total: entry.fileSizeBytes,
+          });
+          logModelDownload('warn', 'GGUF incomplete stream will be resumed', {
+            modelId: entry.id,
+            source: mirrorLabel,
+            attempt,
+            nextAttempt: attempt + 1,
+            delayMs,
+            partialBytes: getPartialDownloadSize(tmpPath),
+          });
+          await delayWithAbort(delayMs, signal);
+          continue;
+        }
+        break;
+      } catch (err: any) {
+        if (isAbortError(err)) {
+          logModelDownload('warn', 'GGUF download cancelled', {
+            modelId: entry.id,
+            source: mirrorLabel,
+            attempt,
+            resumeFrom,
+          });
+          return { success: false, error: 'cancelled' };
+        }
+
+        lastError = err.message || 'Download failed';
+        const retryable = isTransientDownloadError(err);
+        logModelDownload(retryable ? 'warn' : 'error', 'GGUF download attempt threw an exception', {
+          modelId: entry.id,
+          source: mirrorLabel,
+          attempt,
+          retryable,
+          resumeFrom,
+          partialBytes: getPartialDownloadSize(tmpPath),
+          ...errorLogDetails(err),
+        });
+
+        if (retryable && attempt < GGUF_DOWNLOAD_MAX_ATTEMPTS) {
+          const delayMs = getGGUFDownloadRetryDelayMs(attempt);
+          updateGGUFState(ctx, entry.id, {
+            status: 'downloading',
+            completed: getPartialDownloadSize(tmpPath),
+            total: entry.fileSizeBytes,
+          });
+          logModelDownload('warn', 'GGUF transient download failure will be retried with resume', {
+            modelId: entry.id,
+            source: mirrorLabel,
+            attempt,
+            nextAttempt: attempt + 1,
+            delayMs,
+            partialBytes: getPartialDownloadSize(tmpPath),
+          });
+          await delayWithAbort(delayMs, signal);
+          continue;
+        }
+        break;
       }
-      errors.push(`${mirrorLabel}: ${err.message || 'Download failed'}`);
     }
+
+    errors.push(`${mirrorLabel}: ${lastError || 'Download failed'}`);
   }
 
+  logModelDownload('error', 'GGUF download failed for every configured source', {
+    modelId: entry.id,
+    errors,
+  });
+  const existingValidation = validateGGUFFilePath(destPath, entry.fileSizeBytes);
+  if (existingValidation.ok) {
+    logModelDownload('warn', 'GGUF download failed but an existing validated model file was preserved', {
+      modelId: entry.id,
+      fileName: entry.fileName,
+      actualBytes: existingValidation.size,
+      expectedBytes: entry.fileSizeBytes,
+      errors,
+    });
+    if (fs.existsSync(tmpPath)) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    }
+    return { success: true };
+  }
   return {
     success: false,
     error: errors.length > 0 ? errors.join(' | ') : 'Download failed',
@@ -215,14 +495,28 @@ function isEmbedModelName(modelName: string): boolean {
   return normalized.includes('bge') || findModel(modelName)?.type === 'embed';
 }
 
-async function smokeTestLocalModel(baseUrl: string, modelName: string, signal: AbortSignal): Promise<void> {
+async function smokeTestLocalModel(baseUrl: string, modelName: string, signal?: AbortSignal): Promise<void> {
   const apiModel = toLocalModelApiName(modelName);
+  const startedAt = Date.now();
+  logLocalModel('info', 'Local model smoke test requested; waiting until model is ready', {
+    requestedModel: modelName,
+    apiModel,
+    baseUrl,
+    type: isEmbedModelName(modelName) ? 'embedding' : 'chat',
+    hasAbortSignal: Boolean(signal),
+  });
   if (isEmbedModelName(modelName)) {
     const res = await fetch(`${baseUrl}/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: apiModel, input: 'hello' }),
       signal,
+    });
+    logLocalModel(res.ok ? 'info' : 'error', 'Local embedding smoke test response received', {
+      requestedModel: modelName,
+      apiModel,
+      elapsedMs: Date.now() - startedAt,
+      ...responseHeaderDetails(res),
     });
     if (!res.ok) {
       throw new Error(`Embedding smoke test failed: HTTP ${res.status} ${await res.text()}`);
@@ -232,6 +526,12 @@ async function smokeTestLocalModel(baseUrl: string, modelName: string, signal: A
     if (!Array.isArray(embedding) || embedding.length === 0) {
       throw new Error('Embedding smoke test returned an empty vector');
     }
+    logLocalModel('info', 'Local embedding smoke test passed', {
+      requestedModel: modelName,
+      apiModel,
+      elapsedMs: Date.now() - startedAt,
+      dimensions: embedding.length,
+    });
     return;
   }
 
@@ -248,6 +548,12 @@ async function smokeTestLocalModel(baseUrl: string, modelName: string, signal: A
     }),
     signal,
   });
+  logLocalModel(res.ok ? 'info' : 'error', 'Local chat smoke test response received', {
+    requestedModel: modelName,
+    apiModel,
+    elapsedMs: Date.now() - startedAt,
+    ...responseHeaderDetails(res),
+  });
   if (!res.ok) {
     throw new Error(`Chat smoke test failed: HTTP ${res.status} ${await res.text()}`);
   }
@@ -256,14 +562,32 @@ async function smokeTestLocalModel(baseUrl: string, modelName: string, signal: A
   if (!msg?.content && !msg?.reasoning_content) {
     throw new Error('Chat smoke test returned an empty response');
   }
+  logLocalModel('info', 'Local chat smoke test passed', {
+    requestedModel: modelName,
+    apiModel,
+    elapsedMs: Date.now() - startedAt,
+    contentChars: typeof msg.content === 'string' ? msg.content.length : 0,
+    reasoningChars: typeof msg.reasoning_content === 'string' ? msg.reasoning_content.length : 0,
+  });
 }
 
 async function refreshLocalRouterAfterModelChange(ctx: IpcContext): Promise<void> {
   const settings = loadSettings();
-  if (settings.llmProvider !== 'local') return;
+  if (settings.llmProvider !== 'local') {
+    logModelRouter('info', 'Skipping llama-server router refresh because provider is not local', {
+      provider: settings.llmProvider,
+    });
+    return;
+  }
 
   const server = ensureLlamaServer();
   const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
+  logModelRouter('info', 'Refreshing llama-server router after model download', {
+    modelsDir,
+    presetPath,
+    maxModels: 2,
+    flashAttn: true,
+  });
   const { port } = await server.startRouter(modelsDir, {
     maxModels: 2,
     flashAttn: true,
@@ -271,6 +595,9 @@ async function refreshLocalRouterAfterModelChange(ctx: IpcContext): Promise<void
   });
   updateSettings({ llamaServerPort: port });
   ctx.resetLLMClient();
+  logModelRouter('info', 'llama-server router refresh completed after model download', {
+    port,
+  });
 }
 
 /** Stream HTTP response body to a temp file, rename on completion. */
@@ -282,7 +609,7 @@ async function streamToFile(
   ctx: IpcContext,
   signal?: AbortSignal,
   resumeFrom = 0,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; resumable?: boolean; completed?: number }> {
   const contentLength = res.headers.get('content-length');
   const rangeTotal = parseContentRangeTotal(res.headers.get('content-range'));
   const responseBytes = contentLength ? parseInt(contentLength, 10) : 0;
@@ -296,6 +623,22 @@ async function streamToFile(
   const ws = fs.createWriteStream(tmpPath, { flags: resumeFrom > 0 ? 'a' : 'w' });
   let completed = resumeFrom;
   let lastEmit = 0;
+  let nextLoggedPercent = resumeFrom > 0 && totalBytes > 0
+    ? Math.min(100, Math.floor((resumeFrom / totalBytes) * 100) + 10)
+    : 10;
+
+  logModelDownload('info', 'GGUF stream started', {
+    modelId: entry.id,
+    fileName: entry.fileName,
+    tmpPath,
+    destPath,
+    resumeFrom,
+    responseBytes,
+    rangeTotal,
+    expectedBytes: entry.fileSizeBytes,
+    totalBytes,
+    contentLength,
+  });
 
   // Catch stream errors to prevent uncaught exceptions from crashing the process
   let streamError: Error | null = null;
@@ -305,9 +648,7 @@ async function streamToFile(
     while (true) {
       if (signal?.aborted) {
         reader.cancel().catch(() => {});
-        const abortError = new Error('cancelled');
-        abortError.name = 'AbortError';
-        throw abortError;
+        throw createAbortError();
       }
 
       if (streamError) throw streamError;
@@ -348,6 +689,20 @@ async function streamToFile(
           total: totalBytes,
         });
       }
+
+      if (totalBytes > 0) {
+        const percent = Math.floor((completed / totalBytes) * 100);
+        if (percent >= nextLoggedPercent || percent >= 100) {
+          logModelDownload('info', 'GGUF download progress checkpoint', {
+            modelId: entry.id,
+            fileName: entry.fileName,
+            completed,
+            total: totalBytes,
+            percent: Math.min(100, percent),
+          });
+          nextLoggedPercent += 10;
+        }
+      }
     }
 
     ws.end();
@@ -359,10 +714,24 @@ async function streamToFile(
     const validation = validateGGUFFilePath(tmpPath, entry.fileSizeBytes);
     if (!validation.ok) {
       const preview = createDownloadErrorPreview(tmpPath);
-      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      const resumable = isResumableGGUFPartial(tmpPath, entry.fileSizeBytes);
+      logModelDownload('error', 'GGUF validation failed after download', {
+        modelId: entry.id,
+        fileName: entry.fileName,
+        actualBytes: validation.size,
+        expectedBytes: entry.fileSizeBytes,
+        error: validation.error,
+        preview,
+        resumable,
+      });
+      if (!resumable) {
+        try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      }
       return {
         success: false,
         error: `${validation.error || 'Model verification failed'}${preview}`,
+        resumable,
+        completed: validation.size,
       };
     }
 
@@ -370,6 +739,13 @@ async function streamToFile(
     completed = validation.size;
 
     console.log(`[GGUF] Download complete: ${entry.fileName} (${completed} bytes)`);
+    logModelDownload('info', 'GGUF validation passed and temp file promoted', {
+      modelId: entry.id,
+      fileName: entry.fileName,
+      actualBytes: validation.size,
+      expectedBytes: entry.fileSizeBytes,
+      destPath,
+    });
 
     updateGGUFState(ctx, entry.id, {
       status: 'success',
@@ -379,6 +755,13 @@ async function streamToFile(
 
     return { success: true };
   } catch (err: any) {
+    logModelDownload(err?.name === 'AbortError' ? 'warn' : 'error', 'GGUF stream failed', {
+      modelId: entry.id,
+      fileName: entry.fileName,
+      completed,
+      total: totalBytes,
+      ...errorLogDetails(err),
+    });
     reader.cancel().catch(() => {});
     ws.destroy();
     throw err;
@@ -501,13 +884,23 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         // Fire-and-forget: restart + prewarm in background so the UI
         // doesn't freeze on the wizard's "start using" button.
         const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
+        logModelRouter('info', 'Settings changed; restarting llama-server router in background', {
+          modelsDir,
+          presetPath,
+          maxModels: 2,
+          flashAttn: true,
+        });
         server.startRouter(modelsDir, {
           maxModels: 2,
           flashAttn: true,
           presetPath,
         }).then(async ({ port }) => {
           console.log(`[Settings] llama-server restarted on port ${port}`);
+          logModelRouter('info', 'Settings-triggered llama-server router restart succeeded', {
+            port,
+          });
           updateSettings({ llamaServerPort: port });
+          ctx.resetLLMClient();
 
           const s = loadSettings();
           const chatModel = getLLMModel(s);
@@ -515,11 +908,22 @@ export function registerSystemHandlers(ctx: IpcContext): void {
           const base = `http://127.0.0.1:${port}/v1`;
           for (const model of [chatModel, embedModel]) {
             try {
-              await smokeTestLocalModel(base, model, AbortSignal.timeout(30_000));
-            } catch { /* ignore */ }
+              logLocalModel('info', 'Settings-triggered local model prewarm starting', {
+                model,
+                port,
+              });
+              await smokeTestLocalModel(base, model);
+            } catch (err) {
+              logLocalModel('warn', 'Settings-triggered local model prewarm failed', {
+                model,
+                port,
+                ...errorLogDetails(err),
+              });
+            }
           }
         }).catch((err) => {
           console.error('[Settings] llama-server restart failed:', err);
+          logModelRouter('error', 'Settings-triggered llama-server router restart failed', errorLogDetails(err));
         });
       }
 
@@ -699,14 +1103,31 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
     const entry = findModel(modelName);
     if (!entry) {
+      logModelDownload('warn', 'Pull model rejected unknown model id', {
+        modelName,
+        force: Boolean(force),
+      });
       return { success: false, model: modelName, error: `Unknown model: ${modelName}` };
     }
 
     const fileKey = path.join(getLLMModelsDir(), entry.fileName);
     const active = activeGGUFDownloads.get(entry.id) || activeGGUFFileDownloads.get(fileKey);
     if (active) {
+      logModelDownload('info', 'Pull model joined existing active download', {
+        modelId: entry.id,
+        fileKey,
+        force: Boolean(force),
+      });
       return active.promise;
     }
+
+    logModelDownload('info', 'Pull model request accepted', {
+      modelId: entry.id,
+      fileName: entry.fileName,
+      expectedBytes: entry.fileSizeBytes,
+      force: Boolean(force),
+      fileKey,
+    });
 
     const controller = new AbortController();
     const activeDownload: {
@@ -732,20 +1153,49 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         const result = await downloadGGUF(entry.id, ctx, controller.signal, !!force);
         if (result.success) {
           const current = ggufDownloadStateStore.get(entry.id);
+          logModelDownload('info', 'Pull model download phase succeeded', {
+            modelId: entry.id,
+            completed: current?.completed,
+            total: current?.total,
+          });
           updateGGUFState(ctx, entry.id, {
             status: 'success',
             completed: current?.completed && current.completed > 0 ? current.completed : entry.fileSizeBytes,
             total: current?.total && current.total > 0 ? current.total : entry.fileSizeBytes,
           });
           try {
+            logModelRouter('info', 'Starting router refresh after successful pull model download', {
+              modelId: entry.id,
+            });
             await refreshLocalRouterAfterModelChange(ctx);
-          } catch (err) {
+          } catch (err: any) {
+            const message = err?.message || String(err);
+            const error = `模型已下载，但本地 AI 服务重启失败：${message}`;
             console.error('[PullModel] Failed to refresh llama-server after download:', err);
+            logModelRouter('error', 'Router refresh failed after successful pull model download', {
+              modelId: entry.id,
+              ...errorLogDetails(err),
+            });
+            updateGGUFState(ctx, entry.id, {
+              status: 'error',
+              completed: current?.completed && current.completed > 0 ? current.completed : entry.fileSizeBytes,
+              total: current?.total && current.total > 0 ? current.total : entry.fileSizeBytes,
+              error,
+            });
+            return { success: false, model: entry.id, error };
           }
+          logModelDownload('info', 'Pull model completed successfully', {
+            modelId: entry.id,
+          });
           return { success: true, model: entry.id };
         }
 
         const status = result.error === 'cancelled' ? 'cancelled' : 'error';
+        logModelDownload(status === 'cancelled' ? 'warn' : 'error', 'Pull model download phase failed', {
+          modelId: entry.id,
+          status,
+          error: result.error,
+        });
         updateGGUFState(ctx, entry.id, {
           status,
           completed: ggufDownloadStateStore.get(entry.id)?.completed ?? 0,
@@ -761,6 +1211,11 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         } else {
           console.error(`[PullModel] Error downloading "${entry.id}":`, err);
         }
+        logModelDownload(isCancelled ? 'warn' : 'error', 'Pull model threw while downloading', {
+          modelId: entry.id,
+          cancelled: isCancelled,
+          ...errorLogDetails(err),
+        });
         updateGGUFState(ctx, entry.id, {
           status,
           completed: ggufDownloadStateStore.get(entry.id)?.completed ?? 0,
@@ -773,6 +1228,10 @@ export function registerSystemHandlers(ctx: IpcContext): void {
           error: isCancelled ? 'cancelled' : (err.message || 'Unknown error'),
         };
       } finally {
+        logModelDownload('debug', 'Pull model cleanup', {
+          modelId: entry.id,
+          fileKey,
+        });
         const current = activeGGUFDownloads.get(entry.id);
         if (current?.controller === controller) {
           activeGGUFDownloads.delete(entry.id);
@@ -795,18 +1254,42 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       const requestedModel = typeof modelName === 'string' && modelName.trim()
         ? requireString(modelName, 'modelName', 200)
         : settings.localLlmModel || settings.llmModel || 'qwen3.5:4b';
+      logLocalModel('info', 'Local model test requested from UI', {
+        requestedModel,
+        explicitModel: Boolean(modelName),
+        provider: settings.llmProvider,
+      });
       const entry = findModel(requestedModel);
       if (entry) {
         const filePath = path.join(getLLMModelsDir(), entry.fileName);
         const validation = validateGGUFFilePath(filePath, entry.fileSizeBytes);
         if (!validation.ok) {
+          logLocalModel('warn', 'Local model test blocked by GGUF validation failure', {
+            requestedModel,
+            fileName: entry.fileName,
+            filePath,
+            expectedBytes: entry.fileSizeBytes,
+            actualBytes: validation.size,
+            error: validation.error,
+          });
           return { success: false, error: validation.error || 'Model file is not ready' };
         }
+        logLocalModel('info', 'Local model test GGUF validation passed', {
+          requestedModel,
+          fileName: entry.fileName,
+          filePath,
+          expectedBytes: entry.fileSizeBytes,
+          actualBytes: validation.size,
+        });
       }
 
       const server = ensureLlamaServer();
       let status = server.getStatus();
       if (!status.running || !status.port) {
+        logModelRouter('info', 'Local model test starting llama-server router because it is not running', {
+          requestedModel,
+          previousStatus: status,
+        });
         const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
         const started = await server.startRouter(modelsDir, {
           maxModels: 2,
@@ -814,26 +1297,43 @@ export function registerSystemHandlers(ctx: IpcContext): void {
           presetPath,
         });
         updateSettings({ llamaServerPort: started.port });
+        ctx.resetLLMClient();
         status = server.getStatus();
+        logModelRouter('info', 'Local model test llama-server router started', {
+          requestedModel,
+          port: started.port,
+          status,
+        });
       }
 
       if (!status.port) {
+        logModelRouter('error', 'Local model test failed because llama-server port is unavailable', {
+          requestedModel,
+          status,
+        });
         return { success: false, error: 'llama-server port is not available' };
       }
 
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 120_000);
-      try {
-        await smokeTestLocalModel(`http://127.0.0.1:${status.port}/v1`, requestedModel, controller.signal);
-      } finally {
-        clearTimeout(timer);
-      }
+      logLocalModel('info', 'Local model smoke test starting; request will wait while llama-server loads the model', {
+        requestedModel,
+        port: status.port,
+      });
+      await smokeTestLocalModel(`http://127.0.0.1:${status.port}/v1`, requestedModel);
 
+      logLocalModel('info', 'Local model test completed successfully', {
+        requestedModel,
+        port: status.port,
+      });
       return { success: true };
     } catch (err: any) {
       const message = err?.name === 'AbortError'
         ? 'Model test timed out'
         : err?.message || String(err);
+      logLocalModel('error', 'Local model test failed', {
+        modelName,
+        message,
+        ...errorLogDetails(err),
+      });
       return { success: false, error: message };
     }
   });
@@ -877,17 +1377,16 @@ export function registerSystemHandlers(ctx: IpcContext): void {
   ipcMain.handle('sherpa:downloadModels', async (_event, opts?: { mirror?: string; force?: boolean } | string) => {
     if (sherpaDownloadPromise) return sherpaDownloadPromise;
 
-    // Support both new object format and legacy string format
-    const mirror = typeof opts === 'object' ? opts?.mirror : opts;
+    // Support both new object format and legacy string format, but user-facing
+    // downloads are pinned to ModelScope.
+    const requestedMirror = typeof opts === 'object' ? opts?.mirror : opts;
     const force = typeof opts === 'object' ? opts?.force : false;
-    console.log(`[sherpa:downloadModels] mirror=${mirror}, force=${force}`);
+    console.log(`[sherpa:downloadModels] requestedMirror=${requestedMirror || 'default'}, force=${force}`);
 
     const engine = ctx.getSherpaEngine();
     const mm = engine.getModelManager();
 
-    // Apply mirror setting: use explicit arg if provided, otherwise auto-detect
-    const effectiveMirror = mirror ?? getSherpaModelMirror();
-    mm.setMirror(effectiveMirror as any);
+    mm.setMirror(getSherpaModelMirror());
 
     if (!force && mm.areAllModelsReady()) {
       console.log('[sherpa:downloadModels] All models ready, skipping');
@@ -1164,6 +1663,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         presetPath,
       });
       updateSettings({ llamaServerPort: port });
+      ctx.resetLLMClient();
       return { success: true, port };
     } catch (err: any) {
       return { success: false, error: err?.message || String(err) };

@@ -4,7 +4,7 @@ import { getSherpaModelsDir } from '../paths';
 
 // ─── Model Definitions ──────────────────────────────────────
 
-export type ModelMirror = '' | 'modelscope' | 'hf-mirror' | 'ghfast';
+export type ModelMirror = 'modelscope';
 
 export interface SherpaModelInfo {
   id: string;
@@ -12,8 +12,8 @@ export interface SherpaModelInfo {
   description: string;
   /** Approximate bytes used only for stable aggregate progress display. */
   downloadSizeBytes?: number;
-  /** Files expected in the model subdirectory. url is only needed for direct GitHub downloads. */
-  files: { name: string; url?: string; minSize?: number }[];
+  /** Files expected in the model subdirectory. msFilePath is used when ModelScope path differs from local filename. */
+  files: { name: string; url?: string; minSize?: number; msFilePath?: string }[];
   /** Subdirectory under sherpa-models/ */
   subdir: string;
   /** If the model is distributed as a tar.bz2 archive on GitHub */
@@ -29,7 +29,6 @@ export interface SherpaModelInfo {
 }
 
 const BASE_URL = 'https://github.com/k2-fsa/sherpa-onnx/releases/download';
-const HF_BASE = 'https://huggingface.co';
 const HF_MIRROR = 'https://hf-mirror.com';
 const MODELSCOPE_API = 'https://modelscope.cn/api/v1/models';
 const KiB = 1024;
@@ -71,10 +70,12 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
     description: 'Voice activity detection',
     subdir: 'vad',
     hfRepo: 'csukuangfj/vad',
+    msRepo: 'pengzhendong/silero-vad',
     downloadSizeBytes: 700 * KiB,
     files: [
       {
         name: 'silero_vad.onnx',
+        msFilePath: 'v4/silero_vad.onnx',
         url: `${BASE_URL}/asr-models/silero_vad.onnx`,
         minSize: 500 * KiB,
       },
@@ -117,15 +118,15 @@ export const SHERPA_MODELS: SherpaModelInfo[] = [
 
 export class SherpaModelManager {
   private modelsDir: string;
-  private mirror: ModelMirror = '';
+  private mirror: ModelMirror = 'modelscope';
 
   constructor(modelsDir?: string) {
     this.modelsDir = modelsDir || getSherpaModelsDir();
   }
 
-  /** Set mirror source for downloads. */
-  setMirror(mirror: ModelMirror): void {
-    this.mirror = mirror;
+  /** Set download source. User-facing downloads are pinned to ModelScope. */
+  setMirror(_mirror: ModelMirror): void {
+    this.mirror = 'modelscope';
   }
 
   getMirror(): ModelMirror {
@@ -358,29 +359,21 @@ export class SherpaModelManager {
   }
 
   /** Build download URL for a file, respecting mirror setting. */
-  private getFileUrl(model: SherpaModelInfo, file: { name: string; url?: string }): string | null {
+  private getFileUrl(model: SherpaModelInfo, file: { name: string; url?: string; msFilePath?: string }): string | null {
     if (this.mirror === 'modelscope' && model.msRepo) {
-      return `${MODELSCOPE_API}/${model.msRepo}/repo?Revision=master&FilePath=${file.name}`;
+      const filePath = file.msFilePath || file.name;
+      return `${MODELSCOPE_API}/${model.msRepo}/repo?Revision=master&FilePath=${filePath}`;
     }
-    // Fallback: if ModelScope doesn't have this model, try HF mirror
+    // Reverb diarization v2 has no confirmed equivalent ModelScope ONNX file yet.
     if (this.mirror === 'modelscope' && model.hfRepo) {
       return `${HF_MIRROR}/${model.hfRepo}/resolve/main/${file.name}`;
-    }
-    if (this.mirror === 'hf-mirror' && model.hfRepo) {
-      return `${HF_MIRROR}/${model.hfRepo}/resolve/main/${file.name}`;
-    }
-    if (this.mirror === 'ghfast') {
-      if (file.url) return `https://ghfast.top/${file.url}`;
-      if (model.hfRepo) return `https://ghfast.top/${HF_BASE}/${model.hfRepo}/resolve/main/${file.name}`;
     }
     return file.url || null;
   }
 
-  /** Whether to use individual file downloads (ModelScope, HF mirror, ghfast proxy, or direct GitHub files). */
+  /** Whether to use individual file downloads. */
   private useDirectDownload(model: SherpaModelInfo): boolean {
     if (this.mirror === 'modelscope' && (model.msRepo || model.hfRepo)) return true;
-    if (this.mirror === 'hf-mirror' && model.hfRepo) return true;
-    if (this.mirror === 'ghfast') return true;
     return !model.archive;
   }
 
@@ -408,7 +401,7 @@ export class SherpaModelManager {
     }
 
     if (this.useDirectDownload(model)) {
-      // ── Individual file downloads (ModelScope, HF mirror or GitHub direct) ──
+      // ── Individual file downloads (ModelScope, or legacy HF fallback for pyannote) ──
       const missingFiles = model.files.filter((f) => {
         const filePath = path.join(dir, f.name);
         try {
@@ -465,9 +458,6 @@ export class SherpaModelManager {
     } else if (model.archive) {
       // ── Archive download: tar.bz2 → extract → move files ──
       let archiveUrl = model.archive.url;
-      if (this.mirror === 'ghfast') {
-        archiveUrl = `https://ghfast.top/${archiveUrl}`;
-      }
       const archiveName = path.basename(archiveUrl);
       const archivePath = path.join(dir, archiveName);
 
