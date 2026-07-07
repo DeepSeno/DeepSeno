@@ -4,6 +4,16 @@ import { getKnowledgeCompiler } from './context';
 import { requireId, requireString, requireEnum, ValidationError } from './validate';
 import { pinyinSimilarity } from '../utils/pinyin';
 
+function parseRecordingIds(raw: unknown): number[] {
+  try {
+    const parsed = JSON.parse(typeof raw === 'string' ? raw : '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is number => typeof id === 'number' && Number.isFinite(id));
+  } catch {
+    return [];
+  }
+}
+
 export function registerKnowledgeHandlers(ctx: IpcContext): void {
   // ─── knowledge:getAll ──────────────────────────────────────
   ipcMain.handle('knowledge:getAll', async (_event, type?: string) => {
@@ -336,7 +346,9 @@ export function registerKnowledgeHandlers(ctx: IpcContext): void {
   });
 
   // ─── knowledge:compileAll ─────────────────────────────────
-  // Find all completed recordings that haven't been knowledge-compiled yet and enqueue them
+  // Find all completed recordings that haven't been knowledge-compiled yet and enqueue them.
+  // Re-enqueuing already compiled recordings with unchanged source data makes page counts drift
+  // because entity extraction is LLM-based; this handler is intentionally idempotent.
   ipcMain.handle('knowledge:compileAll', async () => {
     try {
       const compiler = getKnowledgeCompiler();
@@ -345,12 +357,29 @@ export function registerKnowledgeHandlers(ctx: IpcContext): void {
       }
       const db = ctx.getDb();
       const recordings = db.getRecordingsByStatus('completed');
+      const compiledRecordingIds = new Set<number>();
+      for (const page of db.getAllKnowledgePages()) {
+        for (const id of parseRecordingIds(page.source_recording_ids)) {
+          compiledRecordingIds.add(id);
+        }
+      }
+      const activeRecordingIds = new Set<number>();
+      for (const entry of db.getCompilationQueueEntries(10_000)) {
+        if (entry.status === 'pending' || entry.status === 'processing') {
+          activeRecordingIds.add(entry.recording_id);
+        }
+      }
       let enqueued = 0;
+      let skipped = 0;
       for (const rec of recordings) {
+        if (compiledRecordingIds.has(rec.id) || activeRecordingIds.has(rec.id)) {
+          skipped++;
+          continue;
+        }
         compiler.enqueue(rec.id, 0);
         enqueued++;
       }
-      return { success: true, enqueued };
+      return { success: true, enqueued, skipped, total: recordings.length };
     } catch (err: any) {
       return { success: false, error: err.message || 'Unknown error' };
     }
@@ -358,9 +387,26 @@ export function registerKnowledgeHandlers(ctx: IpcContext): void {
 
   // ─── knowledge:mergePages ─────────────────────────────────
   ipcMain.handle('knowledge:mergePages', async (_e, sourcePageIds: number[], targetPageId: number) => {
-    const compiler = getKnowledgeCompiler();
-    if (!compiler) throw new Error('KnowledgeCompiler not initialized');
-    await compiler.mergePages(sourcePageIds, targetPageId);
+    try {
+      if (!Array.isArray(sourcePageIds) || sourcePageIds.length === 0) {
+        return { success: false, error: 'sourcePageIds must be a non-empty array' };
+      }
+      const validTargetId = requireId(targetPageId, 'targetPageId');
+      const validSourceIds = [...new Set(sourcePageIds.map((id) => requireId(id, 'sourcePageId')))]
+        .filter((id) => id !== validTargetId);
+      if (validSourceIds.length === 0) {
+        return { success: false, error: 'Select at least one source page to merge' };
+      }
+      const compiler = getKnowledgeCompiler();
+      if (!compiler) {
+        return { success: false, error: 'KnowledgeCompiler not initialized' };
+      }
+      const result = await compiler.mergePages(validSourceIds, validTargetId);
+      return { success: true, ...result };
+    } catch (err: any) {
+      if (err instanceof ValidationError) return { success: false, error: err.message };
+      return { success: false, error: err.message || 'Unknown error' };
+    }
   });
 
   // ─── knowledge:findDuplicates ─────────────────────────────

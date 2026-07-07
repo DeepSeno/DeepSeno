@@ -3660,10 +3660,10 @@ export class VoiceBrainDB {
   // ─── Compilation Queue ───────────────────────────────────────
 
   insertCompilationQueueEntry(recordingId: number, priority: number = 0): number {
-    // Skip if there's already a pending entry for this recording
+    // Skip if there's already an active entry for this recording.
     const existing = this.db.prepare(`
       SELECT id FROM compilation_queue
-      WHERE recording_id = ? AND status = 'pending'
+      WHERE recording_id = ? AND status IN ('pending', 'processing')
       LIMIT 1
     `).get(recordingId) as { id: number } | undefined;
 

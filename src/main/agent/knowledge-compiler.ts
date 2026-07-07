@@ -533,7 +533,7 @@ ${truncatedText}
    * Merge multiple knowledge pages into one target page.
    * LLM combines content, all sources/links are migrated, source pages deleted.
    */
-  async mergePages(sourcePageIds: number[], targetPageId: number): Promise<void> {
+  async mergePages(sourcePageIds: number[], targetPageId: number): Promise<{ merged: number; targetPageId: number; targetSlug: string }> {
     const targetPage = this.db.getKnowledgePage(targetPageId);
     if (!targetPage) throw new Error(`Target page ${targetPageId} not found`);
 
@@ -542,7 +542,9 @@ ${truncatedText}
       .map(id => this.db.getKnowledgePage(id))
       .filter(Boolean);
 
-    if (sourcePages.length === 0) return;
+    if (sourcePages.length === 0) {
+      return { merged: 0, targetPageId, targetSlug: targetPage.slug };
+    }
 
     // Collect all content for LLM merge
     const allContent = [
@@ -577,8 +579,8 @@ ${truncatedText}
     const allSegIds = new Set<number>();
     const allRecIds = new Set<number>();
     for (const p of [targetPage, ...sourcePages]) {
-      for (const id of JSON.parse((p as any).source_segment_ids || '[]')) allSegIds.add(id as number);
-      for (const id of JSON.parse((p as any).source_recording_ids || '[]')) allRecIds.add(id as number);
+      for (const id of this.parseIdArray((p as any).source_segment_ids)) allSegIds.add(id);
+      for (const id of this.parseIdArray((p as any).source_recording_ids)) allRecIds.add(id);
     }
 
     // Update target page with merged content
@@ -609,24 +611,52 @@ ${truncatedText}
       if ((sp as any).title !== targetPage.title) {
         this.db.insertCorrection((sp as any).title, targetPage.title, 'person_name', 'auto_learned');
       }
+      if ((sp as any).slug && (sp as any).slug !== targetPage.slug) {
+        this.db.bulkUpdateKnowledgeSlugReferences((sp as any).slug, targetPage.slug, targetPageId);
+      }
     }
 
-    // Delete source pages (cascade will clean up links)
+    // Delete source pages. Be explicit about links because older databases may
+    // have been created before foreign-key cascades were consistently enabled.
     for (const sp of sourcePages) {
-      this.db.deleteKnowledgePage((sp as any).id);
-      try { this.vectorStore.deletePageVector((sp as any).id); } catch { /* ignore */ }
+      const sourceId = (sp as any).id;
+      this.db.deleteKnowledgeLinksFrom(sourceId);
+      this.db.deleteKnowledgeLinksTo(sourceId);
+      this.db.deleteKnowledgePage(sourceId);
+      try { this.vectorStore.deletePageVector(sourceId); } catch { /* ignore */ }
     }
 
-    // Re-embed merged page
-    await this.embedPage(targetPageId);
+    // Re-embed and relink the merged page. The merge itself is already durable
+    // at this point, so keep these follow-up refreshes best-effort; otherwise a
+    // transient embedding/local-model failure makes the UI report "merge failed"
+    // even though the source pages were already merged.
+    try {
+      await this.embedPage(targetPageId);
+    } catch (err) {
+      console.warn(`[KnowledgeCompiler] Failed to embed merged page ${targetPageId}:`, err);
+    }
 
-    // Update cross-references
-    this.updateCrossReferences(targetPageId);
+    try {
+      this.updateCrossReferences(targetPageId);
+    } catch (err) {
+      console.warn(`[KnowledgeCompiler] Failed to update merged page cross-references ${targetPageId}:`, err);
+    }
 
     console.log(`[KnowledgeCompiler] Merged ${sourcePages.length} pages into "${targetPage.title}" (id=${targetPageId})`);
+    return { merged: sourcePages.length, targetPageId, targetSlug: targetPage.slug };
   }
 
   // ─── Helpers ──────────────────────────────────────────
+
+  private parseIdArray(raw: string | null | undefined): number[] {
+    try {
+      const parsed = JSON.parse(raw || '[]');
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((id): id is number => typeof id === 'number' && Number.isFinite(id));
+    } catch {
+      return [];
+    }
+  }
 
   private extractSummary(markdown: string): string {
     const lines = markdown.split('\n');

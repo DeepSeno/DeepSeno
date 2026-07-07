@@ -200,6 +200,7 @@ export default function KnowledgePage() {
   // Resizable graph panel
   const [graphPanelWidth, setGraphPanelWidth] = useState(384);
   const isDraggingPanel = useRef(false);
+  const queueWasActiveRef = useRef(false);
 
   // ─── Data Loading ───────────────────────────────────────────
   const loadPages = useCallback(async () => {
@@ -269,6 +270,16 @@ export default function KnowledgePage() {
     } catch { /* ignore */ }
   }, [api]);
 
+  const refreshKnowledgeView = useCallback(async (detailSlug?: string | null) => {
+    const slug = detailSlug === undefined ? selectedPage?.slug : detailSlug;
+    await Promise.all([
+      loadPages(),
+      loadStats(),
+      loadGraph(),
+      slug ? loadPageDetail(slug) : Promise.resolve(),
+    ]);
+  }, [loadPages, loadStats, loadGraph, loadPageDetail, selectedPage?.slug]);
+
   // Initial load
   useEffect(() => {
     setLoading(true);
@@ -277,12 +288,23 @@ export default function KnowledgePage() {
 
   // Poll the queue while work is active or the detail panel is open, so counts
   // and per-entry progress refresh without a manual reload.
+  const queueActive = queueStatus.processing > 0 || queueStatus.pending > 0;
+
   useEffect(() => {
-    const active = queueStatus.processing > 0 || queueStatus.pending > 0;
-    if (!active && !queueExpanded) return;
+    if (!queueActive && !queueExpanded) return;
     const id = setInterval(() => { loadStats(); }, 4000);
     return () => clearInterval(id);
-  }, [queueStatus.processing, queueStatus.pending, queueExpanded, loadStats]);
+  }, [queueActive, queueExpanded, loadStats]);
+
+  useEffect(() => {
+    if (queueActive) {
+      queueWasActiveRef.current = true;
+      return;
+    }
+    if (!queueWasActiveRef.current) return;
+    queueWasActiveRef.current = false;
+    void refreshKnowledgeView();
+  }, [queueActive, refreshKnowledgeView]);
 
   // Load graph for the overview preview and when the side panel is toggled on
   useEffect(() => {
@@ -319,9 +341,13 @@ export default function KnowledgePage() {
     if (!selectedPage || recompiling) return;
     setRecompiling(true);
     try {
-      await api.knowledgeRecompile(selectedPage.id);
-      await loadPageDetail(selectedPage.slug);
-      await loadStats();
+      const result = await api.knowledgeRecompile(selectedPage.id);
+      if (result && result.success === false) {
+        alert(result.error || 'Recompile failed');
+        return;
+      }
+      setQueueExpanded(true);
+      await refreshKnowledgeView(selectedPage.slug);
     } finally {
       setRecompiling(false);
     }
@@ -346,18 +372,26 @@ export default function KnowledgePage() {
     });
   };
 
-  const handleMergeComplete = async () => {
+  const handleMergeComplete = async (targetSlug?: string | null) => {
     setSelectMode(false);
     setSelectedIds(new Set());
-    await Promise.all([loadPages(), loadStats()]);
+    if (targetSlug) setSearchParams({ page: targetSlug });
+    await refreshKnowledgeView(targetSlug ?? selectedPage?.slug ?? null);
   };
 
   const handleRebuildAll = async () => {
     if (rebuildingAll) return;
     setRebuildingAll(true);
     try {
-      await api.knowledgeCompileAll();
-      await Promise.all([loadPages(), loadStats()]);
+      const result = await api.knowledgeCompileAll();
+      if (result && result.success === false) {
+        alert(result.error || 'Rebuild failed');
+        return;
+      }
+      if ((result?.enqueued || 0) > 0) {
+        setQueueExpanded(true);
+      }
+      await refreshKnowledgeView();
     } finally {
       setRebuildingAll(false);
     }
@@ -392,13 +426,12 @@ export default function KnowledgePage() {
           await api.knowledgeEditContent(selectedPage.id, editContent);
         }
         // Reload with new slug
-        await loadPages();
-        await loadStats();
+        await Promise.all([loadPages(), loadStats(), loadGraph()]);
         setSearchParams({ page: result.newSlug });
       } else if (editContent !== selectedPage.content_markdown) {
         // Only content changed
         await api.knowledgeEditContent(selectedPage.id, editContent);
-        await loadPageDetail(selectedPage.slug);
+        await Promise.all([loadPageDetail(selectedPage.slug), loadGraph()]);
       }
       setEditing(false);
     } finally {
@@ -413,7 +446,7 @@ export default function KnowledgePage() {
       await api.knowledgeDelete(selectedPage.id);
       setShowDeleteConfirm(false);
       setSearchParams({});
-      await Promise.all([loadPages(), loadStats()]);
+      await refreshKnowledgeView(null);
     } finally {
       setDeleting(false);
     }
@@ -427,7 +460,7 @@ export default function KnowledgePage() {
       setSelectMode(false);
       setSelectedIds(new Set());
       setSearchParams({});
-      await Promise.all([loadPages(), loadStats()]);
+      await refreshKnowledgeView(null);
     } finally {
       setDeleting(false);
     }

@@ -24,9 +24,16 @@ interface DuplicatePanelProps {
   selectMode: boolean;
   selectedIds: Set<number>;
   onToggleSelectMode: () => void;
-  onMergeComplete: () => void;
+  onMergeComplete: (targetSlug?: string | null) => void | Promise<void>;
   /** Slot rendered on the right side of the toolbar (e.g. rebuild / delete) */
   rightSlot?: React.ReactNode;
+}
+
+interface MergeResult {
+  success?: boolean;
+  error?: string;
+  merged?: number;
+  targetSlug?: string;
 }
 
 // ─── Component ──────────────────────────────────────────────────
@@ -48,34 +55,60 @@ export default function DuplicatePanel({
   const [merging, setMerging] = useState(false);
   const [mergeTarget, setMergeTarget] = useState<number | null>(null);
   const [showMergeConfirm, setShowMergeConfirm] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
 
   const scanDuplicates = useCallback(async () => {
     setScanning(true);
     try {
       const result = await (api as any).knowledgeFindDuplicates();
-      setDuplicates(result || []);
+      const next = Array.isArray(result) ? result : [];
+      setDuplicates(next);
       setShowDuplicates(true);
+      return next;
     } catch {
       setDuplicates([]);
+      return [];
     } finally {
       setScanning(false);
     }
   }, [api]);
 
-  // Preselect merge target as first selected id
+  // Keep merge target valid as selection changes. This prevents the first
+  // confirmation click from using a stale target from a previous selection.
   useEffect(() => {
-    if (selectedIds.size > 0 && !mergeTarget) {
-      setMergeTarget(Array.from(selectedIds)[0]);
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) {
+      setMergeTarget(null);
+      return;
+    }
+    if (!mergeTarget || !selectedIds.has(mergeTarget)) {
+      setMergeTarget(ids[0]);
     }
   }, [selectedIds, mergeTarget]);
 
+  const assertMergeSuccess = (result: MergeResult | undefined | null): MergeResult => {
+    if (!result || result.success === false) {
+      throw new Error(result?.error || 'Merge failed');
+    }
+    return result;
+  };
+
   const handleMergeFromDuplicate = async (pair: DuplicatePair, targetId: number) => {
     setMerging(true);
+    setMergeError(null);
     try {
       const sourceId = targetId === pair.pageA.id ? pair.pageB.id : pair.pageA.id;
-      await (api as any).knowledgeMergePages([sourceId], targetId);
-      setDuplicates((prev) => prev.filter((d) => d !== pair));
-      onMergeComplete();
+      const result = assertMergeSuccess(await (api as any).knowledgeMergePages([sourceId], targetId));
+      setDuplicates((prev) => prev.filter((d) =>
+        d.pageA.id !== sourceId &&
+        d.pageB.id !== sourceId &&
+        d.pageA.id !== targetId &&
+        d.pageB.id !== targetId
+      ));
+      await onMergeComplete(result.targetSlug || null);
+      await scanDuplicates();
+    } catch (err: any) {
+      setMergeError(err?.message || 'Merge failed');
     } finally {
       setMerging(false);
     }
@@ -84,11 +117,15 @@ export default function DuplicatePanel({
   const handleMergeSelected = async () => {
     if (!mergeTarget || selectedIds.size < 2 || merging) return;
     setMerging(true);
+    setMergeError(null);
     try {
       const sourceIds = Array.from(selectedIds).filter((id) => id !== mergeTarget);
-      await (api as any).knowledgeMergePages(sourceIds, mergeTarget);
+      const result = assertMergeSuccess(await (api as any).knowledgeMergePages(sourceIds, mergeTarget));
       setShowMergeConfirm(false);
-      onMergeComplete();
+      await onMergeComplete(result.targetSlug || null);
+      await scanDuplicates();
+    } catch (err: any) {
+      setMergeError(err?.message || 'Merge failed');
     } finally {
       setMerging(false);
     }
@@ -156,6 +193,7 @@ export default function DuplicatePanel({
           <button
             onClick={() => {
               setMergeTarget(Array.from(selectedIds)[0]);
+              setMergeError(null);
               setShowMergeConfirm(true);
             }}
             className="kz-btn kz-btn--primary kz-btn--sm w-full justify-center"
@@ -237,6 +275,11 @@ export default function DuplicatePanel({
               ))}
             </div>
           )}
+          {mergeError && (
+            <p className="mt-2" style={{ color: 'var(--c-danger)', fontFamily: 'var(--mono)', fontSize: 10.5 }}>
+              {mergeError}
+            </p>
+          )}
         </div>
       )}
 
@@ -283,6 +326,12 @@ export default function DuplicatePanel({
                   ))}
               </div>
             </div>
+
+            {mergeError && (
+              <p className="mb-3" style={{ color: 'var(--c-danger)', fontFamily: 'var(--mono)', fontSize: 10.5 }}>
+                {mergeError}
+              </p>
+            )}
 
             <div className="flex gap-2">
               <button
