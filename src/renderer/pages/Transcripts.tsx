@@ -24,6 +24,7 @@ const LEFT_PANEL_MAX = 420;
 const RIGHT_PANEL_MIN = 300;
 const RIGHT_PANEL_MAX = 560;
 const CENTER_PANEL_MIN = 420;
+const HAVE_METADATA = 1;
 
 function readStoredPanelWidth(key: string, fallback: number): number {
   try {
@@ -37,6 +38,14 @@ function readStoredPanelWidth(key: string, fallback: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+export function clampMediaSeekTime(startTime: number, duration: number): number {
+  const safeStart = Number.isFinite(startTime) ? Math.max(0, startTime) : 0;
+  if (Number.isFinite(duration) && duration > 0) {
+    return Math.min(safeStart, duration);
+  }
+  return safeStart;
 }
 
 export default function Transcripts() {
@@ -83,6 +92,7 @@ export default function Transcripts() {
   const activeMediaRef = useRef<HTMLMediaElement | null>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const mediaLoadSeqRef = useRef(0);
+  const pendingSeekRef = useRef<{ time: number; play: boolean } | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -146,12 +156,51 @@ export default function Transcripts() {
     try { localStorage.setItem(RIGHT_PANEL_STORAGE_KEY, String(rightPanelWidth)); } catch {}
   }, [rightPanelWidth]);
 
+  const applyMediaSeek = useCallback((el: HTMLMediaElement, startTime: number, play: boolean) => {
+    const nextTime = clampMediaSeekTime(startTime, el.duration);
+    try {
+      el.currentTime = nextTime;
+      setCurrentTime(nextTime);
+    } catch (err) {
+      pendingSeekRef.current = { time: nextTime, play };
+      console.warn('[Transcripts] Media seek deferred:', err);
+      return;
+    }
+    if (play && el.paused) {
+      void el.play().catch((err) => {
+        console.warn('[Transcripts] Media autoplay after seek failed:', err);
+      });
+    }
+  }, []);
+
+  const requestMediaSeek = useCallback((startTime: number, play: boolean) => {
+    const media = activeMediaRef.current;
+    if (!media) return;
+    const nextTime = clampMediaSeekTime(startTime, media.duration);
+    if (media.readyState < HAVE_METADATA) {
+      pendingSeekRef.current = { time: nextTime, play };
+      try { media.load(); } catch {}
+      return;
+    }
+    applyMediaSeek(media, nextTime, play);
+  }, [applyMediaSeek]);
+
   const attachMediaListeners = useCallback((el: HTMLMediaElement): (() => void) => {
     // Guard: ignore events from inactive media elements to prevent race conditions
     // (e.g. clearing audio.src fires error after switching to video)
     const isActive = () => activeMediaRef.current === el;
     const onTimeUpdate = () => { if (isActive()) setCurrentTime(el.currentTime); };
-    const onLoadedMetadata = () => { if (isActive()) { if (isFinite(el.duration)) setDuration(el.duration); setAudioLoaded(true); setAudioError(false); } };
+    const onLoadedMetadata = () => {
+      if (!isActive()) return;
+      if (isFinite(el.duration)) setDuration(el.duration);
+      setAudioLoaded(true);
+      setAudioError(false);
+      const pending = pendingSeekRef.current;
+      if (pending) {
+        pendingSeekRef.current = null;
+        applyMediaSeek(el, pending.time, pending.play);
+      }
+    };
     const onEnded = () => { if (isActive()) setIsPlaying(false); };
     const onPlay = () => { if (isActive()) setIsPlaying(true); };
     const onPause = () => { if (isActive()) setIsPlaying(false); };
@@ -170,7 +219,7 @@ export default function Transcripts() {
       el.removeEventListener('pause', onPause);
       el.removeEventListener('error', onError);
     };
-  }, []);
+  }, [applyMediaSeek]);
 
   useEffect(() => {
     const audio = new Audio();
@@ -280,6 +329,7 @@ export default function Transcripts() {
       const audio = audioRef.current;
       const video = videoRef.current;
       if (!isDoc && mediaType === 'video') {
+        pendingSeekRef.current = null;
         // Video mode: set active ref FIRST so stale audio events are ignored
         const vid = video || videoRef.current;
         if (vid) {
@@ -307,6 +357,7 @@ export default function Transcripts() {
           }, 100);
         }
       } else if (audio && !isDoc) {
+        pendingSeekRef.current = null;
         // Audio mode: set active ref FIRST so stale video events are ignored
         activeMediaRef.current = audio;
         if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
@@ -314,6 +365,7 @@ export default function Transcripts() {
         audio.src = `media://audio/${recordingId}`;
         audio.load();
       } else if (isDoc) {
+        pendingSeekRef.current = null;
         activeMediaRef.current = null;
         if (audio) { audio.pause(); audio.src = ''; }
         if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
@@ -501,7 +553,9 @@ export default function Transcripts() {
   const togglePlayPause = useCallback(() => { const media = activeMediaRef.current; if (!media || !audioLoaded) return; if (media.paused) media.play().catch(() => {}); else media.pause(); }, [audioLoaded]);
   const handleSpeedChange = useCallback((speed: number) => { setPlaybackSpeed(speed); if (activeMediaRef.current) activeMediaRef.current.playbackRate = speed; }, []);
   const handleProgressClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => { const media = activeMediaRef.current; const bar = progressRef.current; if (!media || !bar || !audioLoaded) return; const rect = bar.getBoundingClientRect(); media.currentTime = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * media.duration; }, [audioLoaded]);
-  const handleBubbleClick = useCallback((startTime: number) => { const media = activeMediaRef.current; if (!media || !audioLoaded) return; media.currentTime = Math.max(0, Math.min(startTime, media.duration || 0)); if (media.paused) media.play().catch(() => {}); }, [audioLoaded]);
+  const handleBubbleClick = useCallback((startTime: number) => {
+    requestMediaSeek(startTime, true);
+  }, [requestMediaSeek]);
 
   // --- Helpers ---
 

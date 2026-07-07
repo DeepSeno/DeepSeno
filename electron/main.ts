@@ -1242,9 +1242,10 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Allow microphone access (Chromium-level permission)
+  // Allow app-owned media/fullscreen permissions. Native <video controls>
+  // fullscreen requests arrive here as the distinct "fullscreen" permission.
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === 'media' || permission === 'screen');
+    callback(permission === 'media' || permission === 'screen' || permission === 'fullscreen');
   });
 
   // Grant all permission checks (required for packaged apps on Windows to allow microphone)
