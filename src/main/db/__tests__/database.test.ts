@@ -108,6 +108,31 @@ describe('VoiceBrainDB', () => {
     expect(db.getRecordingByFileNameAndType('demo.mov', 'video')?.id).toBe(id);
   });
 
+  it('should use processed date for report and memory content lookup', () => {
+    const id = db.insertRecording({
+      file_path: '/imports/uploaded.txt',
+      file_name: 'uploaded.txt',
+      media_type: 'text',
+      status: 'completed',
+      recorded_at: '2026-07-06T20:00:00.000Z',
+      processed_at: '2026-07-07T09:00:00.000Z',
+      status_updated_at: '2026-07-07T09:00:00.000Z',
+    });
+    db.insertSegment({
+      recording_id: id,
+      start_time: 0,
+      end_time: 1,
+      raw_text: 'content uploaded and processed on July 7',
+      clean_text: 'content uploaded and processed on July 7',
+      source: 'document',
+    });
+
+    expect(db.getSegmentsByDate('2026-07-07')).toHaveLength(1);
+    expect(db.getRecordingsByDate('2026-07-07').map((row) => row.id)).toEqual([id]);
+    expect(db.getExtractedItemsByDate('2026-07-07')).toEqual([]);
+    expect(db.getSegmentsByDate('2026-07-06')).toHaveLength(0);
+  });
+
   it('should mark stuck recordings as interrupted during recovery', () => {
     const id = db.insertRecording({
       file_path: '/audio/stuck.wav',

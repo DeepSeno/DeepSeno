@@ -10,6 +10,9 @@ import { getDbPath, getOutputDir } from '../paths';
 import type { PersonData } from '../db/database';
 import { requireId, requireString, requireEnum, requireDate } from './validate';
 import { formatLocalDate } from '../utils/date';
+import { ensureLocalChatRuntime } from './local-llm-runtime';
+import { formatRagModelError } from '../rag/model-readiness';
+import { appendAppLog } from '../logging/log-bus';
 
 export function registerDbHandlers(ctx: IpcContext): void {
   // ─── Database - Recordings ─────────────────────────────────
@@ -498,92 +501,138 @@ export function registerDbHandlers(ctx: IpcContext): void {
 
   // ─── Summary Generation ──────────────────────────────────
   ipcMain.handle('summary:generateDaily', async (_event, date: string) => {
-    const segments = ctx.getDb().getSegmentsByDate(date);
-    const textNotes = ctx.getDb().getTextNotesByDate(date);
+    const validDate = requireDate(date, 'date');
+    try {
+      const segments = ctx.getDb().getSegmentsByDate(validDate);
+      const textNotes = ctx.getDb().getTextNotesByDate(validDate);
 
-    if (segments.length === 0 && textNotes.length === 0) return { error: 'no_data' };
+      if (segments.length === 0 && textNotes.length === 0) return { error: 'no_data' };
 
-    const segData = segments.map((s: any) => ({
-      start: s.start_time ?? 0,
-      end: s.end_time ?? 0,
-      speaker: s.speaker_name || 'Unknown',
-      text: s.clean_text || s.raw_text || '',
-    }));
+      const segData = segments.map((s: any) => ({
+        start: s.start_time ?? 0,
+        end: s.end_time ?? 0,
+        speaker: s.speaker_name || 'Unknown',
+        text: s.clean_text || s.raw_text || '',
+      }));
 
-    // Merge text notes: convert created_at timestamp to seconds from midnight
-    for (const note of textNotes) {
-      const d = new Date(note.created_at);
-      const secondsFromMidnight = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
-      segData.push({
-        start: secondsFromMidnight,
-        end: secondsFromMidnight + 1,
-        speaker: note.user_name || '[飞书]',
-        text: note.content,
+      // Merge text notes: convert created_at timestamp to seconds from midnight
+      for (const note of textNotes) {
+        const d = new Date(note.created_at);
+        const secondsFromMidnight = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+        segData.push({
+          start: secondsFromMidnight,
+          end: secondsFromMidnight + 1,
+          speaker: note.user_name || '[飞书]',
+          text: note.content,
+        });
+      }
+
+      // Sort by start time so timeline is chronological
+      segData.sort((a, b) => a.start - b.start);
+
+      const settings = loadSettings();
+      await ensureLocalChatRuntime(ctx, settings, 'summary:generateDaily');
+      const refreshedSettings = loadSettings();
+      const optimizer = new TextOptimizer(ctx.getLLM(), getLLMModel(refreshedSettings));
+      optimizer.setVocabularyBlock(ctx.getDb().buildVocabularyPromptBlock(refreshedSettings.vocabularyContext));
+      const result = await optimizer.generateDailySummary(validDate, segData);
+
+      ctx.getDb().upsertDailySummary({
+        date: validDate,
+        summary_text: result.summary,
+        timeline_json: JSON.stringify(result.timeline),
+        key_events_json: JSON.stringify({ todos: result.todos, decisions: result.decisions }),
       });
+
+      return result;
+    } catch (err) {
+      const settings = loadSettings();
+      const message = formatRagModelError(err, settings);
+      appendAppLog('error', 'main', 'reports', 'Daily summary generation failed', {
+        date: validDate,
+        message,
+        error: err,
+      });
+      return { error: 'model_error', message };
     }
-
-    // Sort by start time so timeline is chronological
-    segData.sort((a, b) => a.start - b.start);
-
-    const settings = loadSettings();
-    const optimizer = new TextOptimizer(ctx.getLLM(), getLLMModel(settings));
-    optimizer.setVocabularyBlock(ctx.getDb().buildVocabularyPromptBlock(settings.vocabularyContext));
-    const result = await optimizer.generateDailySummary(date, segData);
-
-    ctx.getDb().upsertDailySummary({
-      date,
-      summary_text: result.summary,
-      timeline_json: JSON.stringify(result.timeline),
-      key_events_json: JSON.stringify({ todos: result.todos, decisions: result.decisions }),
-    });
-
-    return result;
   });
 
   ipcMain.handle('summary:generateWeekly', async (_event, startDate: string, endDate: string) => {
-    const dailySummaries = ctx.getDb().getDailySummariesInRange(startDate, endDate);
-    if (dailySummaries.length === 0) return { error: 'no_data' };
+    const validStartDate = requireDate(startDate, 'startDate');
+    const validEndDate = requireDate(endDate, 'endDate');
+    try {
+      const dailySummaries = ctx.getDb().getDailySummariesInRange(validStartDate, validEndDate);
+      if (dailySummaries.length === 0) return { error: 'no_data' };
 
-    const parsed = dailySummaries.map((ds: any) => ({
-      date: ds.date,
-      summary: ds.summary_text || '',
-      todos: ds.key_events_json ? JSON.parse(ds.key_events_json).todos || [] : [],
-      decisions: ds.key_events_json ? JSON.parse(ds.key_events_json).decisions || [] : [],
-    }));
+      const parsed = dailySummaries.map((ds: any) => ({
+        date: ds.date,
+        summary: ds.summary_text || '',
+        todos: ds.key_events_json ? JSON.parse(ds.key_events_json).todos || [] : [],
+        decisions: ds.key_events_json ? JSON.parse(ds.key_events_json).decisions || [] : [],
+      }));
 
-    const settings = loadSettings();
-    const optimizer = new TextOptimizer(ctx.getLLM(), getLLMModel(settings));
-    optimizer.setVocabularyBlock(ctx.getDb().buildVocabularyPromptBlock(settings.vocabularyContext));
-    const result = await optimizer.generateWeeklySummary(startDate, endDate, parsed);
+      const settings = loadSettings();
+      await ensureLocalChatRuntime(ctx, settings, 'summary:generateWeekly');
+      const refreshedSettings = loadSettings();
+      const optimizer = new TextOptimizer(ctx.getLLM(), getLLMModel(refreshedSettings));
+      optimizer.setVocabularyBlock(ctx.getDb().buildVocabularyPromptBlock(refreshedSettings.vocabularyContext));
+      const result = await optimizer.generateWeeklySummary(validStartDate, validEndDate, parsed);
 
-    // Persist weekly summary to DB
-    ctx.getDb().upsertWeeklySummary(startDate, endDate, JSON.stringify(result));
+      // Persist weekly summary to DB
+      ctx.getDb().upsertWeeklySummary(validStartDate, validEndDate, JSON.stringify(result));
 
-    return result;
+      return result;
+    } catch (err) {
+      const settings = loadSettings();
+      const message = formatRagModelError(err, settings);
+      appendAppLog('error', 'main', 'reports', 'Weekly summary generation failed', {
+        startDate: validStartDate,
+        endDate: validEndDate,
+        message,
+        error: err,
+      });
+      return { error: 'model_error', message };
+    }
   });
 
   ipcMain.handle('summary:generateMonthly', async (_event, startDate: string, endDate: string) => {
-    // Monthly aggregates the month's daily summaries directly (not weekly),
-    // so it works even when the weekly report is disabled.
-    const dailySummaries = ctx.getDb().getDailySummariesInRange(startDate, endDate);
-    if (dailySummaries.length === 0) return { error: 'no_data' };
+    const validStartDate = requireDate(startDate, 'startDate');
+    const validEndDate = requireDate(endDate, 'endDate');
+    try {
+      // Monthly aggregates the month's daily summaries directly (not weekly),
+      // so it works even when the weekly report is disabled.
+      const dailySummaries = ctx.getDb().getDailySummariesInRange(validStartDate, validEndDate);
+      if (dailySummaries.length === 0) return { error: 'no_data' };
 
-    const parsed = dailySummaries.map((ds: any) => ({
-      date: ds.date,
-      summary: ds.summary_text || '',
-      todos: ds.key_events_json ? JSON.parse(ds.key_events_json).todos || [] : [],
-      decisions: ds.key_events_json ? JSON.parse(ds.key_events_json).decisions || [] : [],
-    }));
+      const parsed = dailySummaries.map((ds: any) => ({
+        date: ds.date,
+        summary: ds.summary_text || '',
+        todos: ds.key_events_json ? JSON.parse(ds.key_events_json).todos || [] : [],
+        decisions: ds.key_events_json ? JSON.parse(ds.key_events_json).decisions || [] : [],
+      }));
 
-    const settings = loadSettings();
-    const optimizer = new TextOptimizer(ctx.getLLM(), getLLMModel(settings));
-    optimizer.setVocabularyBlock(ctx.getDb().buildVocabularyPromptBlock(settings.vocabularyContext));
-    const result = await optimizer.generateMonthlySummary(startDate, endDate, parsed);
+      const settings = loadSettings();
+      await ensureLocalChatRuntime(ctx, settings, 'summary:generateMonthly');
+      const refreshedSettings = loadSettings();
+      const optimizer = new TextOptimizer(ctx.getLLM(), getLLMModel(refreshedSettings));
+      optimizer.setVocabularyBlock(ctx.getDb().buildVocabularyPromptBlock(refreshedSettings.vocabularyContext));
+      const result = await optimizer.generateMonthlySummary(validStartDate, validEndDate, parsed);
 
-    // Persist monthly summary to DB
-    ctx.getDb().upsertMonthlySummary(startDate, endDate, JSON.stringify(result));
+      // Persist monthly summary to DB
+      ctx.getDb().upsertMonthlySummary(validStartDate, validEndDate, JSON.stringify(result));
 
-    return result;
+      return result;
+    } catch (err) {
+      const settings = loadSettings();
+      const message = formatRagModelError(err, settings);
+      appendAppLog('error', 'main', 'reports', 'Monthly summary generation failed', {
+        startDate: validStartDate,
+        endDate: validEndDate,
+        message,
+        error: err,
+      });
+      return { error: 'model_error', message };
+    }
   });
 
   ipcMain.handle('summary:getAllDaily', async () => {

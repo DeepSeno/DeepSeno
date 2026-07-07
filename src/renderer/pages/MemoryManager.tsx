@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Brain, ChevronDown, ChevronRight, RefreshCw,
-  Sparkles, Check, X, Trash2, ArrowUp, ArrowDown,
+  Sparkles, Check, X, Trash2, ArrowUp, ArrowDown, PencilLine,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useApi, type MemoryRow, type MemoryStats, type MemoryDocument, type MemoryDateEntry } from '../hooks/useApi';
@@ -67,6 +67,8 @@ export default function MemoryManager() {
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<string | null>(null);
+  const [draftOpen, setDraftOpen] = useState(false);
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
 
   // Sidebar collapse state: map of "YYYY-MM" -> boolean (true = collapsed)
   const [collapsedMonths, setCollapsedMonths] = useState<Record<string, boolean>>({});
@@ -104,10 +106,14 @@ export default function MemoryManager() {
       const doc = await api.memoryGetDocument(date);
       setDocument(doc);
       setDocContent(doc?.content || '');
+      setDraftOpen(false);
+      setConfirmRegenerate(false);
       setLastSaved(null);
     } catch {
       setDocument(null);
       setDocContent('');
+      setDraftOpen(false);
+      setConfirmRegenerate(false);
     }
   }, [api]);
 
@@ -149,6 +155,8 @@ export default function MemoryManager() {
   // ── Debounced auto-save ──────────────────────────────
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleContentChange = useCallback((newContent: string) => {
+    setDraftOpen(true);
+    setConfirmRegenerate(false);
     setDocContent(newContent);
     setLastSaved(null);
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -156,14 +164,27 @@ export default function MemoryManager() {
       setSaving(true);
       try {
         await api.memorySaveDocument(selectedDate, newContent);
+        setDocument((prev) => ({
+          id: prev?.id ?? 0,
+          date: selectedDate,
+          content: newContent,
+          auto_generated: 0,
+          updated_at: '',
+        }));
         setLastSaved(new Date().toLocaleTimeString());
+        await loadDates();
       } catch { /* ignore */ }
       setSaving(false);
     }, 1000);
-  }, [selectedDate, api]);
+  }, [selectedDate, api, loadDates]);
+
+  const handleStartBlank = useCallback(() => {
+    handleContentChange('');
+  }, [handleContentChange]);
 
   // ── Generate / Regenerate ────────────────────────────
   const handleGenerate = useCallback(async () => {
+    setConfirmRegenerate(false);
     setGenerating(true);
     const date = selectedDate;
     // Create or reuse pending generation promise
@@ -176,6 +197,7 @@ export default function MemoryManager() {
       const result = await promise;
       setDocContent(result.content);
       setDocument({ id: 0, date, content: result.content, auto_generated: 1, updated_at: '' });
+      setDraftOpen(false);
       setLastSaved(new Date().toLocaleTimeString());
       await loadDates();
     } catch {} finally {
@@ -195,6 +217,7 @@ export default function MemoryManager() {
       if (cancelled) return;
       setDocContent(result.content);
       setDocument({ id: 0, date: selectedDate, content: result.content, auto_generated: 1, updated_at: '' });
+      setDraftOpen(false);
       setLastSaved(new Date().toLocaleTimeString());
       await loadDates();
     }).catch((err) => {
@@ -207,10 +230,21 @@ export default function MemoryManager() {
     return () => { cancelled = true; };
   }, [selectedDate, loadDates]);
 
-  const handleRegenerate = useCallback(async () => {
-    if (!confirm(mt.doc_regenerate_confirm)) return;
+  const handleRegenerate = useCallback(() => {
+    if (generating) return;
+    if (document || draftOpen || docContent.trim()) {
+      setConfirmRegenerate(true);
+      return;
+    }
+    void handleGenerate();
+  }, [docContent, document, draftOpen, generating, handleGenerate]);
+
+  const handleConfirmRegenerate = useCallback(async () => {
+    setConfirmRegenerate(false);
     await handleGenerate();
-  }, [handleGenerate, mt.doc_regenerate_confirm]);
+  }, [handleGenerate]);
+
+  const hasDocumentSurface = Boolean(document || draftOpen || docContent);
 
   // ── Sidebar: group dates by month ────────────────────
   const datesByMonth = useMemo(() => {
@@ -604,22 +638,55 @@ export default function MemoryManager() {
                     <Check size={10} className="inline mr-0.5" />{lastSaved}
                   </span>
                 )}
-                {document && (
-                  <button
-                    onClick={handleRegenerate}
-                    disabled={generating}
-                    className="kz-btn kz-btn--sm"
-                    style={{ opacity: generating ? 0.5 : 1 }}
-                  >
-                    <RefreshCw size={11} className={generating ? 'animate-spin' : ''} />
-                    {mt.doc_regenerate}
-                  </button>
+                {confirmRegenerate ? (
+                  <>
+                    <button
+                      onClick={() => setConfirmRegenerate(false)}
+                      className="kz-btn kz-btn--sm"
+                    >
+                      <X size={11} />
+                      {t.common.cancel}
+                    </button>
+                    <button
+                      onClick={handleConfirmRegenerate}
+                      disabled={generating}
+                      className="kz-btn kz-btn--sm kz-btn--primary"
+                      style={{ opacity: generating ? 0.5 : 1 }}
+                    >
+                      <RefreshCw size={11} className={generating ? 'animate-spin' : ''} />
+                      {mt.doc_regenerate}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleRegenerate}
+                      disabled={generating}
+                      className="kz-btn kz-btn--sm"
+                      style={{ opacity: generating ? 0.5 : 1 }}
+                    >
+                      {generating
+                        ? <RefreshCw size={11} className="animate-spin" />
+                        : hasDocumentSurface ? <RefreshCw size={11} /> : <Sparkles size={11} />
+                      }
+                      {hasDocumentSurface ? mt.doc_regenerate : mt.doc_generate}
+                    </button>
+                    <button
+                      onClick={handleStartBlank}
+                      disabled={generating}
+                      className="kz-btn kz-btn--sm"
+                      style={{ opacity: generating ? 0.5 : 1 }}
+                    >
+                      <PencilLine size={11} />
+                      {(mt as any).start_blank || '从头开始编辑'}
+                    </button>
+                  </>
                 )}
               </div>
             </div>
 
             {/* Content area */}
-            {!document && !docContent ? (
+            {!hasDocumentSurface ? (
               /* Empty state — kz-empty */
               <div className="flex-1 flex items-center justify-center">
                 <div className="kz-empty">
@@ -644,9 +711,10 @@ export default function MemoryManager() {
                       {mt.doc_generate}
                     </button>
                     <button
-                      onClick={() => handleContentChange(' ')}
+                      onClick={handleStartBlank}
                       className="kz-btn"
                     >
+                      <PencilLine size={12} />
                       {(mt as any).start_blank || '从头开始编辑'}
                     </button>
                   </div>

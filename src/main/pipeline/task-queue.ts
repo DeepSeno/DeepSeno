@@ -63,6 +63,11 @@ function isTerminalStatus(status: QueueTask['status']): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
+function clampProgress(progress: number): number {
+  if (!Number.isFinite(progress)) return 0;
+  return Math.max(0, Math.min(100, progress));
+}
+
 function isCancellationError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return err.name === 'TaskCancelledError' || /cancelled by user|canceled by user/i.test(err.message);
@@ -370,7 +375,11 @@ export class TaskQueue extends EventEmitter {
           return;
         }
       }
-      Object.assign(task, update);
+      const nextUpdate = { ...update };
+      if (typeof nextUpdate.progress === 'number') {
+        nextUpdate.progress = Math.max(task.progress, clampProgress(nextUpdate.progress));
+      }
+      Object.assign(task, nextUpdate);
       this.markDirty(task.id);
       this.emit('task:progress', task);
     }
@@ -436,6 +445,7 @@ export class TaskQueue extends EventEmitter {
             task.createdAt.toISOString(),
             new Date().toISOString(),
           );
+          this.syncRecordingTerminalStatus(task);
         }
       });
       txn();
@@ -464,11 +474,43 @@ export class TaskQueue extends EventEmitter {
         task.retryCount,
         task.maxRetries,
         task.mediaType ?? 'audio',
-        task.createdAt.toISOString(),
-        new Date().toISOString(),
+      task.createdAt.toISOString(),
+      new Date().toISOString(),
       );
+      this.syncRecordingTerminalStatus(task);
     } catch (err: any) {
       console.error('[TaskQueue] Failed to persist task:', err.message);
+    }
+  }
+
+  private syncRecordingTerminalStatus(task: QueueTask): void {
+    if (!this.db || task.recordingId == null || !isTerminalStatus(task.status)) return;
+
+    try {
+      const row = this.db
+        .prepare('SELECT status FROM recordings WHERE id = ?')
+        .get(task.recordingId) as { status?: string } | undefined;
+      if (!row) return;
+
+      if (row.status === task.status) return;
+      if (row.status === 'completed' && task.status !== 'completed') return;
+
+      const now = new Date().toISOString();
+      if (task.status === 'completed') {
+        this.db.prepare(`
+          UPDATE recordings
+          SET status = ?, processed_at = COALESCE(processed_at, ?), status_updated_at = ?
+          WHERE id = ?
+        `).run(task.status, now, now, task.recordingId);
+      } else {
+        this.db.prepare(`
+          UPDATE recordings
+          SET status = ?, status_updated_at = ?
+          WHERE id = ?
+        `).run(task.status, now, task.recordingId);
+      }
+    } catch (err: any) {
+      console.warn('[TaskQueue] Failed to sync recording terminal status:', err?.message || err);
     }
   }
 

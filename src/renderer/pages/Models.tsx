@@ -398,7 +398,7 @@ export default function Models() {
 
   // ─── Readiness computation ─────────────────────────────────
   const localReady = localStatus === 'connected';
-  const localEngineReady = llamaServerStatus.running && Boolean(llamaServerStatus.port);
+  const localRuntimeReady = localInstallStage === 'already_installed' || localReady;
   const llmModel = toSelectableModelId(settings?.llmModel || 'qwen3.5:4b');
   const llmReady = settings?.llmProvider === 'openai'
     ? Boolean(settings?.cloudModel?.trim()) && cloudStatus === 'connected'
@@ -406,7 +406,7 @@ export default function Models() {
       ? localModelStatuses[llmModel] === 'done' || isModelInstalled(localModels, llmModel)
       : isModelInstalled(localModels, llmModel);
   const sherpaReady = svModelStatus === 'ready';
-  const engineReady = settings?.llmProvider === 'openai' ? true : settings?.llmProvider === 'local' ? localEngineReady : localReady;
+  const engineReady = settings?.llmProvider === 'openai' ? true : settings?.llmProvider === 'local' ? localRuntimeReady : localReady;
   const allReady = engineReady && llmReady && sherpaReady;
   const enginesHasIssue = !allReady;
 

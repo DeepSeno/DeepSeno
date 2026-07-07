@@ -28,7 +28,7 @@ import { createLLMClient, createEmbedClient, getLLMModel } from '../llm/create-c
 import { TextOptimizer } from '../llm/text-optimizer';
 import { getOutputDir } from '../paths';
 import { MemoryManager } from '../agent/memory-manager';
-import { requireId, requireString, requireEnum, requireDate, requirePort, sanitizePath } from './validate';
+import { ValidationError, requireId, requireString, requireEnum, requireDate, requirePort, sanitizePath } from './validate';
 
 // ─── Feishu Bot State ───────────────────────────────────────
 
@@ -801,8 +801,13 @@ export function registerIntegrationHandlers(ctx: IpcContext): void {
 
   ipcMain.handle('memory:saveDocument', async (_event, date: string, content: string) => {
     const validDate = requireDate(date, 'date');
-    const validContent = requireString(content, 'content', 100000);
-    ctx.getDb().saveMemoryDocument(validDate, validContent, false);
+    if (typeof content !== 'string') {
+      throw new ValidationError('content must be a string');
+    }
+    if (content.length > 100000) {
+      throw new ValidationError('content exceeds max length 100000');
+    }
+    ctx.getDb().saveMemoryDocument(validDate, content, false);
     return { success: true };
   });
 

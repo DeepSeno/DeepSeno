@@ -428,6 +428,10 @@ export interface PersonRelationshipRow {
 
 export class VoiceBrainDB {
   private db: DatabaseSync;
+
+  private recordingContentDateSql(alias = 'r'): string {
+    return `DATE(COALESCE(${alias}.processed_at, ${alias}.status_updated_at, ${alias}.recorded_at), 'localtime')`;
+  }
   private walTimer: ReturnType<typeof setInterval> | null = null;
   private vacuumTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -2449,17 +2453,18 @@ export class VoiceBrainDB {
   // ─── Segments by Date ───────────────────────────────────────
 
   getSegmentsByDate(date: string, limit?: number): SegmentSearchResult[] {
+    const contentDateSql = this.recordingContentDateSql('r');
     const sql = `
       SELECT s.*, COALESCE(p.name, s.speaker_label, sp.name) AS speaker_name, r.file_name AS recording_name
       FROM segments s
       JOIN recordings r ON s.recording_id = r.id
       LEFT JOIN persons p ON s.primary_person_id = p.id
       LEFT JOIN speakers sp ON s.speaker_id = sp.id
-      WHERE DATE(r.recorded_at, 'localtime') = ? OR (r.recorded_at IS NULL AND DATE(r.processed_at, 'localtime') = ?)
+      WHERE ${contentDateSql} = ?
       ORDER BY s.start_time
       ${limit ? 'LIMIT ?' : ''}
     `;
-    const params: any[] = [date, date];
+    const params: any[] = [date];
     if (limit) params.push(limit);
     return this.db.prepare(sql).all(...params) as SegmentSearchResult[];
   }
@@ -2659,10 +2664,11 @@ export class VoiceBrainDB {
   // ─── Dashboard Charts ─────────────────────────────────────
 
   getRecordingsPerDay(days: number): { date: string; count: number }[] {
+    const contentDateSql = this.recordingContentDateSql('recordings');
     return this.db.prepare(`
-      SELECT DATE(COALESCE(recorded_at, processed_at), 'localtime') AS date, COUNT(*) AS count
+      SELECT ${contentDateSql} AS date, COUNT(*) AS count
       FROM recordings
-      WHERE DATE(COALESCE(recorded_at, processed_at), 'localtime') >= DATE('now', 'localtime', '-' || ? || ' days')
+      WHERE ${contentDateSql} >= DATE('now', 'localtime', '-' || ? || ' days')
       GROUP BY date
       ORDER BY date
     `).all(days) as { date: string; count: number }[];
@@ -2971,12 +2977,13 @@ export class VoiceBrainDB {
   }
 
   getMemoryDocumentDates(): { date: string; has_recordings: boolean; recording_count: number }[] {
+    const contentDateSql = this.recordingContentDateSql('r');
     return this.db.prepare(`
       SELECT md.date,
         COUNT(DISTINCT r.id) AS recording_count,
         CASE WHEN COUNT(r.id) > 0 THEN 1 ELSE 0 END AS has_recordings
       FROM memory_documents md
-      LEFT JOIN recordings r ON DATE(COALESCE(r.recorded_at, r.processed_at), 'localtime') = md.date
+      LEFT JOIN recordings r ON ${contentDateSql} = md.date
       GROUP BY md.date
       ORDER BY md.date DESC
     `).all() as any[];
@@ -2994,36 +3001,39 @@ export class VoiceBrainDB {
   }
 
   getDatesWithRecordings(days: number): { date: string; recording_count: number }[] {
+    const contentDateSql = this.recordingContentDateSql('recordings');
     return this.db.prepare(`
-      SELECT DATE(COALESCE(recorded_at, processed_at), 'localtime') AS date,
+      SELECT ${contentDateSql} AS date,
         COUNT(*) AS recording_count
       FROM recordings
-      WHERE DATE(COALESCE(recorded_at, processed_at), 'localtime') >= DATE('now', 'localtime', '-' || ? || ' days')
+      WHERE ${contentDateSql} >= DATE('now', 'localtime', '-' || ? || ' days')
       GROUP BY date
       ORDER BY date DESC
     `).all(days) as any[];
   }
 
   getRecordingsByDate(date: string): any[] {
+    const contentDateSql = this.recordingContentDateSql('r');
     return this.db.prepare(`
       SELECT r.*,
         COUNT(DISTINCT COALESCE(s.primary_person_id, s.speaker_id)) AS speaker_count,
         GROUP_CONCAT(COALESCE(s.clean_text, s.raw_text), ' ') AS combined_text
       FROM recordings r
       LEFT JOIN segments s ON s.recording_id = r.id
-      WHERE DATE(COALESCE(r.recorded_at, r.processed_at), 'localtime') = ?
+      WHERE ${contentDateSql} = ?
       GROUP BY r.id
       ORDER BY r.recorded_at
     `).all(date);
   }
 
   getExtractedItemsByDate(date: string): any[] {
+    const contentDateSql = this.recordingContentDateSql('r');
     return this.db.prepare(`
       SELECT ei.*
       FROM extracted_items ei
       JOIN segments s ON ei.segment_id = s.id
       JOIN recordings r ON s.recording_id = r.id
-      WHERE DATE(COALESCE(r.recorded_at, r.processed_at), 'localtime') = ?
+      WHERE ${contentDateSql} = ?
     `).all(date);
   }
 

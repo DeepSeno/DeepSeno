@@ -1447,27 +1447,15 @@ export class Processor {
         segmentIds.push(segId);
       }
 
-      // 5. LLM batch clean
-      this.taskQueue.updateTask(task.id, { status: 'optimizing', progress: 40, notes: 'Optimizing text...' });
-      try {
-        const fullText = chunks.map((c) => c.text).join('\n');
-        const cleanedFull = await this.optimizer.batchClean(fullText);
+      // 5. Preserve extracted document text for display. LLM cleanup can summarize
+      // or drop document content, so document transcripts keep clean_text aligned
+      // with raw_text and leave analysis/indexing as best-effort follow-up steps.
+      this.taskQueue.updateTask(task.id, { status: 'optimizing', progress: 40, notes: 'Preserving document text...' });
+      for (let i = 0; i < segmentIds.length; i++) {
         this.throwIfCancelled(signal, recordingId);
-        const cleanedChunks = chunkText(cleanedFull, 512);
-        for (let i = 0; i < segmentIds.length; i++) {
-          this.throwIfCancelled(signal, recordingId);
-          const cleanText = i < cleanedChunks.length ? cleanedChunks[i].text : chunks[i].text;
-          this.db.updateSegmentCleanText(segmentIds[i], cleanText);
-        }
-        console.log(`[Processor] Doc step 5: LLM text optimization done`);
-      } catch (err) {
-        if (isTaskCancelledError(err)) throw err;
-        console.warn('[Processor] Document batchClean failed, using raw text:', err);
-        for (let i = 0; i < segmentIds.length; i++) {
-          this.throwIfCancelled(signal, recordingId);
-          this.db.updateSegmentCleanText(segmentIds[i], chunks[i].text);
-        }
+        this.db.updateSegmentCleanText(segmentIds[i], chunks[i].text);
       }
+      console.log(`[Processor] Doc step 5: Preserved raw document text for ${segmentIds.length} chunks`);
 
       // 6. Information extraction — disabled (items are created on-demand via agent/manual)
 

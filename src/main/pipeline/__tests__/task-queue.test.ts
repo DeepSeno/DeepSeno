@@ -5,6 +5,33 @@ import { TaskQueue, type QueueTask } from '../task-queue';
 
 const TMP_DIR = os.tmpdir().replace(/\\/g, '/');
 
+function createQueueDb(): DatabaseSync {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE task_queue (
+      id TEXT PRIMARY KEY,
+      file_path TEXT NOT NULL,
+      recording_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',
+      progress REAL DEFAULT 0,
+      error TEXT,
+      notes TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      max_retries INTEGER NOT NULL DEFAULT 2,
+      media_type TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE recordings (
+      id INTEGER PRIMARY KEY,
+      status TEXT NOT NULL,
+      processed_at TEXT,
+      status_updated_at TEXT
+    );
+  `);
+  return db;
+}
+
 describe('TaskQueue', () => {
   it('should add and process tasks', async () => {
     const q = new TaskQueue();
@@ -226,6 +253,39 @@ describe('TaskQueue', () => {
 
     expect(task.status).toBe('cancelled');
     expect(task.progress).toBe(0);
+  });
+
+  it('should keep progress monotonic while a task is active', () => {
+    const q = new TaskQueue();
+    const task = q.add(`${TMP_DIR}/progress.txt`);
+
+    q.updateTask(task.id, { status: 'optimizing', progress: 80 });
+    q.updateTask(task.id, { status: 'indexing', progress: 75 });
+
+    expect(task.status).toBe('indexing');
+    expect(task.progress).toBe(80);
+  });
+
+  it('should sync failed task status back to its recording', async () => {
+    const db = createQueueDb();
+    db.prepare('INSERT INTO recordings (id, status, status_updated_at) VALUES (42, ?, ?)').run(
+      'processing',
+      new Date().toISOString(),
+    );
+
+    const q = new TaskQueue();
+    q.setDb(db);
+    q.setProcessor(async () => {
+      throw new Error('synthetic upload analysis failure');
+    });
+
+    q.addReprocess(`${TMP_DIR}/failed-upload.txt`, 42);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const row = db.prepare('SELECT status FROM recordings WHERE id = 42').get() as { status: string };
+    expect(row.status).toBe('failed');
+    q.dispose();
+    db.close();
   });
 
   it('should not cancel a completed task', async () => {

@@ -78,6 +78,25 @@ function logModelRouter(
   appendAppLog(level, 'main', 'model-router', message, details);
 }
 
+function isSelectedLocalChatModelReady(settings: AppSettings): boolean {
+  const selectedModel = settings.localLlmModel || settings.llmModel || 'qwen3.5:4b';
+  const entry = findModel(selectedModel);
+  if (entry) {
+    const validation = validateGGUFFilePath(path.join(getLLMModelsDir(), entry.fileName), entry.fileSizeBytes);
+    return validation.ok;
+  }
+
+  if (path.isAbsolute(selectedModel) || selectedModel.toLowerCase().endsWith('.gguf')) {
+    const filePath = path.isAbsolute(selectedModel)
+      ? selectedModel
+      : path.join(getLLMModelsDir(), selectedModel);
+    const info = readGGUFFileInfo(filePath);
+    return Boolean(info && hasGGUFMagic(info.header));
+  }
+
+  return Boolean(selectedModel.trim());
+}
+
 function logLocalModel(
   level: 'debug' | 'info' | 'warn' | 'error',
   message: string,
@@ -788,8 +807,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       const settings = loadSettings();
       aiProvider = settings.llmProvider;
       if (settings.llmProvider === 'local') {
-        const status = getLlamaServer()?.getStatus();
-        local = Boolean(status?.running && status.port);
+        local = isSelectedLocalChatModelReady(settings);
       } else {
         local = Boolean(settings.cloudApiUrl && settings.cloudApiKey && settings.cloudModel);
       }

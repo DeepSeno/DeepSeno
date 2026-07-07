@@ -40,6 +40,17 @@ interface MonthlyResult {
 
 type ViewMode = 'detail' | 'generate';
 
+interface SummaryGenerationError {
+  error?: string;
+  message?: string;
+}
+
+function getGenerationErrorMessage(result: SummaryGenerationError, noDataMessage: string, fallback: string): string | null {
+  if (!result.error) return null;
+  if (result.error === 'no_data') return noDataMessage;
+  return result.message || fallback;
+}
+
 export default function Reports() {
   const { t } = useI18n();
   const api = useApi();
@@ -175,8 +186,9 @@ export default function Reports() {
     try {
       if (mode === 'daily') {
         const result = await api.generateDailySummary(date);
-        if (result.error === 'no_data') {
-          setError(r.no_data);
+        const message = getGenerationErrorMessage(result, r.no_data, r.error);
+        if (message) {
+          setError(message);
         } else {
           // Reload list and select the new report
           const data = await api.getAllDailySummaries();
@@ -193,8 +205,9 @@ export default function Reports() {
         }
       } else if (mode === 'weekly') {
         const result = await api.generateWeeklySummary(startDate, endDate);
-        if (result.error === 'no_data') {
-          setError(r.no_dailies);
+        const message = getGenerationErrorMessage(result, r.no_dailies, r.error);
+        if (message) {
+          setError(message);
         } else {
           setWeeklyResult(result as unknown as WeeklyResult);
           // Reload weekly list and select the new entry
@@ -210,8 +223,9 @@ export default function Reports() {
         }
       } else {
         const result = await api.generateMonthlySummary(monthStart, monthEnd);
-        if (result.error === 'no_data') {
-          setError(r.no_dailies);
+        const message = getGenerationErrorMessage(result, r.no_dailies, r.error);
+        if (message) {
+          setError(message);
         } else {
           setMonthlyResult(result as unknown as MonthlyResult);
           // Reload monthly list and select the new entry
@@ -226,8 +240,8 @@ export default function Reports() {
           }
         }
       }
-    } catch {
-      setError(r.error);
+    } catch (err: any) {
+      setError(err?.message || r.error);
     } finally {
       setLoading(false);
     }

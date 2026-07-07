@@ -779,6 +779,10 @@ describe('Processor', () => {
 
       expect(result.status).toBe('completed');
       expect(mockExtractText).toHaveBeenCalledWith(`${TMP_DIR}/test_document.pdf`, 'pdf');
+      expect(mockDb.updateSegmentCleanText).toHaveBeenCalledWith(
+        42,
+        'DeepSeno imported document content for indexing fallback verification.',
+      );
       expect(mockIndexSegment).toHaveBeenCalledWith(42, expect.stringContaining('DeepSeno imported document'));
       expect(mockDb.updateRecordingStatus).toHaveBeenCalledWith(1, 'completed');
       expect(mockDb.updateRecordingStatus).not.toHaveBeenCalledWith(1, 'failed');
