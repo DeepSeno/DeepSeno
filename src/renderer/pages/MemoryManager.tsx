@@ -153,29 +153,48 @@ export default function MemoryManager() {
   }, [editingId]);
 
   // ── Debounced auto-save ──────────────────────────────
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const selectedDateRef = useRef(selectedDate);
+  const saveRequestRef = useRef(0);
+  const generationRequestRef = useRef(0);
+
+  useEffect(() => {
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
+
   const handleContentChange = useCallback((newContent: string) => {
+    const saveDate = selectedDate;
+    if (!saveDate) return;
     setDraftOpen(true);
     setConfirmRegenerate(false);
     setDocContent(newContent);
     setLastSaved(null);
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(async () => {
-      setSaving(true);
+    const existingTimer = saveTimersRef.current.get(saveDate);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timer = setTimeout(async () => {
+      saveTimersRef.current.delete(saveDate);
+      const requestId = ++saveRequestRef.current;
+      const displayedSaving = selectedDateRef.current === saveDate;
+      if (displayedSaving) setSaving(true);
       try {
-        await api.memorySaveDocument(selectedDate, newContent);
-        setDocument((prev) => ({
-          id: prev?.id ?? 0,
-          date: selectedDate,
-          content: newContent,
-          auto_generated: 0,
-          updated_at: '',
-        }));
-        setLastSaved(new Date().toLocaleTimeString());
+        await api.memorySaveDocument(saveDate, newContent);
+        if (selectedDateRef.current === saveDate) {
+          setDocument((prev) => ({
+            id: prev?.date === saveDate ? prev.id : 0,
+            date: saveDate,
+            content: newContent,
+            auto_generated: 0,
+            updated_at: '',
+          }));
+          setLastSaved(new Date().toLocaleTimeString());
+        }
         await loadDates();
       } catch { /* ignore */ }
-      setSaving(false);
+      if (displayedSaving && saveRequestRef.current === requestId) {
+        setSaving(false);
+      }
     }, 1000);
+    saveTimersRef.current.set(saveDate, timer);
   }, [selectedDate, api, loadDates]);
 
   const handleStartBlank = useCallback(() => {
@@ -184,9 +203,11 @@ export default function MemoryManager() {
 
   // ── Generate / Regenerate ────────────────────────────
   const handleGenerate = useCallback(async () => {
+    const date = selectedDate;
+    if (!date) return;
+    const requestId = ++generationRequestRef.current;
     setConfirmRegenerate(false);
     setGenerating(true);
-    const date = selectedDate;
     // Create or reuse pending generation promise
     let promise = pendingGenerations.get(date);
     if (!promise) {
@@ -195,14 +216,18 @@ export default function MemoryManager() {
     }
     try {
       const result = await promise;
-      setDocContent(result.content);
-      setDocument({ id: 0, date, content: result.content, auto_generated: 1, updated_at: '' });
-      setDraftOpen(false);
-      setLastSaved(new Date().toLocaleTimeString());
+      if (selectedDateRef.current === date) {
+        setDocContent(result.content);
+        setDocument({ id: 0, date, content: result.content, auto_generated: 1, updated_at: '' });
+        setDraftOpen(false);
+        setLastSaved(new Date().toLocaleTimeString());
+      }
       await loadDates();
     } catch {} finally {
       pendingGenerations.delete(date);
-      setGenerating(false);
+      if (generationRequestRef.current === requestId) {
+        setGenerating(false);
+      }
     }
   }, [api, selectedDate, loadDates]);
 
@@ -212,11 +237,13 @@ export default function MemoryManager() {
     const pending = pendingGenerations.get(selectedDate);
     if (!pending) return;
     let cancelled = false;
+    const requestId = ++generationRequestRef.current;
     setGenerating(true);
+    const date = selectedDate;
     pending.then(async (result) => {
       if (cancelled) return;
       setDocContent(result.content);
-      setDocument({ id: 0, date: selectedDate, content: result.content, auto_generated: 1, updated_at: '' });
+      setDocument({ id: 0, date, content: result.content, auto_generated: 1, updated_at: '' });
       setDraftOpen(false);
       setLastSaved(new Date().toLocaleTimeString());
       await loadDates();
@@ -224,10 +251,17 @@ export default function MemoryManager() {
       console.error('[MemoryManager] Document generation failed:', err);
     }).finally(() => {
       if (cancelled) return;
-      pendingGenerations.delete(selectedDate);
-      setGenerating(false);
+      pendingGenerations.delete(date);
+      if (generationRequestRef.current === requestId) {
+        setGenerating(false);
+      }
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (generationRequestRef.current === requestId) {
+        setGenerating(false);
+      }
+    };
   }, [selectedDate, loadDates]);
 
   const handleRegenerate = useCallback(() => {
