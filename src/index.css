@@ -54,6 +54,7 @@
   /* Scrollbar tints (theme-aware) */
   --kz-scrollbar-thumb:       oklch(0.3 0.005 270);
   --kz-scrollbar-thumb-hover: oklch(0.4 0.006 270);
+  --kz-text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='26' viewBox='0 0 18 26'%3E%3Cpath d='M9 3v20M6 3h6M6 23h6' stroke='%23000' stroke-width='3' stroke-linecap='square'/%3E%3Cpath d='M9 3v20M6 3h6M6 23h6' stroke='%23fff' stroke-width='1.5' stroke-linecap='square'/%3E%3C/svg%3E") 9 13, text;
 
   --serif: "Newsreader", "Source Serif 4", "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STSong", "SimSun", Georgia, serif;
   --sans:  "Geist", "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -634,8 +635,26 @@
 .kz-toggle--on::after { left: 18px; background: var(--c-accent-ink); }
 
 /* ---------- Inputs ---------- */
-.kz-input { height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-card); color: var(--ink); outline: none; transition: border-color 0.15s, box-shadow 0.15s; font-family: inherit; font-size: 12.5px; }
+input, textarea { caret-color: var(--c-accent); }
+textarea,
+input:not([type]),
+input[type="email"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+input[type="tel"],
+input[type="text"],
+input[type="url"],
+[contenteditable="true"],
+.kz-editor-input {
+  cursor: var(--kz-text-cursor);
+}
+.kz-input { height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-card); color: var(--ink); caret-color: var(--c-accent); outline: none; transition: border-color 0.15s, box-shadow 0.15s; font-family: inherit; font-size: 12.5px; }
 .kz-input:focus { border-color: var(--c-accent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--c-accent) 18%, transparent); }
+.kz-input::selection { background: color-mix(in oklch, var(--c-accent) 35%, transparent); color: var(--ink); }
+.kz-editor-input { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); caret-color: var(--c-accent); outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+.kz-editor-input:focus { border-color: var(--c-accent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--c-accent) 18%, transparent); }
+.kz-editor-input::selection { background: color-mix(in oklch, var(--c-accent) 35%, transparent); color: var(--ink); }
 .kz-select:hover:not(:disabled) { border-color: var(--line-strong); }
 
 /* ---------- Tabs pill — sizes match design spec .tabs ---------- */

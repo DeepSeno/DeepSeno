@@ -3,9 +3,10 @@ declare global {
     recorderApi: {
       onStartCommand: (cb: (scene?: string) => void) => () => void;
       onStopCommand: (cb: () => void) => () => void;
-      notifyStarted: () => void;
+      notifyStarted: (details?: { scene?: string; activeSources?: AudioSource[]; warnings?: string[] }) => void;
       notifyStopped: () => void;
       reportError: (message: string) => void;
+      reportWarning: (message: string) => void;
       sendRealtimeChunk: (buffer: ArrayBuffer, source?: string) => void;
       onLiveSegment: (cb: (segment: { text: string; start?: number; source?: string; id?: number }) => void) => () => void;
       onSegmentOptimized: (cb: (data: { segId: number; cleanText: string }) => void) => () => void;
@@ -18,6 +19,8 @@ declare global {
     };
   }
 }
+
+type AudioSource = 'mic' | 'system';
 
 // --- DOM references ---
 const timerEl = document.getElementById('timer')!;
@@ -99,13 +102,23 @@ function setExpanded(value: boolean) {
 }
 
 // --- Mic capture ---
+const MIC_CAPTURE_ERRORS = new Set([
+  'microphone_denied',
+  'microphone_not_found',
+  'microphone_unavailable',
+  'microphone_not_supported',
+]);
+
+const SYSTEM_AUDIO_CAPTURE_ERRORS = new Set([
+  'system_audio_denied',
+  'system_audio_no_track',
+  'system_audio_unavailable',
+  'system_audio_not_supported',
+  'system_audio_fallback_mic_only',
+]);
+
 function mapMicCaptureError(err: unknown): string {
-  if (err instanceof Error && [
-    'microphone_denied',
-    'microphone_not_found',
-    'microphone_unavailable',
-    'microphone_not_supported',
-  ].includes(err.message)) {
+  if (err instanceof Error && MIC_CAPTURE_ERRORS.has(err.message)) {
     return err.message;
   }
   if (err instanceof DOMException) {
@@ -114,6 +127,28 @@ function mapMicCaptureError(err: unknown): string {
     if (err.name === 'NotReadableError' || err.name === 'TrackStartError') return 'microphone_unavailable';
   }
   return String(err || 'microphone_unavailable');
+}
+
+function mapSystemAudioCaptureError(err: unknown): string {
+  if (err instanceof Error && SYSTEM_AUDIO_CAPTURE_ERRORS.has(err.message)) {
+    return err.message;
+  }
+  if (err instanceof DOMException) {
+    if (err.name === 'NotAllowedError' || err.name === 'SecurityError') return 'system_audio_denied';
+    if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') return 'system_audio_no_track';
+    if (err.name === 'NotReadableError' || err.name === 'TrackStartError' || err.name === 'AbortError') return 'system_audio_unavailable';
+    if (err.name === 'NotSupportedError' || err.name === 'TypeError') return 'system_audio_not_supported';
+  }
+  const message = err instanceof Error ? err.message : String(err || '');
+  if (/no audio track|audio track available/i.test(message)) return 'system_audio_no_track';
+  return 'system_audio_unavailable';
+}
+
+function mapRecordingCaptureError(err: unknown): string {
+  if (err instanceof Error && SYSTEM_AUDIO_CAPTURE_ERRORS.has(err.message)) {
+    return err.message;
+  }
+  return mapMicCaptureError(err);
 }
 
 async function startMicCapture(): Promise<void> {
@@ -228,16 +263,27 @@ function stopMicCapture(): void {
 async function startSystemAudio(): Promise<void> {
   // Use getDisplayMedia for system audio — setDisplayMediaRequestHandler
   // in main process auto-selects screen source with audio: 'loopback'
-  const stream = await navigator.mediaDevices.getDisplayMedia({
-    audio: true,
-    video: true,  // required by spec, discarded immediately
-  });
+  console.log('[sys-diag] Requesting getDisplayMedia for system audio...');
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error('system_audio_not_supported');
+  }
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      audio: true,
+      video: true,  // required by spec, discarded immediately
+    });
+  } catch (err) {
+    console.log(`[sys-diag] getDisplayMedia error: ${err instanceof DOMException ? `${err.name}: ${err.message}` : err}`);
+    throw new Error(mapSystemAudioCaptureError(err));
+  }
 
   // Discard video tracks — we only need audio
   stream.getVideoTracks().forEach(track => track.stop());
 
   if (stream.getAudioTracks().length === 0) {
-    throw new Error('No audio track available in system capture. Check screen recording permission.');
+    throw new Error('system_audio_no_track');
   }
 
   // Diagnose audio track
@@ -299,11 +345,31 @@ async function startRecording(scene: string = 'dictation') {
   const needsSystem = ['online_meeting', 'media'].includes(scene);
 
   try {
+    const activeSources: AudioSource[] = [];
+    const warnings: string[] = [];
+
     if (needsMic) {
       await startMicCapture();
+      activeSources.push('mic');
     }
     if (needsSystem) {
-      await startSystemAudio();
+      try {
+        await startSystemAudio();
+        activeSources.push('system');
+      } catch (err) {
+        const code = mapSystemAudioCaptureError(err);
+        console.warn(`[sys-diag] System audio capture failed: ${code}`);
+        if (scene === 'online_meeting' && activeSources.includes('mic')) {
+          warnings.push('system_audio_fallback_mic_only');
+          window.recorderApi.reportWarning('system_audio_fallback_mic_only');
+        } else {
+          throw new Error(code);
+        }
+      }
+    }
+
+    if (activeSources.length === 0) {
+      throw new Error(needsSystem ? 'system_audio_unavailable' : 'microphone_unavailable');
     }
 
     recording = true;
@@ -343,14 +409,14 @@ async function startRecording(scene: string = 'dictation') {
     }
 
     setExpanded(true);
-    window.recorderApi.notifyStarted();
+    window.recorderApi.notifyStarted({ scene, activeSources, warnings });
   } catch (err) {
     starting = false;
     // Cleanup any partially initialized streams
     stopMicCapture();
     stopSystemAudio();
 
-    window.recorderApi.reportError(mapMicCaptureError(err));
+    window.recorderApi.reportError(mapRecordingCaptureError(err));
     window.recorderApi.notifyStopped();
   }
 }

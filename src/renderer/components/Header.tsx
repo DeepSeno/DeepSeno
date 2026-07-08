@@ -67,8 +67,17 @@ function getRecordingErrorText(error: string, t: any): string {
   if (error === 'microphone_unavailable') return t.rec.mic_unavailable;
   if (error === 'microphone_not_supported') return t.rec.mic_not_supported;
   if (error === 'mic_disconnected') return t.rec.mic_disconnected;
+  if (error === 'system_audio_denied') return t.rec.system_audio_denied;
+  if (error === 'system_audio_no_track') return t.rec.system_audio_no_track;
+  if (error === 'system_audio_unavailable') return t.rec.system_audio_unavailable;
+  if (error === 'system_audio_not_supported') return t.rec.system_audio_not_supported;
   if (error === 'ffmpeg_unavailable') return t.rec.ffmpeg_missing;
   return error;
+}
+
+function getRecordingWarningText(warning: string, t: any): string {
+  if (warning === 'system_audio_fallback_mic_only') return t.rec.system_audio_fallback_mic_only;
+  return getRecordingErrorText(warning, t);
 }
 
 export default function Header() {
@@ -100,6 +109,13 @@ export default function Header() {
   useEffect(() => {
     const unsub = api.onRecordingError((_event: any, error: string) => {
       toast('error', t.rec.recording_error, getRecordingErrorText(error, t));
+    });
+    return unsub;
+  }, [api, t, toast]);
+
+  useEffect(() => {
+    const unsub = api.onRecordingWarning((_event: any, warning: string) => {
+      toast('info', t.rec.recording_warning, getRecordingWarningText(warning, t));
     });
     return unsub;
   }, [api, t, toast]);

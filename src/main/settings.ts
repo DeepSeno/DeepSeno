@@ -91,6 +91,7 @@ export interface LocalSettings {
   outputDir: string;
   llamaServerPort: number;               // port for bundled llama-server (0 = auto-select)
   llamaEmbedPort: number;                // port for embedding llama-server instance
+  llamaServerBackend: string;             // last known-good llama-server backend on this machine
   localLlmModel: string;                 // GGUF file path for local LLM
   localEmbedModel: string;               // GGUF file path for local embedding model
   obsidianVaultDir: string;
@@ -220,6 +221,7 @@ function getDefaults(): AppSettings {
     outputDir: getOutputDir(),
     llamaServerPort: 0,
     llamaEmbedPort: 0,
+    llamaServerBackend: '',
     localLlmModel: '',
     localEmbedModel: '',
     obsidianVaultDir: '',

@@ -105,30 +105,33 @@ download_windows() {
   local platform="win32-x64"
   local dest_dir="$RESOURCES_DIR/$platform"
 
-  # Download all three backends: CUDA 13, Vulkan, CPU
-  download_windows_asset "$dest_dir" \
+  # Keep backend packages isolated so each llama-server loads matching DLLs.
+  download_windows_asset "$dest_dir/cuda-13.3" \
     "llama-${LLAMA_CPP_TAG}-bin-win-cuda-13.3-x64.zip" \
-    "llama-server-cuda.exe"
-  download_windows_asset "$dest_dir" \
+    "CUDA 13.3"
+  download_windows_asset "$dest_dir/cuda-12.4" \
+    "llama-${LLAMA_CPP_TAG}-bin-win-cuda-12.4-x64.zip" \
+    "CUDA 12.4"
+  download_windows_asset "$dest_dir/vulkan" \
     "llama-${LLAMA_CPP_TAG}-bin-win-vulkan-x64.zip" \
-    "llama-server-vulkan.exe"
-  download_windows_asset "$dest_dir" \
+    "Vulkan"
+  download_windows_asset "$dest_dir/cpu" \
     "llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip" \
-    "llama-server-cpu.exe"
+    "CPU"
 }
 
 download_windows_asset() {
   local dest_dir="$1"
   local asset="$2"
-  local target_name="$3"
+  local backend_label="$3"
   local url="${RELEASE_BASE}/${asset}"
 
-  if [[ -f "$dest_dir/$target_name" ]]; then
-    log_info "$target_name already exists, skipping."
+  if [[ -f "$dest_dir/llama-server.exe" ]]; then
+    log_info "Windows $backend_label llama-server already exists, skipping."
     return 0
   fi
 
-  log_step "Downloading $asset..."
+  log_step "Downloading Windows $backend_label backend ($asset)..."
   mkdir -p "$dest_dir"
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -140,7 +143,9 @@ download_windows_asset() {
   log_info "  Extracting..."
   unzip -o -q "$tmp_dir/llama.zip" -d "$tmp_dir"
 
-  # Find llama-server.exe and all DLLs
+  # Find llama-server.exe and copy the whole flat backend payload. The release
+  # archives are backend-specific; mixing DLLs across them can make Windows load
+  # the wrong runtime at process start.
   local exe_path
   exe_path="$(find "$tmp_dir" -name 'llama-server.exe' -not -path '*/__MACOSX/*' | head -1)"
   if [[ -z "$exe_path" ]]; then
@@ -151,13 +156,9 @@ download_windows_asset() {
   local exe_dir
   exe_dir="$(dirname "$exe_path")"
 
-  # Copy the binary with the target name
-  cp "$exe_path" "$dest_dir/$target_name"
+  find "$exe_dir" -maxdepth 1 -type f -exec cp {} "$dest_dir/" \;
 
-  # Copy all DLLs from the same directory
-  find "$exe_dir" -maxdepth 1 -name '*.dll' -exec cp {} "$dest_dir/" \;
-
-  log_info "$target_name installed to $dest_dir"
+  log_info "Windows $backend_label backend installed to $dest_dir"
 }
 
 # ---- Platform dispatcher ----

@@ -109,9 +109,9 @@ export async function startFileWatching(): Promise<void> {
   if (ctx) return _startFileWatching(ctx);
 }
 
-export async function startRealtimeTranscription(scene?: string) {
+export async function startRealtimeTranscription(scene?: string, activeSources?: ('mic' | 'system')[]) {
   if (!ctx) return { success: false as const, error: 'Not initialized' };
-  return _startRealtimeTranscription(ctx, scene as any);
+  return _startRealtimeTranscription(ctx, scene as any, activeSources);
 }
 
 export async function stopRealtimeTranscription() {

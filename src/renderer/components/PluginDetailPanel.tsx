@@ -396,15 +396,12 @@ export function PluginDetailPanel({ plugin, onClose, onRefresh }: PluginDetailPa
                 value={editJson}
                 onChange={(e) => { setEditJson(e.target.value); setEditError(''); }}
                 rows={16}
-                className="w-full kz-mono kz-text-ink resize-y leading-relaxed"
+                className="kz-editor-input w-full kz-mono resize-y leading-relaxed"
                 style={{
-                  background: 'var(--bg-elev)',
-                  border: '1px solid var(--line)',
-                  borderRadius: 8,
                   padding: '10px 14px',
                   fontSize: 12,
-                  outline: 'none',
                 }}
+                autoFocus
                 spellCheck={false}
               />
               {editError && (

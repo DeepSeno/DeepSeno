@@ -1,4 +1,4 @@
-import { spawn, execFile, ChildProcess } from 'child_process';
+import { spawn, execFile, execSync, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
@@ -18,6 +18,126 @@ export interface LlamaServerStatus {
   pid: number | null;
   model: string | null;  // null in router mode
   mode: 'single' | 'router';
+  backend: string | null;
+}
+
+export interface LlamaServerBackendCandidate {
+  id: string;
+  label: string;
+  binaryPath: string;
+  workDir: string;
+  env: NodeJS.ProcessEnv;
+}
+
+interface ResolveBackendCandidatesOptions {
+  platform: NodeJS.Platform | string;
+  arch: string;
+  resourcesDir: string;
+  hasNvidiaGpu?: boolean;
+  exists?: (filePath: string) => boolean;
+  env?: NodeJS.ProcessEnv;
+  pathDelimiter?: string;
+}
+
+interface LaunchState {
+  spawnError: Error | null;
+  exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
+  output: string[];
+}
+
+interface LaunchedServer {
+  proc: ChildProcess;
+  state: LaunchState;
+  candidate: LlamaServerBackendCandidate;
+}
+
+function mergePathEnv(env: NodeJS.ProcessEnv, dir: string, delimiter: string = path.delimiter): NodeJS.ProcessEnv {
+  const next = { ...env };
+  const pathKey = Object.keys(next).find((key) => key.toLowerCase() === 'path') || 'PATH';
+  next[pathKey] = [dir, next[pathKey] || ''].filter(Boolean).join(delimiter);
+  return next;
+}
+
+function mergeDyldEnv(env: NodeJS.ProcessEnv, dir: string, delimiter: string = path.delimiter): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    DYLD_LIBRARY_PATH: [dir, env.DYLD_LIBRARY_PATH || ''].filter(Boolean).join(delimiter),
+  };
+}
+
+export function resolveLlamaServerBackendCandidates(
+  options: ResolveBackendCandidatesOptions,
+): LlamaServerBackendCandidate[] {
+  const exists = options.exists || fs.existsSync;
+  const env = options.env || process.env;
+  const delimiter = options.pathDelimiter || path.delimiter;
+  const candidates: LlamaServerBackendCandidate[] = [];
+
+  if (options.platform === 'darwin') {
+    const dir = path.join(options.resourcesDir, `darwin-${options.arch}`);
+    const binaryPath = path.join(dir, 'llama-server');
+    if (exists(binaryPath)) {
+      candidates.push({
+        id: 'darwin',
+        label: `macOS ${options.arch}`,
+        binaryPath,
+        workDir: dir,
+        env: mergeDyldEnv(env, dir, delimiter),
+      });
+    }
+    return candidates;
+  }
+
+  if (options.platform !== 'win32' || options.arch !== 'x64') {
+    return candidates;
+  }
+
+  const root = path.join(options.resourcesDir, 'win32-x64');
+  const add = (id: string, label: string, dir: string, fileName = 'llama-server.exe') => {
+    const binaryPath = path.join(dir, fileName);
+    if (!exists(binaryPath)) return false;
+    candidates.push({
+      id,
+      label,
+      binaryPath,
+      workDir: dir,
+      env: mergePathEnv(env, dir, delimiter),
+    });
+    return true;
+  };
+
+  if (options.hasNvidiaGpu) {
+    const addedCuda13 = add('cuda-13.3', 'CUDA 13.3', path.join(root, 'cuda-13.3'));
+    const addedCuda12 = add('cuda-12.4', 'CUDA 12.4', path.join(root, 'cuda-12.4'));
+    const addedModernCuda = addedCuda13 || addedCuda12;
+    if (!addedModernCuda) {
+      add('cuda', 'CUDA', root, 'llama-server-cuda.exe');
+    }
+  }
+
+  if (!add('vulkan', 'Vulkan', path.join(root, 'vulkan'))) {
+    add('vulkan', 'Vulkan', root, 'llama-server-vulkan.exe');
+  }
+
+  if (!add('cpu', 'CPU', path.join(root, 'cpu'))) {
+    add('cpu', 'CPU', root, 'llama-server-cpu.exe');
+  }
+
+  return candidates;
+}
+
+export function prioritizeLlamaBackendCandidates(
+  candidates: LlamaServerBackendCandidate[],
+  preferredBackend?: string | null,
+): LlamaServerBackendCandidate[] {
+  if (!preferredBackend) return candidates;
+  const index = candidates.findIndex((candidate) => candidate.id === preferredBackend);
+  if (index <= 0) return candidates;
+  return [
+    candidates[index],
+    ...candidates.slice(0, index),
+    ...candidates.slice(index + 1),
+  ];
 }
 
 export class LlamaServerManager {
@@ -25,6 +145,8 @@ export class LlamaServerManager {
   private port: number | null = null;
   private currentModel: string | null = null;
   private mode: 'single' | 'router' = 'single';
+  private backend: string | null = null;
+  private lifecycleQueue: Promise<void> = Promise.resolve();
 
   private listChildPids(pid: number): Promise<number[]> {
     return new Promise((resolve) => {
@@ -90,44 +212,35 @@ export class LlamaServerManager {
     return path.join(__dirname, '..', '..', 'resources', 'llama-server');
   }
 
-  /** Get the platform-specific binary name and path */
-  private getBinaryPath(): string | null {
-    const platform = process.platform;  // darwin | win32
-    const arch = process.arch;         // arm64 | x64
-    const resourcesDir = this.getResourcesDir();
-
-    if (platform === 'darwin') {
-      const dir = path.join(resourcesDir, `darwin-${arch}`);
-      const bin = path.join(dir, 'llama-server');
-      if (fs.existsSync(bin)) {
-        // Set DYLD_LIBRARY_PATH so llama-server can find its .dylib files
-        process.env.DYLD_LIBRARY_PATH = dir;
-        return bin;
-      }
+  private getPreferredBackend(): string | null {
+    try {
+      // Lazy require keeps unit tests that only inspect path resolution simple.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { loadSettings } = require('../settings');
+      return loadSettings().llamaServerBackend || null;
+    } catch {
       return null;
     }
+  }
 
-    if (platform === 'win32' && arch === 'x64') {
-      const dir = path.join(resourcesDir, 'win32-x64');
-
-      // NVIDIA GPU → prefer CUDA
-      if (this.hasNvidiaGpu()) {
-        const cudaPath = path.join(dir, 'llama-server-cuda.exe');
-        if (fs.existsSync(cudaPath)) return cudaPath;
-      }
-
-      // Fallback: Vulkan (works on AMD, Intel, and NVIDIA)
-      const vulkanPath = path.join(dir, 'llama-server-vulkan.exe');
-      if (fs.existsSync(vulkanPath)) return vulkanPath;
-
-      // Last resort: CPU only
-      const cpuPath = path.join(dir, 'llama-server-cpu.exe');
-      if (fs.existsSync(cpuPath)) return cpuPath;
-
-      return null;
+  private persistPreferredBackend(backend: string): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { updateSettings } = require('../settings');
+      updateSettings({ llamaServerBackend: backend });
+    } catch {
+      // Persisting the optimization must never block inference.
     }
+  }
 
-    return null;
+  private getBackendCandidates(): LlamaServerBackendCandidate[] {
+    const candidates = resolveLlamaServerBackendCandidates({
+      platform: process.platform,
+      arch: process.arch,
+      resourcesDir: this.getResourcesDir(),
+      hasNvidiaGpu: this.hasNvidiaGpu(),
+    });
+    return prioritizeLlamaBackendCandidates(candidates, this.getPreferredBackend());
   }
 
   // ─── GPU detection ───────────────────────────────────────────
@@ -137,7 +250,7 @@ export class LlamaServerManager {
     // In production, check for nvidia-smi or dxgi output
     try {
       if (process.platform !== 'win32') return false;
-      const result = require('child_process').execSync(
+      const result = execSync(
         'nvidia-smi --query-gpu=name --format=csv,noheader 2>nul',
         { timeout: 5000, windowsHide: true }
       ).toString().trim();
@@ -166,11 +279,36 @@ export class LlamaServerManager {
 
   // ─── Health check ────────────────────────────────────────────
 
-  private async waitForReady(port: number, timeoutMs = 60000): Promise<void> {
+  private formatLaunchOutput(launch: LaunchedServer): string {
+    const output = launch.state.output.join('\n').trim();
+    if (!output) return '';
+    const truncated = output.length > 5000 ? output.slice(-5000) : output;
+    return `\nRecent llama-server output (${launch.candidate.label}):\n${truncated}`;
+  }
+
+  private describeLaunchFailure(launch: LaunchedServer, reason: string): Error {
+    return new Error(`${reason}${this.formatLaunchOutput(launch)}`);
+  }
+
+  private async waitForReady(launch: LaunchedServer, port: number, timeoutMs = 60000): Promise<void> {
     const startedAt = Date.now();
     const deadline = Date.now() + timeoutMs;
     let attempts = 0;
     while (Date.now() < deadline) {
+      if (launch.state.spawnError) {
+        throw this.describeLaunchFailure(
+          launch,
+          `llama-server ${launch.candidate.label} failed to start: ${launch.state.spawnError.message}`,
+        );
+      }
+      if (launch.state.exitInfo) {
+        const { code, signal } = launch.state.exitInfo;
+        throw this.describeLaunchFailure(
+          launch,
+          `llama-server ${launch.candidate.label} exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+        );
+      }
+
       attempts += 1;
       try {
         const res = await fetch(`http://127.0.0.1:${port}/health`, {
@@ -192,78 +330,182 @@ export class LlamaServerManager {
       await new Promise((r) => setTimeout(r, 500));
     }
     console.error(`[LlamaServer] health failed port=${port} attempts=${attempts} timeoutMs=${timeoutMs}`);
-    throw new Error(`llama-server did not become ready within ${timeoutMs}ms`);
+    throw this.describeLaunchFailure(
+      launch,
+      `llama-server ${launch.candidate.label} did not become ready within ${timeoutMs}ms`,
+    );
   }
 
   // ─── Start / Stop ────────────────────────────────────────────
+
+  private enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleQueue.then(task, task);
+    this.lifecycleQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private launchProcess(candidate: LlamaServerBackendCandidate, args: string[]): LaunchedServer {
+    const state: LaunchState = {
+      spawnError: null,
+      exitInfo: null,
+      output: [],
+    };
+
+    console.log(`[LlamaServer] Starting (${candidate.label}): ${candidate.binaryPath} ${args.join(' ')}`);
+
+    const proc = spawn(candidate.binaryPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: false,
+      cwd: candidate.workDir,
+      env: candidate.env,
+    });
+
+    const appendOutput = (stream: 'stdout' | 'stderr', data: Buffer) => {
+      const text = data.toString().trim();
+      if (!text) return;
+      state.output.push(`[${stream}] ${text}`);
+      if (state.output.length > 80) state.output.splice(0, state.output.length - 80);
+      if (stream === 'stdout') {
+        console.log(`[LlamaServer] ${text}`);
+      } else {
+        console.error(`[LlamaServer:err] ${text}`);
+      }
+    };
+
+    proc.stdout?.on('data', (data: Buffer) => appendOutput('stdout', data));
+    proc.stderr?.on('data', (data: Buffer) => appendOutput('stderr', data));
+
+    proc.once('error', (err) => {
+      state.spawnError = err;
+      console.error(`[LlamaServer] Process error (${candidate.label}):`, err);
+    });
+
+    proc.once('exit', (code, signal) => {
+      state.exitInfo = { code, signal };
+      console.log(`[LlamaServer] Process exited (${candidate.label}) with code ${code}, signal ${signal ?? 'none'}`);
+      if (this.process === proc) {
+        this.process = null;
+        this.port = null;
+        this.currentModel = null;
+        this.mode = 'single';
+        this.backend = null;
+      }
+    });
+
+    return { proc, state, candidate };
+  }
+
+  private async stopInternal(): Promise<void> {
+    if (!this.process) return;
+    console.log('[LlamaServer] Stopping...');
+
+    const proc = this.process;
+    const pid = proc.pid;
+    this.process = null;
+    this.port = null;
+    this.currentModel = null;
+    this.backend = null;
+
+    // Stop direct child model workers before the router exits and they get
+    // re-parented. This matters during auto-update because stale workers keep
+    // binaries open inside the old .app bundle.
+    if (pid) await this.killChildProcesses(pid, 'TERM');
+
+    proc.kill('SIGTERM');
+    const killed = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        if (pid) void this.killChildProcesses(pid, 'KILL');
+        proc.kill('SIGKILL');
+        resolve(false);
+      }, 5000);
+      proc.once('exit', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+
+    console.log(`[LlamaServer] Stopped (graceful=${killed})`);
+  }
+
+  private getNoBinaryError(): Error {
+    return new Error(
+      `llama-server binary not found for ${process.platform}-${process.arch}. ` +
+      'Run: bash scripts/bundle-llama-server.sh'
+    );
+  }
+
+  private async startWithFallback(
+    buildArgs: (port: number) => string[],
+    mode: 'single' | 'router',
+    model: string | null,
+    describeAttempt: (candidate: LlamaServerBackendCandidate, port: number) => void,
+  ): Promise<{ port: number }> {
+    await this.stopInternal();
+
+    const candidates = this.getBackendCandidates();
+    if (candidates.length === 0) throw this.getNoBinaryError();
+
+    const failures: string[] = [];
+    for (const candidate of candidates) {
+      const port = await this.findFreePort();
+      this.port = port;
+      this.mode = mode;
+      this.currentModel = model;
+      this.backend = candidate.id;
+      describeAttempt(candidate, port);
+
+      const launch = this.launchProcess(candidate, buildArgs(port));
+      this.process = launch.proc;
+
+      try {
+        await this.waitForReady(launch, port);
+        this.persistPreferredBackend(candidate.id);
+        console.log(`[LlamaServer] Ready on http://127.0.0.1:${port} via ${candidate.label}`);
+        return { port };
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        failures.push(`${candidate.label}: ${message}`);
+        console.warn(`[LlamaServer] ${candidate.label} failed, trying next backend if available: ${message}`);
+        await this.stopInternal();
+      }
+    }
+
+    throw new Error(`llama-server failed to start with every backend:\n${failures.join('\n\n')}`);
+  }
 
   async start(modelPath: string, options?: {
     contextSize?: number;
     gpuLayers?: number;
     flashAttn?: boolean;
   }): Promise<{ port: number }> {
-    if (this.process) {
-      await this.stop();
-    }
-
-    const binaryPath = this.getBinaryPath();
-    if (!binaryPath) {
-      throw new Error(
-        `llama-server binary not found for ${process.platform}-${process.arch}. ` +
-        'Run: bash scripts/bundle-llama-server.sh'
-      );
-    }
-
-    if (!fs.existsSync(modelPath)) {
-      throw new Error(`Model file not found: ${modelPath}`);
-    }
-
-    this.port = await this.findFreePort();
-    this.currentModel = modelPath;
-
-    const args: string[] = [
-      '-m', modelPath,
-      '--host', '127.0.0.1',
-      '--port', String(this.port),
-      '-ngl', String(options?.gpuLayers ?? 99),
-      '-c', String(options?.contextSize ?? 32768),
-      '--embeddings',
-    ];
-
-    if (options?.flashAttn !== false) {
-      args.push('-fa', 'on');
-    }
-
-    console.log(`[LlamaServer] Starting: ${binaryPath} ${args.join(' ')}`);
-
-    this.process = spawn(binaryPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,       // No console window on Windows
-      detached: false,         // Kill with parent
-    });
-
-    this.process.stdout?.on('data', (data: Buffer) => {
-      console.log(`[LlamaServer] ${data.toString().trim()}`);
-    });
-
-    this.process.stderr?.on('data', (data: Buffer) => {
-      console.error(`[LlamaServer:err] ${data.toString().trim()}`);
-    });
-
-    this.process.on('exit', (code) => {
-      console.log(`[LlamaServer] Process exited with code ${code}`);
-      if (this.process?.pid === (this.process as ChildProcess)?.pid) {
-        this.process = null;
-        this.port = null;
-        this.currentModel = null;
+    return this.enqueueLifecycle(async () => {
+      if (!fs.existsSync(modelPath)) {
+        throw new Error(`Model file not found: ${modelPath}`);
       }
+
+      return this.startWithFallback(
+        (port) => {
+          const args: string[] = [
+            '-m', modelPath,
+            '--host', '127.0.0.1',
+            '--port', String(port),
+            '-ngl', String(options?.gpuLayers ?? 99),
+            '-c', String(options?.contextSize ?? 32768),
+            '--embeddings',
+          ];
+          if (options?.flashAttn !== false) {
+            args.push('-fa', 'on');
+          }
+          return args;
+        },
+        'single',
+        modelPath,
+        (candidate, port) => {
+          console.log(`[LlamaServer] Single launch plan: backend=${candidate.label} port=${port} model=${modelPath}`);
+        },
+      );
     });
-
-    // Wait for server to be ready
-    await this.waitForReady(this.port);
-
-    console.log(`[LlamaServer] Ready on http://127.0.0.1:${this.port}`);
-    return { port: this.port };
   }
 
   /**
@@ -275,105 +517,41 @@ export class LlamaServerManager {
     flashAttn?: boolean;
     presetPath?: string;
   }): Promise<{ port: number }> {
-    if (this.process) {
-      await this.stop();
-    }
-
-    const binaryPath = this.getBinaryPath();
-    if (!binaryPath) {
-      throw new Error(
-        `llama-server binary not found for ${process.platform}-${process.arch}. ` +
-        'Run: bash scripts/bundle-llama-server.sh'
-      );
-    }
-
-    if (!fs.existsSync(modelsDir)) {
-      throw new Error(`Models directory not found: ${modelsDir}`);
-    }
-
-    this.port = await this.findFreePort();
-    this.mode = 'router';
-    this.currentModel = null;
-    console.log(`[LlamaServer] Router launch plan: port=${this.port} modelsDir=${modelsDir} maxModels=${options?.maxModels ?? 2} flashAttn=${options?.flashAttn !== false} presetPath=${options?.presetPath || '(none)'}`);
-
-    const args: string[] = [
-      '--host', '127.0.0.1',
-      '--port', String(this.port),
-      '--models-dir', modelsDir,
-      '--models-max', String(options?.maxModels ?? 2),
-      '--embeddings',
-    ];
-
-    if (options?.presetPath && fs.existsSync(options.presetPath)) {
-      args.push('--models-preset', options.presetPath);
-    }
-
-    if (options?.flashAttn !== false) {
-      args.push('-fa', 'on');
-    }
-
-    console.log(`[LlamaServer] Starting router: ${binaryPath} ${args.join(' ')}`);
-
-    this.process = spawn(binaryPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      detached: false,
-    });
-
-    this.process.stdout?.on('data', (data: Buffer) => {
-      console.log(`[LlamaServer] ${data.toString().trim()}`);
-    });
-
-    this.process.stderr?.on('data', (data: Buffer) => {
-      console.error(`[LlamaServer:err] ${data.toString().trim()}`);
-    });
-
-    this.process.on('exit', (code) => {
-      console.log(`[LlamaServer] Process exited with code ${code}`);
-      if (this.process?.pid === (this.process as ChildProcess)?.pid) {
-        this.process = null;
-        this.port = null;
-        this.currentModel = null;
-        this.mode = 'single';
+    return this.enqueueLifecycle(async () => {
+      if (!fs.existsSync(modelsDir)) {
+        throw new Error(`Models directory not found: ${modelsDir}`);
       }
+
+      return this.startWithFallback(
+        (port) => {
+          const args: string[] = [
+            '--host', '127.0.0.1',
+            '--port', String(port),
+            '--models-dir', modelsDir,
+            '--models-max', String(options?.maxModels ?? 2),
+          ];
+
+          if (options?.presetPath && fs.existsSync(options.presetPath)) {
+            args.push('--models-preset', options.presetPath);
+          }
+
+          if (options?.flashAttn !== false) {
+            args.push('-fa', 'on');
+          }
+
+          return args;
+        },
+        'router',
+        null,
+        (candidate, port) => {
+          console.log(`[LlamaServer] Router launch plan: backend=${candidate.label} port=${port} modelsDir=${modelsDir} maxModels=${options?.maxModels ?? 2} flashAttn=${options?.flashAttn !== false} presetPath=${options?.presetPath || '(none)'}`);
+        },
+      );
     });
-
-    await this.waitForReady(this.port);
-
-    console.log(`[LlamaServer] Router ready on http://127.0.0.1:${this.port}`);
-    return { port: this.port };
   }
 
   async stop(): Promise<void> {
-    if (!this.process) return;
-    console.log('[LlamaServer] Stopping...');
-
-    const proc = this.process;
-    const pid = proc.pid;
-    this.process = null;
-    this.port = null;
-    this.currentModel = null;
-
-    // Stop direct child model workers before the router exits and they get
-    // re-parented. This matters during auto-update because stale workers keep
-    // binaries open inside the old .app bundle.
-    if (pid) await this.killChildProcesses(pid, 'TERM');
-
-    // Send SIGTERM, then force kill after 5s
-    proc.kill('SIGTERM');
-    const killed = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        if (pid) void this.killChildProcesses(pid, 'KILL');
-        proc.kill('SIGKILL');
-        resolve(false);
-      }, 5000);
-      proc.on('exit', () => {
-        clearTimeout(timer);
-        resolve(true);
-      });
-    });
-
-    console.log(`[LlamaServer] Stopped (graceful=${killed})`);
+    return this.enqueueLifecycle(() => this.stopInternal());
   }
 
   // ─── Status ──────────────────────────────────────────────────
@@ -385,6 +563,7 @@ export class LlamaServerManager {
       pid: this.process?.pid ?? null,
       model: this.currentModel,
       mode: this.mode,
+      backend: this.backend,
     };
   }
 

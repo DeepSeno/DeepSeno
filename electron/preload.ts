@@ -504,6 +504,10 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('recording:error', cb);
     return () => { ipcRenderer.removeListener('recording:error', cb); };
   },
+  onRecordingWarning: (cb: (_event: any, warning: string) => void) => {
+    ipcRenderer.on('recording:warning', cb);
+    return () => { ipcRenderer.removeListener('recording:warning', cb); };
+  },
   onPostProcessing: (cb: (_event: any, data: { active: boolean; recordingId: number }) => void) => {
     ipcRenderer.on('recording:postProcessing', cb);
     return () => { ipcRenderer.removeListener('recording:postProcessing', cb); };

@@ -72,7 +72,7 @@ import { app, BrowserWindow, protocol, globalShortcut, ipcMain, session, clipboa
 if (!app.isPackaged) {
   app.commandLine.appendSwitch('remote-debugging-port', '9222');
 }
-import type { RecordingScene } from '../src/main/audio/recording-scene';
+import type { AudioSource, RecordingScene } from '../src/main/audio/recording-scene';
 import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
@@ -774,8 +774,20 @@ function getMainWindow(): BrowserWindow | null {
 
 // ─── Recording IPC handlers ───
 
+interface RecordingStartedDetails {
+  scene?: RecordingScene;
+  activeSources?: AudioSource[];
+  warnings?: string[];
+}
+
+function normalizeActiveSources(details?: RecordingStartedDetails): AudioSource[] | undefined {
+  if (!Array.isArray(details?.activeSources)) return undefined;
+  const sources = details.activeSources.filter((source): source is AudioSource => source === 'mic' || source === 'system');
+  return sources.length > 0 ? [...new Set(sources)] : undefined;
+}
+
 function setupRecordingIpc() {
-  ipcMain.on('recording:started', () => {
+  ipcMain.on('recording:started', (_event, details?: RecordingStartedDetails) => {
     isRecording = true;
     isStarting = false;
     console.log('[Recorder] Recording started');
@@ -800,7 +812,8 @@ function setupRecordingIpc() {
     const mainWin = getMainWindow();
     if (mainWin) mainWin.webContents.send('recording:stateChanged', true);
     // Auto-start real-time transcription
-    startRealtimeTranscription(currentRecordingScene).then((result) => {
+    const activeSources = normalizeActiveSources(details);
+    startRealtimeTranscription(currentRecordingScene, activeSources).then((result) => {
       if (result.success) {
         console.log(`[Recorder] Real-time transcription started (recording ${result.recordingId})`);
       } else {
@@ -1038,6 +1051,12 @@ function setupRecordingIpc() {
     // Notify main window about error
     const mainWin = getMainWindow();
     if (mainWin) mainWin.webContents.send('recording:error', message);
+  });
+
+  ipcMain.on('recording:warning', (_event, message: string) => {
+    console.warn('[Recorder] Warning:', message);
+    const mainWin = getMainWindow();
+    if (mainWin) mainWin.webContents.send('recording:warning', message);
   });
 
   ipcMain.handle('recording:save', async (_event, buffer: ArrayBuffer, duration: number) => {

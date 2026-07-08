@@ -18,11 +18,13 @@ contextBridge.exposeInMainWorld('recorderApi', {
     ipcRenderer.invoke('recording:save', buffer, duration),
 
   // Notify main that recording has started/stopped
-  notifyStarted: () => ipcRenderer.send('recording:started'),
+  notifyStarted: (details?: { scene?: string; activeSources?: string[]; warnings?: string[] }) =>
+    ipcRenderer.send('recording:started', details),
   notifyStopped: () => ipcRenderer.send('recording:stopped'),
 
   // Report error
   reportError: (message: string) => ipcRenderer.send('recording:error', message),
+  reportWarning: (message: string) => ipcRenderer.send('recording:warning', message),
 
   // Listen for errors from main process
   onError: (cb: (message: string) => void) => {

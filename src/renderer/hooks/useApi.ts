@@ -46,6 +46,7 @@ export interface AppSettings {
   outputDir: string;
   llamaServerPort: number;
   llamaEmbedPort: number;
+  llamaServerBackend: string;
   whisperModel: string;
   llmModel: string;
   embedModel: string;
@@ -832,6 +833,7 @@ export interface VoiceBrainApi {
   onRecordingStateChanged: (cb: (event: IpcEvent, recording: boolean) => void) => () => void;
   onRecordingSaved: (cb: (event: IpcEvent, data: { filePath: string; duration: number }) => void) => () => void;
   onRecordingError: (cb: (event: IpcEvent, error: string) => void) => () => void;
+  onRecordingWarning: (cb: (event: IpcEvent, warning: string) => void) => () => void;
   onPostProcessing: (cb: (event: IpcEvent, data: { active: boolean; recordingId: number }) => void) => () => void;
   onPostProcessComplete: (cb: (event: IpcEvent, data: { recordingId: number }) => void) => () => void;
 

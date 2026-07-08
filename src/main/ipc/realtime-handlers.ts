@@ -830,7 +830,11 @@ export function prewarmTranscriber(ctx?: IpcContext): void {
   });
 }
 
-export async function startRealtimeTranscription(ctx: IpcContext, scene: RecordingScene = 'dictation'): Promise<{ success: boolean; recordingId?: number; error?: string }> {
+export async function startRealtimeTranscription(
+  ctx: IpcContext,
+  scene: RecordingScene = 'dictation',
+  activeSources?: AudioSource[],
+): Promise<{ success: boolean; recordingId?: number; error?: string }> {
   if (liveRecordingId !== null) {
     return { success: false, error: 'Already recording' };
   }
@@ -838,7 +842,22 @@ export async function startRealtimeTranscription(ctx: IpcContext, scene: Recordi
   try {
     const settings = loadSettings();
     currentScene = scene;
-    const config = getSceneConfig(scene);
+    const baseConfig = getSceneConfig(scene);
+    const activeSourceSet = activeSources?.length ? new Set(activeSources) : null;
+    const config = activeSourceSet ? {
+      ...baseConfig,
+      useMic: baseConfig.useMic && activeSourceSet.has('mic'),
+      useSystem: baseConfig.useSystem && activeSourceSet.has('system'),
+      micSpeakerStrategy: activeSourceSet.has('mic') ? baseConfig.micSpeakerStrategy : 'none' as const,
+      systemSpeakerStrategy: activeSourceSet.has('system') ? baseConfig.systemSpeakerStrategy : 'none' as const,
+    } : baseConfig;
+    if (!config.useMic && !config.useSystem) {
+      return { success: false, error: 'No active audio sources' };
+    }
+    console.log(`[realtime] Starting scene=${scene}, sources=${[
+      config.useMic ? 'mic' : '',
+      config.useSystem ? 'system' : '',
+    ].filter(Boolean).join('+')}`);
     const database = ctx.getDb();
     const engine = ctx.getSherpaEngine();
 
@@ -876,6 +895,9 @@ export async function startRealtimeTranscription(ctx: IpcContext, scene: Recordi
     liveRecordingId = recordingId;
     liveTotalSamples = 0;
     feedChunkCount = 0;
+    systemTotalSamples = 0;
+    systemWavPath = '';
+    lastSystemSegmentText = '';
 
     // Store DB reference and clear previous optimization state
     liveDb = database;
