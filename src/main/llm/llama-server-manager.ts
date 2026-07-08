@@ -1,4 +1,4 @@
-import { spawn, execFile, execSync, ChildProcess } from 'child_process';
+import { spawn, execFile, execFileSync, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
@@ -39,6 +39,28 @@ interface ResolveBackendCandidatesOptions {
   pathDelimiter?: string;
 }
 
+type LlamaServerLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+interface NvidiaGpuProbeResult {
+  available: boolean;
+  method: string;
+  reason: string;
+  durationMs: number;
+  output?: string;
+  error?: Record<string, unknown>;
+}
+
+interface LlamaServerBinaryProbe {
+  id: string;
+  label: string;
+  binaryPath: string | null;
+  workDir: string | null;
+  exists: boolean;
+  considered: boolean;
+  includedInCandidateOrder: boolean;
+  reason: string;
+}
+
 interface LaunchState {
   spawnError: Error | null;
   exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
@@ -63,6 +85,54 @@ function mergeDyldEnv(env: NodeJS.ProcessEnv, dir: string, delimiter: string = p
     ...env,
     DYLD_LIBRARY_PATH: [dir, env.DYLD_LIBRARY_PATH || ''].filter(Boolean).join(delimiter),
   };
+}
+
+function truncateDiagnosticText(text: string, max = 2000): string {
+  return text.length > max ? `${text.slice(0, max)}...<truncated ${text.length - max} chars>` : text;
+}
+
+function bufferLikeToString(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (Buffer.isBuffer(value)) return truncateDiagnosticText(value.toString().trim());
+  if (typeof value === 'string') return truncateDiagnosticText(value.trim());
+  return undefined;
+}
+
+function errorToDiagnostics(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    const childError = err as Error & {
+      code?: unknown;
+      signal?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+    };
+    return {
+      name: err.name,
+      message: err.message,
+      code: childError.code,
+      signal: childError.signal,
+      stdout: bufferLikeToString(childError.stdout),
+      stderr: bufferLikeToString(childError.stderr),
+      stack: err.stack,
+    };
+  }
+  return { message: String(err) };
+}
+
+function appendLlamaServerLog(level: LlamaServerLogLevel, message: string, details?: unknown): void {
+  try {
+    // Lazy require keeps pure unit tests from importing Electron logging plumbing.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { appendAppLog } = require('../logging/log-bus') as typeof import('../logging/log-bus');
+    appendAppLog(level, 'main', 'llama-server', message, details);
+  } catch {
+    const method = level === 'error' ? console.error : level === 'warn' ? console.warn : level === 'debug' ? console.debug : console.log;
+    if (details === undefined) {
+      method(`[LlamaServer] ${message}`);
+    } else {
+      method(`[LlamaServer] ${message}`, details);
+    }
+  }
 }
 
 export function resolveLlamaServerBackendCandidates(
@@ -228,36 +298,165 @@ export class LlamaServerManager {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { updateSettings } = require('../settings');
       updateSettings({ llamaServerBackend: backend });
-    } catch {
+      appendLlamaServerLog('info', 'Cached working llama-server backend', { backend });
+    } catch (err) {
       // Persisting the optimization must never block inference.
+      appendLlamaServerLog('warn', 'Failed to cache working llama-server backend', {
+        backend,
+        error: errorToDiagnostics(err),
+      });
     }
   }
 
   private getBackendCandidates(): LlamaServerBackendCandidate[] {
+    const resourcesDir = this.getResourcesDir();
+    const preferredBackend = this.getPreferredBackend();
+    const nvidia = this.detectNvidiaGpu();
     const candidates = resolveLlamaServerBackendCandidates({
       platform: process.platform,
       arch: process.arch,
-      resourcesDir: this.getResourcesDir(),
-      hasNvidiaGpu: this.hasNvidiaGpu(),
+      resourcesDir,
+      hasNvidiaGpu: nvidia.available,
     });
-    return prioritizeLlamaBackendCandidates(candidates, this.getPreferredBackend());
+    const prioritized = prioritizeLlamaBackendCandidates(candidates, preferredBackend);
+    const selectedPaths = new Set(prioritized.map((candidate) => path.normalize(candidate.binaryPath)));
+    const probes = this.buildBinaryProbes(resourcesDir, nvidia.available).map((probe) => ({
+      ...probe,
+      includedInCandidateOrder: probe.binaryPath ? selectedPaths.has(path.normalize(probe.binaryPath)) : false,
+    }));
+
+    appendLlamaServerLog(
+      prioritized.length > 0 ? 'info' : 'error',
+      'llama-server startup diagnostics report',
+      {
+        platform: process.platform,
+        arch: process.arch,
+        packaged: Boolean(electronApp?.isPackaged),
+        resourcesDir,
+        preferredBackend: preferredBackend || null,
+        nvidia,
+        probes,
+        candidateOrder: prioritized.map((candidate, index) => ({
+          order: index + 1,
+          id: candidate.id,
+          label: candidate.label,
+          binaryPath: candidate.binaryPath,
+          workDir: candidate.workDir,
+          cachedPreferred: preferredBackend === candidate.id,
+        })),
+      },
+    );
+
+    return prioritized;
   }
 
   // ─── GPU detection ───────────────────────────────────────────
 
-  private hasNvidiaGpu(): boolean {
-    // Best-effort NVIDIA detection on Windows
-    // In production, check for nvidia-smi or dxgi output
-    try {
-      if (process.platform !== 'win32') return false;
-      const result = execSync(
-        'nvidia-smi --query-gpu=name --format=csv,noheader 2>nul',
-        { timeout: 5000, windowsHide: true }
-      ).toString().trim();
-      return result.length > 0 && !result.includes('not found');
-    } catch {
-      return false;
+  private detectNvidiaGpu(): NvidiaGpuProbeResult {
+    const startedAt = Date.now();
+    if (process.platform !== 'win32') {
+      return {
+        available: false,
+        method: 'nvidia-smi',
+        reason: 'CUDA backends are only considered on Windows builds.',
+        durationMs: Date.now() - startedAt,
+      };
     }
+    if (process.arch !== 'x64') {
+      return {
+        available: false,
+        method: 'nvidia-smi',
+        reason: `CUDA backends are only bundled for win32-x64; current arch is ${process.arch}.`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
+    try {
+      const output = execFileSync(
+        'nvidia-smi',
+        ['--query-gpu=name', '--format=csv,noheader'],
+        { timeout: 5000, windowsHide: true, encoding: 'utf8' },
+      ).trim();
+      const available = output.length > 0 && !/not found/i.test(output);
+      return {
+        available,
+        method: 'nvidia-smi',
+        reason: available
+          ? 'NVIDIA GPU detected; CUDA backends will be considered.'
+          : 'nvidia-smi returned no GPU names; CUDA backends will be skipped.',
+        durationMs: Date.now() - startedAt,
+        output: truncateDiagnosticText(output),
+      };
+    } catch (err) {
+      return {
+        available: false,
+        method: 'nvidia-smi',
+        reason: 'nvidia-smi failed or is not installed; CUDA backends will be skipped.',
+        durationMs: Date.now() - startedAt,
+        error: errorToDiagnostics(err),
+      };
+    }
+  }
+
+  private buildBinaryProbes(resourcesDir: string, hasNvidiaGpu: boolean): LlamaServerBinaryProbe[] {
+    const probe = (
+      id: string,
+      label: string,
+      binaryPath: string,
+      considered: boolean,
+      reason: string,
+    ): LlamaServerBinaryProbe => ({
+      id,
+      label,
+      binaryPath,
+      workDir: path.dirname(binaryPath),
+      exists: fs.existsSync(binaryPath),
+      considered,
+      includedInCandidateOrder: false,
+      reason,
+    });
+
+    if (process.platform === 'darwin') {
+      const binaryPath = path.join(resourcesDir, `darwin-${process.arch}`, 'llama-server');
+      return [
+        probe(
+          'darwin',
+          `macOS ${process.arch}`,
+          binaryPath,
+          true,
+          fs.existsSync(binaryPath) ? 'macOS backend binary is available.' : 'macOS backend binary is missing.',
+        ),
+      ];
+    }
+
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+      return [
+        {
+          id: 'unsupported',
+          label: `${process.platform}-${process.arch}`,
+          binaryPath: null,
+          workDir: null,
+          exists: false,
+          considered: false,
+          includedInCandidateOrder: false,
+          reason: 'No bundled llama-server backend is available for this platform.',
+        },
+      ];
+    }
+
+    const root = path.join(resourcesDir, 'win32-x64');
+    const cudaReason = hasNvidiaGpu
+      ? 'NVIDIA GPU detected; CUDA backend is considered.'
+      : 'NVIDIA GPU was not detected; CUDA backend is skipped.';
+    return [
+      probe('cuda-13.3', 'CUDA 13.3', path.join(root, 'cuda-13.3', 'llama-server.exe'), hasNvidiaGpu, cudaReason),
+      probe('cuda-12.4', 'CUDA 12.4', path.join(root, 'cuda-12.4', 'llama-server.exe'), hasNvidiaGpu, cudaReason),
+      probe('cuda', 'CUDA legacy', path.join(root, 'llama-server-cuda.exe'), hasNvidiaGpu, cudaReason),
+      probe('vulkan', 'Vulkan', path.join(root, 'vulkan', 'llama-server.exe'), true, 'Vulkan backend is considered as GPU fallback.'),
+      probe('vulkan', 'Vulkan legacy', path.join(root, 'llama-server-vulkan.exe'), true, 'Legacy Vulkan backend is considered as compatibility fallback.'),
+      probe('cpu', 'CPU', path.join(root, 'cpu', 'llama-server.exe'), true, 'CPU backend is considered as final fallback.'),
+      probe('cpu', 'CPU legacy', path.join(root, 'llama-server-cpu.exe'), true, 'Legacy CPU backend is considered as final compatibility fallback.'),
+    ];
   }
 
   // ─── Port selection ──────────────────────────────────────────
@@ -272,8 +471,17 @@ export class LlamaServerManager {
           server.close(() => resolve(true));
         });
       });
-      if (free) return port;
+      if (free) {
+        appendLlamaServerLog('debug', 'Selected free llama-server port', {
+          port,
+          range: `${PORT_START}-${PORT_END}`,
+        });
+        return port;
+      }
     }
+    appendLlamaServerLog('error', 'No free llama-server port available', {
+      range: `${PORT_START}-${PORT_END}`,
+    });
     throw new Error(`No free port found in range ${PORT_START}-${PORT_END}`);
   }
 
@@ -316,20 +524,51 @@ export class LlamaServerManager {
         });
         if (res.ok) {
           console.log(`[LlamaServer] health ready port=${port} attempts=${attempts} elapsedMs=${Date.now() - startedAt}`);
+          appendLlamaServerLog('info', 'llama-server health check passed', {
+            backend: launch.candidate.id,
+            label: launch.candidate.label,
+            port,
+            attempts,
+            elapsedMs: Date.now() - startedAt,
+          });
           return;
         }
         if (attempts === 1 || attempts % 10 === 0) {
           console.log(`[LlamaServer] health pending port=${port} attempt=${attempts} status=${res.status} elapsedMs=${Date.now() - startedAt}`);
+          appendLlamaServerLog('debug', 'llama-server health check pending', {
+            backend: launch.candidate.id,
+            label: launch.candidate.label,
+            port,
+            attempt: attempts,
+            status: res.status,
+            elapsedMs: Date.now() - startedAt,
+          });
         }
       } catch (err: any) {
         if (attempts === 1 || attempts % 10 === 0) {
           console.log(`[LlamaServer] health pending port=${port} attempt=${attempts} error=${err?.message || String(err)} elapsedMs=${Date.now() - startedAt}`);
+          appendLlamaServerLog('debug', 'llama-server health check pending', {
+            backend: launch.candidate.id,
+            label: launch.candidate.label,
+            port,
+            attempt: attempts,
+            error: err?.message || String(err),
+            elapsedMs: Date.now() - startedAt,
+          });
         }
         // Server not ready yet
       }
       await new Promise((r) => setTimeout(r, 500));
     }
     console.error(`[LlamaServer] health failed port=${port} attempts=${attempts} timeoutMs=${timeoutMs}`);
+    appendLlamaServerLog('error', 'llama-server health check timed out', {
+      backend: launch.candidate.id,
+      label: launch.candidate.label,
+      port,
+      attempts,
+      timeoutMs,
+      recentOutput: launch.state.output.slice(-20),
+    });
     throw this.describeLaunchFailure(
       launch,
       `llama-server ${launch.candidate.label} did not become ready within ${timeoutMs}ms`,
@@ -376,14 +615,37 @@ export class LlamaServerManager {
     proc.stdout?.on('data', (data: Buffer) => appendOutput('stdout', data));
     proc.stderr?.on('data', (data: Buffer) => appendOutput('stderr', data));
 
+    appendLlamaServerLog('info', 'Spawned llama-server process', {
+      backend: candidate.id,
+      label: candidate.label,
+      pid: proc.pid ?? null,
+      binaryPath: candidate.binaryPath,
+      workDir: candidate.workDir,
+      args,
+    });
+
     proc.once('error', (err) => {
       state.spawnError = err;
       console.error(`[LlamaServer] Process error (${candidate.label}):`, err);
+      appendLlamaServerLog('error', 'llama-server process error', {
+        backend: candidate.id,
+        label: candidate.label,
+        binaryPath: candidate.binaryPath,
+        error: errorToDiagnostics(err),
+      });
     });
 
     proc.once('exit', (code, signal) => {
       state.exitInfo = { code, signal };
       console.log(`[LlamaServer] Process exited (${candidate.label}) with code ${code}, signal ${signal ?? 'none'}`);
+      appendLlamaServerLog(code === 0 ? 'info' : 'warn', 'llama-server process exited', {
+        backend: candidate.id,
+        label: candidate.label,
+        pid: proc.pid ?? null,
+        code,
+        signal: signal ?? null,
+        recentOutput: state.output.slice(-20),
+      });
       if (this.process === proc) {
         this.process = null;
         this.port = null;
@@ -402,6 +664,13 @@ export class LlamaServerManager {
 
     const proc = this.process;
     const pid = proc.pid;
+    appendLlamaServerLog('info', 'Stopping llama-server process', {
+      pid: pid ?? null,
+      port: this.port,
+      mode: this.mode,
+      backend: this.backend,
+      model: this.currentModel,
+    });
     this.process = null;
     this.port = null;
     this.currentModel = null;
@@ -426,6 +695,10 @@ export class LlamaServerManager {
     });
 
     console.log(`[LlamaServer] Stopped (graceful=${killed})`);
+    appendLlamaServerLog('info', 'Stopped llama-server process', {
+      pid: pid ?? null,
+      graceful: killed,
+    });
   }
 
   private getNoBinaryError(): Error {
@@ -443,35 +716,101 @@ export class LlamaServerManager {
   ): Promise<{ port: number }> {
     await this.stopInternal();
 
+    const startedAt = Date.now();
     const candidates = this.getBackendCandidates();
-    if (candidates.length === 0) throw this.getNoBinaryError();
+    if (candidates.length === 0) {
+      const err = this.getNoBinaryError();
+      appendLlamaServerLog('error', 'Cannot start llama-server because no backend binary is usable', {
+        mode,
+        model,
+        error: errorToDiagnostics(err),
+      });
+      throw err;
+    }
+
+    appendLlamaServerLog('info', 'llama-server backend attempt order', {
+      mode,
+      model,
+      total: candidates.length,
+      candidates: candidates.map((candidate, index) => ({
+        order: index + 1,
+        id: candidate.id,
+        label: candidate.label,
+        binaryPath: candidate.binaryPath,
+        workDir: candidate.workDir,
+      })),
+    });
 
     const failures: string[] = [];
-    for (const candidate of candidates) {
-      const port = await this.findFreePort();
-      this.port = port;
-      this.mode = mode;
-      this.currentModel = model;
-      this.backend = candidate.id;
-      describeAttempt(candidate, port);
-
-      const launch = this.launchProcess(candidate, buildArgs(port));
-      this.process = launch.proc;
-
+    for (const [index, candidate] of candidates.entries()) {
+      let port: number | null = null;
+      let launch: LaunchedServer | null = null;
       try {
+        port = await this.findFreePort();
+        this.port = port;
+        this.mode = mode;
+        this.currentModel = model;
+        this.backend = candidate.id;
+        appendLlamaServerLog('info', 'llama-server backend attempt starting', {
+          attempt: index + 1,
+          total: candidates.length,
+          mode,
+          model,
+          backend: candidate.id,
+          label: candidate.label,
+          port,
+          binaryPath: candidate.binaryPath,
+          workDir: candidate.workDir,
+        });
+        describeAttempt(candidate, port);
+
+        launch = this.launchProcess(candidate, buildArgs(port));
+        this.process = launch.proc;
+
         await this.waitForReady(launch, port);
         this.persistPreferredBackend(candidate.id);
         console.log(`[LlamaServer] Ready on http://127.0.0.1:${port} via ${candidate.label}`);
+        appendLlamaServerLog('info', 'llama-server backend attempt ready', {
+          attempt: index + 1,
+          total: candidates.length,
+          mode,
+          model,
+          backend: candidate.id,
+          label: candidate.label,
+          port,
+          pid: launch.proc.pid ?? null,
+          elapsedMs: Date.now() - startedAt,
+        });
         return { port };
       } catch (err: any) {
         const message = err?.message || String(err);
         failures.push(`${candidate.label}: ${message}`);
         console.warn(`[LlamaServer] ${candidate.label} failed, trying next backend if available: ${message}`);
+        appendLlamaServerLog('warn', 'llama-server backend attempt failed', {
+          attempt: index + 1,
+          total: candidates.length,
+          mode,
+          model,
+          backend: candidate.id,
+          label: candidate.label,
+          port,
+          error: errorToDiagnostics(err),
+          recentOutput: launch?.state.output.slice(-20) ?? [],
+          willTryNextBackend: index < candidates.length - 1,
+        });
         await this.stopInternal();
       }
     }
 
-    throw new Error(`llama-server failed to start with every backend:\n${failures.join('\n\n')}`);
+    const err = new Error(`llama-server failed to start with every backend:\n${failures.join('\n\n')}`);
+    appendLlamaServerLog('error', 'llama-server startup failed with every backend', {
+      mode,
+      model,
+      elapsedMs: Date.now() - startedAt,
+      failures,
+      error: errorToDiagnostics(err),
+    });
+    throw err;
   }
 
   async start(modelPath: string, options?: {
@@ -481,6 +820,9 @@ export class LlamaServerManager {
   }): Promise<{ port: number }> {
     return this.enqueueLifecycle(async () => {
       if (!fs.existsSync(modelPath)) {
+        appendLlamaServerLog('error', 'Cannot start llama-server because model file is missing', {
+          modelPath,
+        });
         throw new Error(`Model file not found: ${modelPath}`);
       }
 
@@ -519,6 +861,9 @@ export class LlamaServerManager {
   }): Promise<{ port: number }> {
     return this.enqueueLifecycle(async () => {
       if (!fs.existsSync(modelsDir)) {
+        appendLlamaServerLog('error', 'Cannot start llama-server router because models directory is missing', {
+          modelsDir,
+        });
         throw new Error(`Models directory not found: ${modelsDir}`);
       }
 
