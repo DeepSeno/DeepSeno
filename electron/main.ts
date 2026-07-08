@@ -117,6 +117,7 @@ import { WorkflowEngine } from '../src/main/agent/workflow-engine';
 import { AgentEventBus } from '../src/main/agent/event-bus';
 import { getFFmpegManager } from '../src/main/audio/ffmpeg-manager';
 import { LlamaServerManager } from '../src/main/llm/llama-server-manager';
+import type { LlamaRouterCapacityDecision } from '../src/main/llm/llama-server-manager';
 import { ensureLlamaServer, getLlamaServer, setLlamaServer } from '../src/main/ipc/context';
 import { prepareLlamaRouterRuntime } from '../src/main/llm/llama-router-runtime';
 
@@ -1350,14 +1351,20 @@ app.whenReady().then(async () => {
 
   /** Pre-warm llama-server by loading chat model first, then embedding model.
    *  Sequential loading avoids dual I/O + Metal shader compilation stalls. */
-  async function prewarmLLM(port: number) {
+  async function prewarmLLM(port: number, capacity: LlamaRouterCapacityDecision) {
     const s = loadSettings();
     const chatModel = getLLMModel(s);
     const embedModel = getEmbedModel(s);
     const base = `http://127.0.0.1:${port}/v1`;
+    appendAppLog('info', 'main', 'local-model', 'Startup local model prewarm plan', {
+      port,
+      chatModel,
+      embedModel,
+      capacity,
+    });
     // Load chat model first, then embedding — sequential avoids system freeze
     try {
-      await fetch(`${base}/chat/completions`, {
+      const res = await fetch(`${base}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1368,14 +1375,45 @@ app.whenReady().then(async () => {
           chat_template_kwargs: { enable_thinking: false },
         }),
       });
-    } catch { /* fire-and-forget, ignore errors */ }
+      if (!res.ok) throw new Error(`chat prewarm failed: HTTP ${res.status} ${await res.text()}`);
+      appendAppLog('info', 'main', 'local-model', 'Startup chat model prewarm completed', {
+        port,
+        model: chatModel,
+      });
+    } catch (err) {
+      appendAppLog('warn', 'main', 'local-model', 'Startup chat model prewarm failed; embedding prewarm skipped', {
+        port,
+        model: chatModel,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    if (!capacity.allowEmbeddingPrewarm) {
+      appendAppLog('info', 'main', 'local-model', 'Startup embedding prewarm skipped by router capacity decision', {
+        port,
+        model: embedModel,
+        capacity,
+      });
+      return;
+    }
     try {
-      await fetch(`${base}/embeddings`, {
+      const res = await fetch(`${base}/embeddings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: embedModel, input: 'hi' }),
       });
-    } catch { /* fire-and-forget, ignore errors */ }
+      if (!res.ok) throw new Error(`embedding prewarm failed: HTTP ${res.status} ${await res.text()}`);
+      appendAppLog('info', 'main', 'local-model', 'Startup embedding model prewarm completed', {
+        port,
+        model: embedModel,
+      });
+    } catch (err) {
+      appendAppLog('warn', 'main', 'local-model', 'Startup embedding model prewarm failed', {
+        port,
+        model: embedModel,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // ─── Bundled llama-server (local provider) ──────────────────
@@ -1392,12 +1430,12 @@ app.whenReady().then(async () => {
         maxModels: 2,
         flashAttn: true,
         presetPath,
-      }).then(({ port }) => {
+      }).then(({ port, capacity }) => {
         console.log(`[main] llama-server (router) on port ${port}`);
         updateSettings({ llamaServerPort: port });
         resetLLMClients();
         // Pre-warm: trigger model loading in background so first user request is fast
-        prewarmLLM(port).catch(() => {});
+        prewarmLLM(port, capacity).catch(() => {});
       }).catch(err => {
         console.error('[main] llama-server router start failed:', err);
       });

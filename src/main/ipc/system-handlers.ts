@@ -604,10 +604,10 @@ async function refreshLocalRouterAfterModelChange(ctx: IpcContext): Promise<void
   logModelRouter('info', 'Refreshing llama-server router after model download', {
     modelsDir,
     presetPath,
-    maxModels: 2,
+    requestedMaxModels: 2,
     flashAttn: true,
   });
-  const { port } = await server.startRouter(modelsDir, {
+  const { port, capacity } = await server.startRouter(modelsDir, {
     maxModels: 2,
     flashAttn: true,
     presetPath,
@@ -616,6 +616,7 @@ async function refreshLocalRouterAfterModelChange(ctx: IpcContext): Promise<void
   ctx.resetLLMClient();
   logModelRouter('info', 'llama-server router refresh completed after model download', {
     port,
+    capacity,
   });
 }
 
@@ -905,17 +906,18 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         logModelRouter('info', 'Settings changed; restarting llama-server router in background', {
           modelsDir,
           presetPath,
-          maxModels: 2,
+          requestedMaxModels: 2,
           flashAttn: true,
         });
         server.startRouter(modelsDir, {
           maxModels: 2,
           flashAttn: true,
           presetPath,
-        }).then(async ({ port }) => {
+        }).then(async ({ port, capacity }) => {
           console.log(`[Settings] llama-server restarted on port ${port}`);
           logModelRouter('info', 'Settings-triggered llama-server router restart succeeded', {
             port,
+            capacity,
           });
           updateSettings({ llamaServerPort: port });
           ctx.resetLLMClient();
@@ -924,20 +926,44 @@ export function registerSystemHandlers(ctx: IpcContext): void {
           const chatModel = getLLMModel(s);
           const embedModel = getEmbedModel(s);
           const base = `http://127.0.0.1:${port}/v1`;
-          for (const model of [chatModel, embedModel]) {
-            try {
-              logLocalModel('info', 'Settings-triggered local model prewarm starting', {
-                model,
-                port,
-              });
-              await smokeTestLocalModel(base, model);
-            } catch (err) {
-              logLocalModel('warn', 'Settings-triggered local model prewarm failed', {
-                model,
-                port,
-                ...errorLogDetails(err),
-              });
-            }
+          try {
+            logLocalModel('info', 'Settings-triggered local chat model prewarm starting', {
+              model: chatModel,
+              port,
+              capacity,
+            });
+            await smokeTestLocalModel(base, chatModel);
+          } catch (err) {
+            logLocalModel('warn', 'Settings-triggered local chat model prewarm failed; embedding prewarm skipped', {
+              model: chatModel,
+              port,
+              capacity,
+              ...errorLogDetails(err),
+            });
+            return;
+          }
+          if (!capacity.allowEmbeddingPrewarm) {
+            logLocalModel('info', 'Settings-triggered local embedding prewarm skipped by router capacity decision', {
+              model: embedModel,
+              port,
+              capacity,
+            });
+            return;
+          }
+          try {
+            logLocalModel('info', 'Settings-triggered local embedding model prewarm starting', {
+              model: embedModel,
+              port,
+              capacity,
+            });
+            await smokeTestLocalModel(base, embedModel);
+          } catch (err) {
+            logLocalModel('warn', 'Settings-triggered local embedding model prewarm failed', {
+              model: embedModel,
+              port,
+              capacity,
+              ...errorLogDetails(err),
+            });
           }
         }).catch((err) => {
           console.error('[Settings] llama-server restart failed:', err);
@@ -1320,6 +1346,7 @@ export function registerSystemHandlers(ctx: IpcContext): void {
         logModelRouter('info', 'Local model test llama-server router started', {
           requestedModel,
           port: started.port,
+          capacity: started.capacity,
           status,
         });
       }
@@ -1675,14 +1702,14 @@ export function registerSystemHandlers(ctx: IpcContext): void {
 
       // Router mode: start with models directory, auto-discovers GGUF files
       const { modelsDir, presetPath } = prepareLlamaRouterRuntime();
-      const { port } = await server.startRouter(modelsDir, {
+      const { port, capacity } = await server.startRouter(modelsDir, {
         maxModels: 2,
         flashAttn: true,
         presetPath,
       });
       updateSettings({ llamaServerPort: port });
       ctx.resetLLMClient();
-      return { success: true, port };
+      return { success: true, port, capacity };
     } catch (err: any) {
       return { success: false, error: err?.message || String(err) };
     }

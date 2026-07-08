@@ -85,6 +85,7 @@ export async function ensureLocalChatRuntime(ctx: IpcContext, settings: AppSetti
     reason,
     selectedModel,
     port: started.port,
+    routerCapacity: started.capacity,
     status,
   });
 }

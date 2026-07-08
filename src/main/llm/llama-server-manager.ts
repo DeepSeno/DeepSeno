@@ -2,6 +2,8 @@ import { spawn, execFile, execFileSync, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
+import os from 'os';
+import { loadSettings, updateSettings } from '../settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const electronApp = (() => {
@@ -19,6 +21,7 @@ export interface LlamaServerStatus {
   model: string | null;  // null in router mode
   mode: 'single' | 'router';
   backend: string | null;
+  routerCapacity?: LlamaRouterCapacityDecision | null;
 }
 
 export interface LlamaServerBackendCandidate {
@@ -61,6 +64,43 @@ interface LlamaServerBinaryProbe {
   reason: string;
 }
 
+export interface LlamaRouterCapacityDecision {
+  backend: string;
+  backendLabel: string;
+  requestedMaxModels: number;
+  maxModels: 1 | 2;
+  allowEmbeddingPrewarm: boolean;
+  totalRamGB: number;
+  freeRamGB: number;
+  freeVramGB: number | null;
+  totalVramGB: number | null;
+  gpuName: string | null;
+  integratedGpu: boolean | null;
+  gpuProbeSource: string;
+  reason: string;
+  rules: string[];
+}
+
+export interface GpuMemoryProbe {
+  source: string;
+  gpuName: string | null;
+  freeVramGB: number | null;
+  totalVramGB: number | null;
+  integratedGpu: boolean | null;
+  reason: string;
+  error?: Record<string, unknown>;
+}
+
+export interface ResolveRouterCapacityOptions {
+  backend: string;
+  backendLabel: string;
+  requestedMaxModels?: number;
+  platform?: NodeJS.Platform | string;
+  totalRamBytes?: number;
+  freeRamBytes?: number;
+  gpuProbe?: GpuMemoryProbe;
+}
+
 interface LaunchState {
   spawnError: Error | null;
   exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
@@ -89,6 +129,14 @@ function mergeDyldEnv(env: NodeJS.ProcessEnv, dir: string, delimiter: string = p
 
 function truncateDiagnosticText(text: string, max = 2000): string {
   return text.length > max ? `${text.slice(0, max)}...<truncated ${text.length - max} chars>` : text;
+}
+
+function bytesToGB(bytes: number): number {
+  return Math.round((bytes / 1024 ** 3) * 10) / 10;
+}
+
+function mibToGB(mib: number): number {
+  return Math.round((mib / 1024) * 10) / 10;
 }
 
 function bufferLikeToString(value: unknown): string | undefined {
@@ -133,6 +181,157 @@ function appendLlamaServerLog(level: LlamaServerLogLevel, message: string, detai
       method(`[LlamaServer] ${message}`, details);
     }
   }
+}
+
+function isLikelyIntegratedGpuName(name: string | null): boolean | null {
+  if (!name) return null;
+  if (/nvidia|geforce|quadro|rtx|gtx/i.test(name)) return false;
+  if (/intel\s+(uhd|iris|hd)|vega|radeon\(tm\)\s+graphics|radeon\s+graphics|780m|760m|740m|680m|660m|mobile\s+gfx/i.test(name)) {
+    return true;
+  }
+  if (/radeon\s+rx|radeon\s+pro/i.test(name)) return false;
+  return null;
+}
+
+export interface WindowsGpuProbeRow {
+  name: string;
+  totalVramGB: number | null;
+  integratedGpu: boolean | null;
+}
+
+export function selectPreferredWindowsGpuRow(rows: WindowsGpuProbeRow[]): WindowsGpuProbeRow | undefined {
+  const discrete = rows.find((row) => row.integratedGpu === false);
+  const integrated = rows.find((row) => row.integratedGpu === true);
+  return discrete || integrated || rows[0];
+}
+
+function normalizeRequestedMaxModels(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 2;
+  return Math.max(1, Math.min(2, Math.floor(value!)));
+}
+
+export function resolveLlamaRouterCapacity(options: ResolveRouterCapacityOptions): LlamaRouterCapacityDecision {
+  const platform = options.platform || process.platform;
+  const requestedMaxModels = normalizeRequestedMaxModels(options.requestedMaxModels);
+  const totalRamGB = bytesToGB(options.totalRamBytes ?? os.totalmem());
+  const freeRamGB = bytesToGB(options.freeRamBytes ?? os.freemem());
+  const gpuProbe = options.gpuProbe || {
+    source: 'not-probed',
+    gpuName: null,
+    freeVramGB: null,
+    totalVramGB: null,
+    integratedGpu: null,
+    reason: 'GPU memory was not probed.',
+  };
+  const totalRamAllowsTwoModels = totalRamGB >= 15;
+  const rules: string[] = [];
+  let maxModels: 1 | 2 = requestedMaxModels >= 2 ? 2 : 1;
+
+  if (requestedMaxModels <= 1) {
+    maxModels = 1;
+    rules.push('caller capped requestedMaxModels to 1');
+  } else if (options.backend === 'cpu') {
+    maxModels = 1;
+    rules.push('CPU backend uses single resident model');
+  } else if (!totalRamAllowsTwoModels && freeRamGB < 6) {
+    maxModels = 1;
+    rules.push(`free RAM ${freeRamGB}GB < 6GB`);
+  } else if (options.backend.startsWith('cuda')) {
+    if (gpuProbe.freeVramGB !== null) {
+      if (gpuProbe.freeVramGB < 6) {
+        maxModels = 1;
+        rules.push(`CUDA capacity low: free VRAM ${gpuProbe.freeVramGB}GB < 6GB`);
+      } else if (totalRamAllowsTwoModels) {
+        maxModels = 2;
+        rules.push(`CUDA free VRAM ${gpuProbe.freeVramGB}GB >= 6GB and total RAM ${totalRamGB}GB >= 15GB`);
+      } else if (freeRamGB >= 8) {
+        maxModels = 2;
+        rules.push(`CUDA free VRAM ${gpuProbe.freeVramGB}GB >= 6GB and free RAM ${freeRamGB}GB >= 8GB`);
+      } else {
+        maxModels = 1;
+        rules.push(`CUDA capacity low: free VRAM ${gpuProbe.freeVramGB}GB, free RAM ${freeRamGB}GB`);
+      }
+    } else {
+      maxModels = 1;
+      rules.push('CUDA free VRAM unavailable');
+    }
+  } else if (options.backend === 'vulkan') {
+    if (gpuProbe.integratedGpu === true) {
+      if (totalRamAllowsTwoModels) {
+        maxModels = 2;
+        rules.push(`Vulkan integrated GPU with total RAM ${totalRamGB}GB >= 15GB`);
+      } else if (freeRamGB >= 12) {
+        maxModels = 2;
+        rules.push(`Vulkan integrated GPU with free RAM ${freeRamGB}GB >= 12GB`);
+      } else {
+        maxModels = 1;
+        rules.push(`Vulkan integrated GPU with free RAM ${freeRamGB}GB < 12GB`);
+      }
+    } else if (gpuProbe.freeVramGB !== null) {
+      if (gpuProbe.freeVramGB < 6) {
+        maxModels = 1;
+        rules.push(`Vulkan capacity low: free VRAM ${gpuProbe.freeVramGB}GB < 6GB`);
+      } else if (totalRamAllowsTwoModels) {
+        maxModels = 2;
+        rules.push(`Vulkan free VRAM ${gpuProbe.freeVramGB}GB >= 6GB and total RAM ${totalRamGB}GB >= 15GB`);
+      } else if (freeRamGB >= 10) {
+        maxModels = 2;
+        rules.push(`Vulkan free VRAM ${gpuProbe.freeVramGB}GB >= 6GB and free RAM ${freeRamGB}GB >= 10GB`);
+      } else {
+        maxModels = 1;
+        rules.push(`Vulkan capacity low: free VRAM ${gpuProbe.freeVramGB}GB, free RAM ${freeRamGB}GB`);
+      }
+    } else if (platform === 'win32') {
+      if (totalRamAllowsTwoModels && gpuProbe.integratedGpu === false) {
+        maxModels = 2;
+        rules.push(`Windows Vulkan free VRAM unavailable, but total RAM ${totalRamGB}GB >= 15GB and GPU is not integrated`);
+      } else if (freeRamGB >= 16 && gpuProbe.integratedGpu === false) {
+        maxModels = 2;
+        rules.push(`Windows Vulkan free VRAM unavailable, but free RAM ${freeRamGB}GB >= 16GB and GPU is not integrated`);
+      } else {
+        maxModels = 1;
+        rules.push(`Windows Vulkan free VRAM unavailable; free RAM ${freeRamGB}GB is below conservative 16GB threshold or GPU type is unknown`);
+      }
+    } else {
+      maxModels = freeRamGB >= 10 ? 2 : 1;
+      rules.push(`Vulkan non-Windows decision by free RAM ${freeRamGB}GB`);
+    }
+  } else if (platform === 'darwin') {
+    maxModels = totalRamAllowsTwoModels || freeRamGB >= 10 ? 2 : 1;
+    rules.push(totalRamAllowsTwoModels ? `macOS unified memory with total RAM ${totalRamGB}GB >= 15GB` : `macOS unified memory decision by free RAM ${freeRamGB}GB`);
+  } else {
+    maxModels = 1;
+    rules.push(`Unknown backend ${options.backend}; using conservative single model`);
+  }
+
+  if (requestedMaxModels === 1 && maxModels === 2) {
+    maxModels = 1;
+    rules.push('final maxModels capped by requestedMaxModels=1');
+  }
+
+  const allowEmbeddingPrewarm = maxModels >= 2 && freeRamGB >= 8;
+  if (!allowEmbeddingPrewarm) {
+    rules.push(maxModels < 2 ? 'embedding prewarm disabled because maxModels=1' : `embedding prewarm disabled because free RAM ${freeRamGB}GB < 8GB`);
+  } else {
+    rules.push('embedding prewarm allowed because capacity keeps two resident models');
+  }
+
+  return {
+    backend: options.backend,
+    backendLabel: options.backendLabel,
+    requestedMaxModels,
+    maxModels,
+    allowEmbeddingPrewarm,
+    totalRamGB,
+    freeRamGB,
+    freeVramGB: gpuProbe.freeVramGB,
+    totalVramGB: gpuProbe.totalVramGB,
+    gpuName: gpuProbe.gpuName,
+    integratedGpu: gpuProbe.integratedGpu,
+    gpuProbeSource: gpuProbe.source,
+    reason: rules[0] || 'default capacity decision',
+    rules,
+  };
 }
 
 export function resolveLlamaServerBackendCandidates(
@@ -216,6 +415,7 @@ export class LlamaServerManager {
   private currentModel: string | null = null;
   private mode: 'single' | 'router' = 'single';
   private backend: string | null = null;
+  private routerCapacity: LlamaRouterCapacityDecision | null = null;
   private lifecycleQueue: Promise<void> = Promise.resolve();
 
   private listChildPids(pid: number): Promise<number[]> {
@@ -284,9 +484,6 @@ export class LlamaServerManager {
 
   private getPreferredBackend(): string | null {
     try {
-      // Lazy require keeps unit tests that only inspect path resolution simple.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { loadSettings } = require('../settings');
       return loadSettings().llamaServerBackend || null;
     } catch {
       return null;
@@ -295,8 +492,6 @@ export class LlamaServerManager {
 
   private persistPreferredBackend(backend: string): void {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { updateSettings } = require('../settings');
       updateSettings({ llamaServerBackend: backend });
       appendLlamaServerLog('info', 'Cached working llama-server backend', { backend });
     } catch (err) {
@@ -457,6 +652,139 @@ export class LlamaServerManager {
       probe('cpu', 'CPU', path.join(root, 'cpu', 'llama-server.exe'), true, 'CPU backend is considered as final fallback.'),
       probe('cpu', 'CPU legacy', path.join(root, 'llama-server-cpu.exe'), true, 'Legacy CPU backend is considered as final compatibility fallback.'),
     ];
+  }
+
+  private probeGpuMemory(candidate: LlamaServerBackendCandidate): GpuMemoryProbe {
+    if (candidate.id.startsWith('cuda')) {
+      const startedAt = Date.now();
+      try {
+        const output = execFileSync(
+          'nvidia-smi',
+          ['--query-gpu=name,memory.free,memory.total', '--format=csv,noheader,nounits'],
+          { timeout: 5000, windowsHide: true, encoding: 'utf8' },
+        ).trim();
+        const rows = output
+          .split(/\r?\n/)
+          .map((line) => line.split(',').map((part) => part.trim()))
+          .filter((parts) => parts.length >= 3)
+          .map(([name, free, total]) => ({
+            name,
+            freeMiB: Number(free),
+            totalMiB: Number(total),
+          }))
+          .filter((row) => Number.isFinite(row.freeMiB) && Number.isFinite(row.totalMiB));
+        const best = rows.sort((a, b) => b.freeMiB - a.freeMiB)[0];
+        if (best) {
+          return {
+            source: 'nvidia-smi',
+            gpuName: best.name,
+            freeVramGB: mibToGB(best.freeMiB),
+            totalVramGB: mibToGB(best.totalMiB),
+            integratedGpu: false,
+            reason: `Selected NVIDIA GPU with the most free VRAM in ${Date.now() - startedAt}ms.`,
+          };
+        }
+        return {
+          source: 'nvidia-smi',
+          gpuName: null,
+          freeVramGB: null,
+          totalVramGB: null,
+          integratedGpu: false,
+          reason: 'nvidia-smi returned no parseable GPU memory rows.',
+        };
+      } catch (err) {
+        return {
+          source: 'nvidia-smi',
+          gpuName: null,
+          freeVramGB: null,
+          totalVramGB: null,
+          integratedGpu: false,
+          reason: 'nvidia-smi memory query failed.',
+          error: errorToDiagnostics(err),
+        };
+      }
+    }
+
+    if (candidate.id === 'vulkan' && process.platform === 'win32') {
+      const startedAt = Date.now();
+      try {
+        const output = execFileSync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,PNPDeviceID | ConvertTo-Json -Compress',
+          ],
+          { timeout: 5000, windowsHide: true, encoding: 'utf8' },
+        ).trim();
+        const parsed = JSON.parse(output || '[]') as unknown;
+        const rows = (Array.isArray(parsed) ? parsed : [parsed])
+          .map((row) => row as { Name?: unknown; AdapterRAM?: unknown; PNPDeviceID?: unknown })
+          .filter((row) => typeof row.Name === 'string' && row.Name.trim().length > 0)
+          .map((row) => {
+            const name = String(row.Name);
+            const totalBytes = typeof row.AdapterRAM === 'number' ? row.AdapterRAM : Number(row.AdapterRAM || 0);
+            return {
+              name,
+              totalVramGB: Number.isFinite(totalBytes) && totalBytes > 0 ? bytesToGB(totalBytes) : null,
+              integratedGpu: isLikelyIntegratedGpuName(name),
+            };
+          });
+        const selected = selectPreferredWindowsGpuRow(rows);
+        return {
+          source: 'win32-cim-video-controller',
+          gpuName: selected?.name || null,
+          freeVramGB: null,
+          totalVramGB: selected?.totalVramGB ?? null,
+          integratedGpu: selected?.integratedGpu ?? null,
+          reason: selected
+            ? `Windows Vulkan free VRAM is not reliably exposed; discrete GPUs are preferred for capacity decisions when present (${Date.now() - startedAt}ms).`
+            : 'Windows video controller query returned no GPU rows.',
+        };
+      } catch (err) {
+        return {
+          source: 'win32-cim-video-controller',
+          gpuName: null,
+          freeVramGB: null,
+          totalVramGB: null,
+          integratedGpu: null,
+          reason: 'Windows video controller query failed; Vulkan capacity will be RAM-based and conservative.',
+          error: errorToDiagnostics(err),
+        };
+      }
+    }
+
+    if (process.platform === 'darwin') {
+      return {
+        source: 'unified-memory',
+        gpuName: null,
+        freeVramGB: null,
+        totalVramGB: null,
+        integratedGpu: true,
+        reason: 'macOS uses unified memory; capacity is based on free system RAM.',
+      };
+    }
+
+    return {
+      source: 'not-available',
+      gpuName: null,
+      freeVramGB: null,
+      totalVramGB: null,
+      integratedGpu: null,
+      reason: 'No GPU memory probe is available for this backend/platform.',
+    };
+  }
+
+  private resolveRouterCapacity(candidate: LlamaServerBackendCandidate, requestedMaxModels?: number): LlamaRouterCapacityDecision {
+    const decision = resolveLlamaRouterCapacity({
+      backend: candidate.id,
+      backendLabel: candidate.label,
+      requestedMaxModels,
+      gpuProbe: this.probeGpuMemory(candidate),
+    });
+    appendLlamaServerLog('info', 'llama-server router capacity decision', decision);
+    return decision;
   }
 
   // ─── Port selection ──────────────────────────────────────────
@@ -652,6 +980,7 @@ export class LlamaServerManager {
         this.currentModel = null;
         this.mode = 'single';
         this.backend = null;
+        this.routerCapacity = null;
       }
     });
 
@@ -675,6 +1004,7 @@ export class LlamaServerManager {
     this.port = null;
     this.currentModel = null;
     this.backend = null;
+    this.routerCapacity = null;
 
     // Stop direct child model workers before the router exits and they get
     // re-parented. This matters during auto-update because stale workers keep
@@ -709,7 +1039,7 @@ export class LlamaServerManager {
   }
 
   private async startWithFallback(
-    buildArgs: (port: number) => string[],
+    buildArgs: (candidate: LlamaServerBackendCandidate, port: number) => string[],
     mode: 'single' | 'router',
     model: string | null,
     describeAttempt: (candidate: LlamaServerBackendCandidate, port: number) => void,
@@ -762,9 +1092,10 @@ export class LlamaServerManager {
           binaryPath: candidate.binaryPath,
           workDir: candidate.workDir,
         });
+        const args = buildArgs(candidate, port);
         describeAttempt(candidate, port);
 
-        launch = this.launchProcess(candidate, buildArgs(port));
+        launch = this.launchProcess(candidate, args);
         this.process = launch.proc;
 
         await this.waitForReady(launch, port);
@@ -827,7 +1158,7 @@ export class LlamaServerManager {
       }
 
       return this.startWithFallback(
-        (port) => {
+        (_candidate, port) => {
           const args: string[] = [
             '-m', modelPath,
             '--host', '127.0.0.1',
@@ -858,7 +1189,7 @@ export class LlamaServerManager {
     maxModels?: number;
     flashAttn?: boolean;
     presetPath?: string;
-  }): Promise<{ port: number }> {
+  }): Promise<{ port: number; capacity: LlamaRouterCapacityDecision }> {
     return this.enqueueLifecycle(async () => {
       if (!fs.existsSync(modelsDir)) {
         appendLlamaServerLog('error', 'Cannot start llama-server router because models directory is missing', {
@@ -867,13 +1198,15 @@ export class LlamaServerManager {
         throw new Error(`Models directory not found: ${modelsDir}`);
       }
 
-      return this.startWithFallback(
-        (port) => {
+      let activeCapacity: LlamaRouterCapacityDecision | null = null;
+      const started = await this.startWithFallback(
+        (candidate, port) => {
+          activeCapacity = this.resolveRouterCapacity(candidate, options?.maxModels);
           const args: string[] = [
             '--host', '127.0.0.1',
             '--port', String(port),
             '--models-dir', modelsDir,
-            '--models-max', String(options?.maxModels ?? 2),
+            '--models-max', String(activeCapacity.maxModels),
           ];
 
           if (options?.presetPath && fs.existsSync(options.presetPath)) {
@@ -889,9 +1222,35 @@ export class LlamaServerManager {
         'router',
         null,
         (candidate, port) => {
-          console.log(`[LlamaServer] Router launch plan: backend=${candidate.label} port=${port} modelsDir=${modelsDir} maxModels=${options?.maxModels ?? 2} flashAttn=${options?.flashAttn !== false} presetPath=${options?.presetPath || '(none)'}`);
+          console.log(`[LlamaServer] Router launch plan: backend=${candidate.label} port=${port} modelsDir=${modelsDir} maxModels=${activeCapacity?.maxModels ?? options?.maxModels ?? 2} flashAttn=${options?.flashAttn !== false} presetPath=${options?.presetPath || '(none)'}`);
+          appendLlamaServerLog('info', 'llama-server router launch plan', {
+            backend: candidate.id,
+            label: candidate.label,
+            port,
+            modelsDir,
+            requestedMaxModels: options?.maxModels ?? 2,
+            maxModels: activeCapacity?.maxModels ?? options?.maxModels ?? 2,
+            allowEmbeddingPrewarm: activeCapacity?.allowEmbeddingPrewarm ?? true,
+            flashAttn: options?.flashAttn !== false,
+            presetPath: options?.presetPath || null,
+            capacity: activeCapacity,
+          });
         },
       );
+      if (!activeCapacity) {
+        activeCapacity = this.resolveRouterCapacity(
+          {
+            id: this.backend || 'unknown',
+            label: this.backend || 'unknown',
+            binaryPath: '',
+            workDir: '',
+            env: process.env,
+          },
+          options?.maxModels,
+        );
+      }
+      this.routerCapacity = activeCapacity;
+      return { ...started, capacity: activeCapacity };
     });
   }
 
@@ -909,6 +1268,7 @@ export class LlamaServerManager {
       model: this.currentModel,
       mode: this.mode,
       backend: this.backend,
+      routerCapacity: this.routerCapacity,
     };
   }
 
