@@ -88,6 +88,11 @@
 - **macOS**: `.dmg`（Apple Silicon + Intel 通用）
 - **Windows**: `.exe` 安装程序（x64）
 
+Windows 用户使用本地 AI 模型前，建议先安装或修复最新版 **Microsoft Visual C++ Redistributable 2015-2022 x64**：
+https://aka.ms/vc14/vc_redist.x64.exe
+
+如果本地模型服务启动失败，并在日志中看到 `llama-server` 退出码 `0xC0000005` / `STATUS_ACCESS_VIOLATION`，请先安装上述运行库，重启 Windows 后再测试。
+
 首次启动时，DeepSeno 会引导你完成环境配置和模型下载。
 
 ### 从源码构建

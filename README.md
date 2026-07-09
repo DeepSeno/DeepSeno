@@ -114,6 +114,11 @@ Pre-built binaries are available on the [Releases](https://github.com/deepseno/d
 - **macOS**: `.dmg` (Apple Silicon + Intel universal)
 - **Windows**: `.exe` installer (x64)
 
+Windows users should install or repair the latest **Microsoft Visual C++ Redistributable 2015-2022 x64** before using local AI models:
+https://aka.ms/vc14/vc_redist.x64.exe
+
+If the local model service fails to start with `llama-server` exit code `0xC0000005` / `STATUS_ACCESS_VIOLATION`, install the runtime above, reboot Windows, then test again.
+
 On first launch, DeepSeno will guide you through environment setup and model downloads.
 
 ## Architecture
