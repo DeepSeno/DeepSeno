@@ -74,15 +74,26 @@ describe('OpenAIClient request timeouts', () => {
   });
 
   it('does not add an internal timeout signal for local model generation', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      choices: [{ message: { content: 'ok' } }],
-    }), { status: 200 }));
+    const fetchMock = vi.fn((url: string | URL | Request) => {
+      const target = String(url);
+      if (target.endsWith('/models')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          data: [{ id: 'Qwen3.5-4B-Q4_K_M' }],
+        }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        choices: [{ message: { content: 'ok' } }],
+      }), { status: 200 }));
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     const client = new OpenAIClient('http://127.0.0.1:8080/v1', '');
 
     await expect(client.generate({ model: 'Qwen3.5-4B-Q4_K_M', prompt: 'hi' })).resolves.toBe('ok');
-    expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('http://127.0.0.1:8080/v1/models');
+    expect(String(fetchMock.mock.calls[1][0])).toBe('http://127.0.0.1:8080/v1/chat/completions');
+    expect(fetchMock.mock.calls[1][1]?.signal).toBeUndefined();
   });
 
   it('keeps a timeout signal for cloud generation', async () => {
