@@ -1193,6 +1193,20 @@ export function registerSystemHandlers(ctx: IpcContext): void {
       });
 
       try {
+        try {
+          await ensureLlamaServer().logBackendVersions('before-gguf-download', {
+            modelId: entry.id,
+            fileName: entry.fileName,
+            expectedBytes: entry.fileSizeBytes,
+            force: Boolean(force),
+          });
+        } catch (versionErr) {
+          logModelDownload('warn', 'llama-server version probe failed before GGUF download; continuing download', {
+            modelId: entry.id,
+            ...errorLogDetails(versionErr),
+          });
+        }
+
         console.log(`[PullModel] Starting download: ${entry.id}`);
         const result = await downloadGGUF(entry.id, ctx, controller.signal, !!force);
         if (result.success) {

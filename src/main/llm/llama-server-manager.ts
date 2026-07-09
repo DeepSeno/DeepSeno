@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import net from 'net';
 import os from 'os';
+import crypto from 'crypto';
 import { loadSettings, updateSettings } from '../settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -105,12 +106,53 @@ interface LaunchState {
   spawnError: Error | null;
   exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
   output: string[];
+  windowsCrashEvents?: WindowsCrashEventDiagnostics[];
 }
 
 interface LaunchedServer {
   proc: ChildProcess;
   state: LaunchState;
   candidate: LlamaServerBackendCandidate;
+}
+
+interface WindowsExitCodeDiagnostics {
+  decimal: number;
+  unsignedDecimal: number;
+  hex: string;
+  name: string;
+  meaning: string;
+  likelyNativeCrash: boolean;
+}
+
+interface WindowsCrashEventDiagnostics {
+  timeCreated?: string;
+  id?: number;
+  providerName?: string;
+  level?: string;
+  faultingApplication?: string | null;
+  faultingModule?: string | null;
+  exceptionCode?: string | null;
+  faultOffset?: string | null;
+  faultingApplicationPath?: string | null;
+  faultingModulePath?: string | null;
+  message: string;
+}
+
+interface LlamaServerVersionProbe {
+  backend: string;
+  label: string;
+  binaryPath: string;
+  workDir: string;
+  reason: string;
+  ok: boolean;
+  durationMs: number;
+  code: number | string | null;
+  signal: unknown;
+  windowsExitCode: WindowsExitCodeDiagnostics | null;
+  stdout?: string;
+  stderr?: string;
+  error?: Record<string, unknown>;
+  windowsCrashEvents?: WindowsCrashEventDiagnostics[];
 }
 
 function mergePathEnv(env: NodeJS.ProcessEnv, dir: string, delimiter: string = path.delimiter): NodeJS.ProcessEnv {
@@ -144,6 +186,244 @@ function bufferLikeToString(value: unknown): string | undefined {
   if (Buffer.isBuffer(value)) return truncateDiagnosticText(value.toString().trim());
   if (typeof value === 'string') return truncateDiagnosticText(value.trim());
   return undefined;
+}
+
+const WINDOWS_EXIT_CODES: Record<number, Omit<WindowsExitCodeDiagnostics, 'decimal' | 'unsignedDecimal' | 'hex'>> = {
+  0xC0000005: {
+    name: 'STATUS_ACCESS_VIOLATION',
+    meaning: 'The process tried to read, write, or execute an invalid memory address.',
+    likelyNativeCrash: true,
+  },
+  0xC000001D: {
+    name: 'STATUS_ILLEGAL_INSTRUCTION',
+    meaning: 'The process executed a CPU instruction that is not supported or not valid on this machine.',
+    likelyNativeCrash: true,
+  },
+  0xC000007B: {
+    name: 'STATUS_INVALID_IMAGE_FORMAT',
+    meaning: 'A binary or DLL has the wrong format, commonly a 32-bit/64-bit or corrupt DLL mismatch.',
+    likelyNativeCrash: false,
+  },
+  0xC00000FD: {
+    name: 'STATUS_STACK_OVERFLOW',
+    meaning: 'The process exhausted its stack.',
+    likelyNativeCrash: true,
+  },
+  0xC0000135: {
+    name: 'STATUS_DLL_NOT_FOUND',
+    meaning: 'A required DLL could not be found during process startup.',
+    likelyNativeCrash: false,
+  },
+  0xC0000139: {
+    name: 'STATUS_ENTRYPOINT_NOT_FOUND',
+    meaning: 'A required DLL entry point could not be found, usually due to a DLL version mismatch.',
+    likelyNativeCrash: false,
+  },
+  0xC0000142: {
+    name: 'STATUS_DLL_INIT_FAILED',
+    meaning: 'A DLL initialization routine failed during process startup.',
+    likelyNativeCrash: false,
+  },
+  0xC0000374: {
+    name: 'STATUS_HEAP_CORRUPTION',
+    meaning: 'The process heap detected memory corruption.',
+    likelyNativeCrash: true,
+  },
+  0xC0000409: {
+    name: 'STATUS_STACK_BUFFER_OVERRUN',
+    meaning: 'The process detected a stack buffer overrun or fail-fast condition.',
+    likelyNativeCrash: true,
+  },
+};
+
+function normalizeWindowsExitCode(code: number): number {
+  return code >>> 0;
+}
+
+function toWindowsExitHex(unsignedCode: number): string {
+  return `0x${unsignedCode.toString(16).toUpperCase().padStart(8, '0')}`;
+}
+
+export function describeWindowsExitCode(code: number | null): WindowsExitCodeDiagnostics | null {
+  if (code === null || code === 0 || !Number.isFinite(code)) return null;
+  const unsignedDecimal = normalizeWindowsExitCode(code);
+  const known = WINDOWS_EXIT_CODES[unsignedDecimal];
+  return {
+    decimal: code,
+    unsignedDecimal,
+    hex: toWindowsExitHex(unsignedDecimal),
+    name: known?.name || 'UNKNOWN_WINDOWS_EXIT_CODE',
+    meaning: known?.meaning || 'Windows returned a non-zero process exit code that is not in the built-in NTSTATUS map.',
+    likelyNativeCrash: known?.likelyNativeCrash ?? unsignedDecimal >= 0x80000000,
+  };
+}
+
+function formatExitCodeForLog(code: number | null): string {
+  const decoded = process.platform === 'win32' ? describeWindowsExitCode(code) : null;
+  if (!decoded) return code === null ? 'null' : String(code);
+  return `${decoded.decimal}/${decoded.hex} ${decoded.name}`;
+}
+
+function hasNonAscii(text: string): boolean {
+  return /[^\x00-\x7F]/.test(text);
+}
+
+function fileSha256(filePath: string): string | null {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function pathDiagnostics(filePath: string): Record<string, unknown> {
+  try {
+    const stat = fs.statSync(filePath);
+    return {
+      path: filePath,
+      exists: true,
+      isFile: stat.isFile(),
+      isDirectory: stat.isDirectory(),
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+      nonAsciiPath: hasNonAscii(filePath),
+      sha256: stat.isFile() ? fileSha256(filePath) : null,
+    };
+  } catch (err) {
+    return {
+      path: filePath,
+      exists: false,
+      nonAsciiPath: hasNonAscii(filePath),
+      error: errorToDiagnostics(err),
+    };
+  }
+}
+
+function directoryFileInventory(dir: string): Record<string, unknown> {
+  try {
+    const files = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => {
+        const filePath = path.join(dir, entry.name);
+        let sizeBytes: number | null = null;
+        let mtime: string | null = null;
+        try {
+          const stat = fs.statSync(filePath);
+          sizeBytes = stat.size;
+          mtime = stat.mtime.toISOString();
+        } catch {
+          // Best-effort inventory only.
+        }
+        return {
+          name: entry.name,
+          extension: path.extname(entry.name).toLowerCase(),
+          sizeBytes,
+          mtime,
+        };
+      });
+    return {
+      dir,
+      exists: true,
+      nonAsciiPath: hasNonAscii(dir),
+      fileCount: files.length,
+      dllFiles: files.filter((file) => file.extension === '.dll').slice(0, 80),
+      exeFiles: files.filter((file) => file.extension === '.exe').slice(0, 40),
+      otherFiles: files.filter((file) => !['.dll', '.exe'].includes(file.extension)).slice(0, 40),
+    };
+  } catch (err) {
+    return {
+      dir,
+      exists: false,
+      nonAsciiPath: hasNonAscii(dir),
+      error: errorToDiagnostics(err),
+    };
+  }
+}
+
+function argumentValue(args: string[], flag: string): string | null {
+  const index = args.indexOf(flag);
+  if (index < 0 || index + 1 >= args.length) return null;
+  return args[index + 1];
+}
+
+function modelDirectoryInventory(dir: string): Record<string, unknown> {
+  try {
+    const files = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => {
+        const filePath = path.join(dir, entry.name);
+        let sizeBytes: number | null = null;
+        let mtime: string | null = null;
+        try {
+          const stat = fs.statSync(filePath);
+          sizeBytes = stat.size;
+          mtime = stat.mtime.toISOString();
+        } catch {
+          // Best-effort inventory only.
+        }
+        return {
+          name: entry.name,
+          extension: path.extname(entry.name).toLowerCase(),
+          sizeBytes,
+          mtime,
+          nonAsciiName: hasNonAscii(entry.name),
+        };
+      });
+    return {
+      dir,
+      exists: true,
+      nonAsciiPath: hasNonAscii(dir),
+      fileCount: files.length,
+      ggufFiles: files.filter((file) => file.extension === '.gguf').slice(0, 80),
+      presetFiles: files.filter((file) => ['.ini', '.json'].includes(file.extension)).slice(0, 40),
+      otherFiles: files.filter((file) => !['.gguf', '.ini', '.json'].includes(file.extension)).slice(0, 40),
+    };
+  } catch (err) {
+    return {
+      dir,
+      exists: false,
+      nonAsciiPath: hasNonAscii(dir),
+      error: errorToDiagnostics(err),
+    };
+  }
+}
+
+function llamaInputDiagnostics(args: string[]): Record<string, unknown> {
+  const singleModelPath = argumentValue(args, '-m') || argumentValue(args, '--model');
+  const modelsDir = argumentValue(args, '--models-dir');
+  const presetPath = argumentValue(args, '--models-preset');
+  return {
+    singleModel: singleModelPath ? pathDiagnostics(singleModelPath) : null,
+    modelsDir: modelsDir ? modelDirectoryInventory(modelsDir) : null,
+    modelsPreset: presetPath ? pathDiagnostics(presetPath) : null,
+    nonAsciiArgs: args.filter((arg) => hasNonAscii(arg)),
+  };
+}
+
+function pathEnvDiagnostics(env: NodeJS.ProcessEnv, workDir: string): Record<string, unknown> {
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH';
+  const rawPath = env[pathKey] || '';
+  const entries = rawPath.split(path.delimiter).filter(Boolean);
+  const normalizedWorkDir = path.normalize(workDir).toLowerCase();
+  return {
+    key: pathKey,
+    length: rawPath.length,
+    entryCount: entries.length,
+    containsWorkDir: entries.some((entry) => path.normalize(entry).toLowerCase() === normalizedWorkDir),
+    firstEntries: entries.slice(0, 8),
+  };
+}
+
+function extractWindowsEventField(message: string, english: string, chinese: string): string | null {
+  const patterns = [
+    new RegExp(`${english}:\\s*([^\\r\\n]+)`, 'i'),
+    new RegExp(`${chinese}:\\s*([^\\r\\n]+)`, 'i'),
+  ];
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match?.[1]) return match[1].trim();
+  }
+  return null;
 }
 
 function errorToDiagnostics(err: unknown): Record<string, unknown> {
@@ -417,6 +697,187 @@ export class LlamaServerManager {
   private backend: string | null = null;
   private routerCapacity: LlamaRouterCapacityDecision | null = null;
   private lifecycleQueue: Promise<void> = Promise.resolve();
+
+  async logBackendVersions(reason: string, details?: Record<string, unknown>): Promise<LlamaServerVersionProbe[]> {
+    const candidates = this.getBackendCandidates();
+    return this.probeBackendVersions(candidates, reason, details);
+  }
+
+  private async probeBackendVersions(
+    candidates: LlamaServerBackendCandidate[],
+    reason: string,
+    details?: Record<string, unknown>,
+  ): Promise<LlamaServerVersionProbe[]> {
+    if (candidates.length === 0) {
+      appendLlamaServerLog('warn', 'Skipping llama-server version probe because no backend candidate is available', {
+        reason,
+        ...(details || {}),
+      });
+      return [];
+    }
+
+    appendLlamaServerLog('info', 'llama-server version probe starting', {
+      reason,
+      ...(details || {}),
+      candidates: candidates.map((candidate, index) => ({
+        order: index + 1,
+        id: candidate.id,
+        label: candidate.label,
+        binaryPath: candidate.binaryPath,
+        workDir: candidate.workDir,
+      })),
+    });
+
+    const probes = await Promise.all(
+      candidates.map((candidate) => this.probeCandidateVersion(candidate, reason, details)),
+    );
+
+    appendLlamaServerLog(
+      probes.every((probe) => probe.ok) ? 'info' : 'warn',
+      'llama-server version probe completed',
+      {
+        reason,
+        ...(details || {}),
+        probes,
+      },
+    );
+    return probes;
+  }
+
+  private async probeCandidateVersion(
+    candidate: LlamaServerBackendCandidate,
+    reason: string,
+    details?: Record<string, unknown>,
+  ): Promise<LlamaServerVersionProbe> {
+    const startedAt = Date.now();
+    return new Promise((resolve) => {
+      execFile(
+        candidate.binaryPath,
+        ['--version'],
+        {
+          cwd: candidate.workDir,
+          env: candidate.env,
+          timeout: 5000,
+          windowsHide: true,
+          encoding: 'utf8',
+        },
+        async (err, stdout, stderr) => {
+          const childError = err as Error & { code?: unknown; signal?: unknown } | null;
+          const numericCode = typeof childError?.code === 'number' ? childError.code : null;
+          const windowsExitCode = numericCode === null ? null : describeWindowsExitCode(numericCode);
+          const windowsCrashEvents = err && process.platform === 'win32'
+            ? await this.collectRecentWindowsCrashEvents(undefined)
+            : [];
+          const probe: LlamaServerVersionProbe = {
+            backend: candidate.id,
+            label: candidate.label,
+            binaryPath: candidate.binaryPath,
+            workDir: candidate.workDir,
+            reason,
+            ok: !err,
+            durationMs: Date.now() - startedAt,
+            code: err ? childError?.code ?? null : 0,
+            signal: childError?.signal ?? null,
+            windowsExitCode,
+            stdout: bufferLikeToString(stdout),
+            stderr: bufferLikeToString(stderr),
+            error: err ? errorToDiagnostics(err) : undefined,
+            windowsCrashEvents,
+          };
+
+          appendLlamaServerLog(
+            probe.ok ? 'info' : 'warn',
+            probe.ok ? 'llama-server --version succeeded' : 'llama-server --version failed',
+            {
+              ...(details || {}),
+              probe,
+            },
+          );
+          resolve(probe);
+        },
+      );
+    });
+  }
+
+  private collectRecentWindowsCrashEvents(pid: number | undefined): Promise<WindowsCrashEventDiagnostics[]> {
+    return new Promise((resolve) => {
+      if (process.platform !== 'win32') {
+        resolve([]);
+        return;
+      }
+
+      const command = [
+        '$ErrorActionPreference = "SilentlyContinue";',
+        '$since = (Get-Date).AddMinutes(-5);',
+        '$events = Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=$since; Id=1000,1001} -ErrorAction SilentlyContinue |',
+        '  Where-Object { $_.Message -match "llama-server\\.exe" } |',
+        '  Sort-Object TimeCreated -Descending |',
+        '  Select-Object -First 5 TimeCreated, Id, ProviderName, LevelDisplayName, Message;',
+        '$events | ConvertTo-Json -Compress -Depth 4',
+      ].join(' ');
+
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', command],
+        { timeout: 4000, windowsHide: true, encoding: 'utf8' },
+        (err, stdout, stderr) => {
+          if (err) {
+            appendLlamaServerLog('warn', 'Failed to query Windows crash events for llama-server', {
+              pid: pid ?? null,
+              error: errorToDiagnostics(err),
+              stderr: truncateDiagnosticText(stderr || ''),
+            });
+            resolve([]);
+            return;
+          }
+
+          try {
+            const raw = stdout.trim();
+            if (!raw) {
+              resolve([]);
+              return;
+            }
+            const parsed = JSON.parse(raw) as unknown;
+            const rows = Array.isArray(parsed) ? parsed : [parsed];
+            const events = rows
+              .map((row) => row as {
+                TimeCreated?: unknown;
+                Id?: unknown;
+                ProviderName?: unknown;
+                LevelDisplayName?: unknown;
+                Message?: unknown;
+              })
+              .filter((row) => typeof row.Message === 'string')
+              .map((row) => {
+                const message = truncateDiagnosticText(String(row.Message), 5000);
+                return {
+                  timeCreated: row.TimeCreated ? String(row.TimeCreated) : undefined,
+                  id: typeof row.Id === 'number' ? row.Id : Number(row.Id || 0) || undefined,
+                  providerName: row.ProviderName ? String(row.ProviderName) : undefined,
+                  level: row.LevelDisplayName ? String(row.LevelDisplayName) : undefined,
+                  faultingApplication: extractWindowsEventField(message, 'Faulting application name', '错误应用程序名称'),
+                  faultingModule: extractWindowsEventField(message, 'Faulting module name', '错误模块名称'),
+                  exceptionCode: extractWindowsEventField(message, 'Exception code', '异常代码'),
+                  faultOffset: extractWindowsEventField(message, 'Fault offset', '错误偏移量'),
+                  faultingApplicationPath: extractWindowsEventField(message, 'Faulting application path', '错误应用程序路径'),
+                  faultingModulePath: extractWindowsEventField(message, 'Faulting module path', '错误模块路径'),
+                  message,
+                };
+              });
+            resolve(events);
+          } catch (parseErr) {
+            appendLlamaServerLog('warn', 'Failed to parse Windows crash event query output', {
+              pid: pid ?? null,
+              stdout: truncateDiagnosticText(stdout || ''),
+              stderr: truncateDiagnosticText(stderr || ''),
+              error: errorToDiagnostics(parseErr),
+            });
+            resolve([]);
+          }
+        },
+      );
+    });
+  }
 
   private listChildPids(pid: number): Promise<number[]> {
     return new Promise((resolve) => {
@@ -839,9 +1300,23 @@ export class LlamaServerManager {
       }
       if (launch.state.exitInfo) {
         const { code, signal } = launch.state.exitInfo;
+        const windowsExitCode = describeWindowsExitCode(code);
+        const windowsCrashEvents = await this.collectRecentWindowsCrashEvents(launch.proc.pid);
+        launch.state.windowsCrashEvents = windowsCrashEvents;
+        appendLlamaServerLog('warn', 'llama-server exited before health check completed', {
+          backend: launch.candidate.id,
+          label: launch.candidate.label,
+          pid: launch.proc.pid ?? null,
+          port,
+          code,
+          signal: signal ?? null,
+          windowsExitCode,
+          windowsCrashEvents,
+          recentOutput: launch.state.output.slice(-20),
+        });
         throw this.describeLaunchFailure(
           launch,
-          `llama-server ${launch.candidate.label} exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+          `llama-server ${launch.candidate.label} exited before ready (code=${formatExitCodeForLog(code)}, signal=${signal ?? 'null'})`,
         );
       }
 
@@ -920,6 +1395,25 @@ export class LlamaServerManager {
 
     console.log(`[LlamaServer] Starting (${candidate.label}): ${candidate.binaryPath} ${args.join(' ')}`);
 
+    appendLlamaServerLog('info', 'llama-server launch diagnostics', {
+      backend: candidate.id,
+      label: candidate.label,
+      platform: process.platform,
+      arch: process.arch,
+      osRelease: os.release(),
+      packaged: Boolean(electronApp?.isPackaged),
+      cwd: process.cwd(),
+      commandLine: [candidate.binaryPath, ...args],
+      binary: pathDiagnostics(candidate.binaryPath),
+      workDir: directoryFileInventory(candidate.workDir),
+      pathEnv: pathEnvDiagnostics(candidate.env, candidate.workDir),
+      input: llamaInputDiagnostics(args),
+      memory: {
+        totalRamGB: bytesToGB(os.totalmem()),
+        freeRamGB: bytesToGB(os.freemem()),
+      },
+    });
+
     const proc = spawn(candidate.binaryPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -965,12 +1459,13 @@ export class LlamaServerManager {
 
     proc.once('exit', (code, signal) => {
       state.exitInfo = { code, signal };
-      console.log(`[LlamaServer] Process exited (${candidate.label}) with code ${code}, signal ${signal ?? 'none'}`);
+      console.log(`[LlamaServer] Process exited (${candidate.label}) with code ${formatExitCodeForLog(code)}, signal ${signal ?? 'none'}`);
       appendLlamaServerLog(code === 0 ? 'info' : 'warn', 'llama-server process exited', {
         backend: candidate.id,
         label: candidate.label,
         pid: proc.pid ?? null,
         code,
+        windowsExitCode: describeWindowsExitCode(code),
         signal: signal ?? null,
         recentOutput: state.output.slice(-20),
       });
@@ -1071,6 +1566,11 @@ export class LlamaServerManager {
       })),
     });
 
+    await this.probeBackendVersions(candidates, 'before-llama-server-start', {
+      mode,
+      model,
+    });
+
     const failures: string[] = [];
     for (const [index, candidate] of candidates.entries()) {
       let port: number | null = null;
@@ -1127,6 +1627,7 @@ export class LlamaServerManager {
           port,
           error: errorToDiagnostics(err),
           recentOutput: launch?.state.output.slice(-20) ?? [],
+          windowsCrashEvents: launch?.state.windowsCrashEvents ?? [],
           willTryNextBackend: index < candidates.length - 1,
         });
         await this.stopInternal();

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import path from 'path';
 
 import {
+  describeWindowsExitCode,
   prioritizeLlamaBackendCandidates,
   resolveLlamaServerBackendCandidates,
   resolveLlamaRouterCapacity,
@@ -41,6 +42,21 @@ describe('llama-server backend resolution', () => {
       'cpu',
     ]);
     expect(candidates[0].env.PATH?.startsWith(path.join(root, 'cuda-13.3'))).toBe(true);
+  });
+
+  it('decodes Windows native crash exit codes for diagnostics', () => {
+    expect(describeWindowsExitCode(3221225477)).toMatchObject({
+      unsignedDecimal: 3221225477,
+      hex: '0xC0000005',
+      name: 'STATUS_ACCESS_VIOLATION',
+      likelyNativeCrash: true,
+    });
+    expect(describeWindowsExitCode(-1073741819)).toMatchObject({
+      unsignedDecimal: 3221225477,
+      hex: '0xC0000005',
+      name: 'STATUS_ACCESS_VIOLATION',
+    });
+    expect(describeWindowsExitCode(null)).toBeNull();
   });
 
   it('skips CUDA on Windows when no NVIDIA GPU is detected', () => {
